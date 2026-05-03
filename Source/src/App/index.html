@@ -87,7 +87,7 @@
           </div>
         </header>
         <section id="avatarGrid" class="avatar-grid"></section>
-        <section id="emptyState" class="empty-state" hidden><h3>No avatars here yet</h3><p>Add one by avatar ID, pasted metadata, or manual fields.</p></section>
+        <section id="emptyState" class="empty-state" hidden><h3>No avatars in this group</h3><p>Add or save an avatar to show it here.</p></section>
         <footer id="avatarPagination" class="database-pagination" hidden><button id="avatarPrevPageBtn" type="button">Previous</button><button id="avatarPageStatus" class="page-jump-button" type="button"></button><button id="avatarNextPageBtn" type="button">Next</button></footer>
       </section>
       <section id="databasePage" class="workspace-page" hidden>
@@ -129,7 +129,7 @@
           </div>
         </header>
         <section id="avatarDatabaseResults" class="avatar-grid"></section>
-        <section id="avatarDatabaseEmptyState" class="empty-state"><h3>No database results</h3><p>Start typing at least three characters to search cached VRCX avatars.</p></section>
+        <section id="avatarDatabaseEmptyState" class="empty-state"><h3>No database results</h3><p>Search at least three characters to show matches.</p></section>
         <footer id="avatarDatabasePagination" class="database-pagination" hidden><button id="databasePrevPageBtn" type="button">Previous</button><button id="databasePageStatus" class="page-jump-button" type="button"></button><button id="databaseNextPageBtn" type="button">Next</button></footer>
       </section>
       <aside id="avatarDetailsPanel" class="avatar-details-panel" hidden>
@@ -202,6 +202,7 @@
   <dialog id="confirmDeleteDialog" class="confirm-dialog"><form method="dialog" class="dialog-form"><header><h3 id="confirmDialogTitle">Delete</h3><button type="button" class="icon-button" data-close="confirmDeleteDialog">x</button></header><p id="confirmDeleteMessage" class="confirm-message"></p><menu><button id="cancelConfirmBtn" type="button">Cancel</button><button id="runConfirmBtn" type="button" class="danger">Delete</button></menu></form></dialog>
   <dialog id="importDialog" class="wide-dialog"><form method="dialog" class="dialog-form wide"><header><h3>Import Library</h3><button type="button" class="icon-button" data-close="importDialog">x</button></header><label id="importDropZone" class="import-drop-zone">JSON<textarea id="importJsonInput" rows="12" spellcheck="false"></textarea></label><menu><button type="button" data-close="importDialog">Cancel</button><button id="runImportBtn" class="primary">Import</button></menu></form></dialog>
   <div id="toast" role="status" aria-live="polite"></div>
+  <div id="zoomIndicator" class="zoom-indicator" role="status" aria-live="polite" hidden>100%</div>
   <div id="contextMenu" class="context-menu" hidden></div>
   <script src="app.js"></script>
 </body>

@@ -182,6 +182,7 @@ internal static class Program
                 "saveAvatar" => Store.SaveAvatar(GetPayload<AvatarInput>(request)),
                 "deleteAvatar" => Store.DeleteAvatar(GetPayload<IdInput>(request).Id),
                 "moveAvatar" => Store.MoveAvatar(GetPayload<MoveAvatarInput>(request)),
+                "copyAvatar" => Store.CopyAvatar(GetPayload<MoveAvatarInput>(request)),
                 "reorderAvatar" => Store.ReorderAvatar(GetPayload<ReorderInput>(request)),
                 "backupGroup" => Store.BackupGroup(GetPayload<IdInput>(request).Id),
                 "applySyncedAvatarOrder" => await Store.ApplySyncedGroupAvatarOrderAsync(GetPayload<SyncedAvatarOrderInput>(request), VrChat),
@@ -511,12 +512,8 @@ internal sealed class AvatarStore
         lock (_gate)
         {
             var lib = Load();
-            var group = lib.Groups.FirstOrDefault(x => x.Id == input.Id) ?? throw new InvalidOperationException("Group not found.");
-            if (!IsDefaultReorderLockedGroupId(group.Id)) throw new InvalidOperationException("Only VRChat and system groups have a reorder lock.");
-            group.ReorderLocked = input.ReorderLocked;
-            group.UpdatedAt = DateTimeOffset.UtcNow;
-            Save(lib);
-            return lib;
+            _ = lib.Groups.FirstOrDefault(x => x.Id == input.Id) ?? throw new InvalidOperationException("Group not found.");
+            throw new InvalidOperationException("Only local groups can be reordered. VRChat and system groups stay pinned.");
         }
     }
     public LibraryData ReorderGroup(ReorderInput input)
@@ -597,10 +594,26 @@ internal sealed class AvatarStore
             var lib = Load();
             var avatar = lib.Avatars.FirstOrDefault(x => x.Id == input.AvatarId) ?? throw new InvalidOperationException("Avatar not found.");
             if (lib.Groups.All(x => x.Id != input.GroupId)) throw new InvalidOperationException("Choose a valid group.");
+            if (AvatarExistsInGroup(lib, input.GroupId, avatar.AvatarId, avatar.Id)) throw new InvalidOperationException("That avatar is already in the group.");
             EnsureSyncedGroupCapacity(lib, input.GroupId, avatar.Id, avatar.AvatarId);
             avatar.GroupId = input.GroupId;
             avatar.Order = NextAvatarOrder(lib, input.GroupId);
             avatar.UpdatedAt = DateTimeOffset.UtcNow;
+            Save(lib);
+            return lib;
+        }
+    }
+    public LibraryData CopyAvatar(MoveAvatarInput input)
+    {
+        lock (_gate)
+        {
+            var lib = Load();
+            var avatar = lib.Avatars.FirstOrDefault(x => x.Id == input.AvatarId) ?? throw new InvalidOperationException("Avatar not found.");
+            if (lib.Groups.All(x => x.Id != input.GroupId)) throw new InvalidOperationException("Choose a valid group.");
+            if (AvatarExistsInGroup(lib, input.GroupId, avatar.AvatarId, avatar.Id)) throw new InvalidOperationException("That avatar is already in the group.");
+            EnsureSyncedGroupCapacity(lib, input.GroupId, "", avatar.AvatarId);
+            var now = DateTimeOffset.UtcNow;
+            lib.Avatars.Add(CloneAvatar(avatar, input.GroupId, now, NextAvatarOrder(lib, input.GroupId)));
             Save(lib);
             return lib;
         }
@@ -1253,10 +1266,10 @@ internal sealed class AvatarStore
         groupId.Equals(RecentAvatarGroupId, StringComparison.OrdinalIgnoreCase) ||
         groupId.Equals(DeletedAvatarGroupId, StringComparison.OrdinalIgnoreCase);
     private static bool IsDefaultReorderLockedGroupId(string groupId) => IsSyncedGroupId(groupId) || IsPinnedSystemGroupId(groupId);
-    private static bool IsGroupReorderLocked(AvatarGroup group) => group.ReorderLocked ?? IsDefaultReorderLockedGroupId(group.Id);
+    private static bool IsGroupReorderLocked(AvatarGroup group) => IsDefaultReorderLockedGroupId(group.Id);
     private static void EnsureDefaultReorderLocks(LibraryData lib)
     {
-        foreach (var group in lib.Groups.Where(x => x.ReorderLocked is null && IsDefaultReorderLockedGroupId(x.Id)))
+        foreach (var group in lib.Groups.Where(x => IsDefaultReorderLockedGroupId(x.Id)))
         {
             group.ReorderLocked = true;
         }
@@ -1264,7 +1277,12 @@ internal sealed class AvatarStore
     private static void NormalizeOrders(LibraryData lib)
     {
         var order = 0;
-        lib.Groups = lib.Groups.OrderBy(x => x.Order).ThenBy(x => x.CreatedAt).ToList();
+        lib.Groups = lib.Groups
+            .OrderBy(GroupBucket)
+            .ThenBy(GroupBucketOrder)
+            .ThenBy(x => x.Order)
+            .ThenBy(x => x.CreatedAt)
+            .ToList();
         foreach (var group in lib.Groups) group.Order = order++;
         foreach (var set in lib.Avatars.GroupBy(x => x.GroupId))
         {
@@ -1285,11 +1303,10 @@ internal sealed class AvatarStore
     }
     private static int GroupBucket(AvatarGroup group)
     {
-        if (!IsGroupReorderLocked(group)) return 1;
         if (IsSyncedGroupId(group.Id)) return 0;
-        if (group.Id.Equals(RecentAvatarGroupId, StringComparison.OrdinalIgnoreCase)) return 3;
-        if (group.Id.Equals(DeletedAvatarGroupId, StringComparison.OrdinalIgnoreCase)) return 4;
-        return 2;
+        if (group.Id.Equals(RecentAvatarGroupId, StringComparison.OrdinalIgnoreCase)) return 2;
+        if (group.Id.Equals(DeletedAvatarGroupId, StringComparison.OrdinalIgnoreCase)) return 3;
+        return 1;
     }
     private static int GroupBucketOrder(AvatarGroup group)
     {
@@ -1301,6 +1318,18 @@ internal sealed class AvatarStore
         group.Name.Equals("Favorites", StringComparison.OrdinalIgnoreCase);
     private static int NextGroupOrder(LibraryData lib) => lib.Groups.Count == 0 ? 0 : lib.Groups.Max(x => x.Order) + 1;
     private static int NextAvatarOrder(LibraryData lib, string groupId) => lib.Avatars.Where(x => x.GroupId == groupId).DefaultIfEmpty().Max(x => x?.Order ?? -1) + 1;
+    private static bool AvatarExistsInGroup(LibraryData lib, string groupId, string? avatarId, string? excludeId = null)
+    {
+        var ids = new[] { avatarId, excludeId }
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x!.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (ids.Count == 0) return false;
+        return lib.Avatars.Any(x =>
+            !x.Id.Equals(excludeId ?? "", StringComparison.OrdinalIgnoreCase) &&
+            x.GroupId.Equals(groupId, StringComparison.OrdinalIgnoreCase) &&
+            (ids.Contains(x.AvatarId ?? "") || ids.Contains(x.Id)));
+    }
     private static string UniqueGroupName(LibraryData lib, string? baseName)
     {
         var clean = string.IsNullOrWhiteSpace(baseName) ? "Imported Group" : baseName.Trim();
