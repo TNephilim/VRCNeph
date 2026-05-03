@@ -20,6 +20,8 @@ const state = {
   avatarDatabaseProvider: "all",
   avatarDatabaseTotal: null,
   avatarDatabaseCounting: false,
+  avatarDatabaseLoading: false,
+  avatarDatabaseSearched: false,
   avatarDatabaseMode: "search",
   avatarDatabaseRandomPages: [],
   pasUpdatePromptShown: false,
@@ -454,9 +456,8 @@ function renderAvatars() {
     card.dataset.avatarId = avatar.id;
     card.draggable = canReorderCurrentGroup || syncedReorderBlocked;
     const image = avatar.thumbnailImageUrl || avatar.imageUrl;
-    const releaseClass = String(avatar.releaseStatus ?? "").toLowerCase() === "public" ? "public" : "private";
     const reorderTitle = canReorderCurrentGroup ? "Drag to reorder" : "Enable edit mode to reorder synced avatars";
-    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="meta-line">${escapeHtml(avatar.avatarId || avatar.id)}</div><div class="badges">${avatar.releaseStatus ? `<span class="badge ${releaseClass}">${escapeHtml(avatar.releaseStatus)}</span>` : ""}${platformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}</div></div></button><div class="avatar-card-footer"><button class="avatar-position" type="button" title="${reorderTitle}" ${canReorderCurrentGroup ? "" : "disabled"}>#${listPosition(orderedAvatars, avatar.id)}</button><button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
+    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="meta-line">${escapeHtml(avatar.avatarId || avatar.id)}</div><div class="badges">${platformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}</div></div></button><div class="avatar-card-footer"><button class="avatar-position" type="button" title="${reorderTitle}" ${canReorderCurrentGroup ? "" : "disabled"}>#${listPosition(orderedAvatars, avatar.id)}</button><button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
     card.querySelector("button").addEventListener("click", () => openAvatarDialog(avatar));
     if (canReorderCurrentGroup) card.querySelector(".avatar-position").addEventListener("click", () => openPositionDialog("avatar", avatar));
     card.querySelector(".avatar-card-equip").addEventListener("click", (event) => { event.stopPropagation(); equipAvatar(avatar.avatarId || avatar.id); });
@@ -589,6 +590,15 @@ function platformBadgeLabels(value) {
   }
   return labels;
 }
+function databasePlatformBadgeLabels(value) {
+  const labels = [];
+  for (const item of splitBadgeValues(value)) {
+    const lower = item.toLowerCase();
+    const label = lower.includes("standalonewindows") || /\b(windows|pc)\b/.test(lower) ? "PC" : lower.includes("android") || lower.includes("quest") ? "Quest" : lower.includes("ios") ? "iOS" : "";
+    if (label && !labels.some((x) => x.label.toLowerCase() === label.toLowerCase())) labels.push({ label, className: label.toLowerCase() === "pc" ? "platform-pc" : label.toLowerCase() === "quest" ? "platform-quest" : "platform-ios" });
+  }
+  return labels;
+}
 
 function openGroupDialog(group = null) {
   if (group && (isPinnedSystemGroup(group.id) || isSyncedGroup(group.id))) return;
@@ -676,7 +686,7 @@ function updateAvatarDetailBadges() {
 function avatarSourceLabels(source) {
   const labels = [];
   for (const part of String(source || "").split(/[,+|;]/).map((x) => x.trim()).filter(Boolean)) {
-    const label = part === "vrchat" ? "VRChat" : part === "avatar-database" ? "VRCX DB" : part === "avtrzip" ? "AVTRZIP" : part === "pas" ? "Prismic PAS" : part === "vrchat-recent" ? "Recent" : "";
+    const label = part === "vrchat" ? "VRChat" : part === "avatar-database" ? "VRCX" : part === "avtrzip" ? "AVTRZIP" : part === "pas" ? "Prismic" : part === "vrchat-recent" ? "Recent" : "";
     if (label && !labels.includes(label)) labels.push(label);
   }
   return labels;
@@ -718,6 +728,8 @@ function clearAvatarDatabaseSearch() {
   state.avatarDatabaseAuthorId = "";
   state.avatarDatabaseTotal = null;
   state.avatarDatabaseCounting = false;
+  state.avatarDatabaseLoading = false;
+  state.avatarDatabaseSearched = false;
   state.avatarDatabaseMode = "search";
   state.avatarDatabaseRandomPages = [];
   $("avatarDatabaseSearchInput").value = "";
@@ -734,8 +746,8 @@ function avatarDatabaseProviderLabel(provider = avatarDatabaseProvider()) {
   return provider === "avtrzip" ? "AVTRZIP" : provider === "pas" ? "Prismic PAS" : "VRCX DB";
 }
 function avatarDatabaseProviderDescription(provider = avatarDatabaseProvider()) {
-  if (provider === "all") return "Search VRCX DB, AVTRZIP, and Prismic PAS.";
-  return provider === "avtrzip" ? "Search the remote AVTRZIP avatar database." : provider === "pas" ? "Search the Prismic AvatarSearch PAS database." : "Search the local VRCX avatar database.";
+  if (provider === "all") return "Search AVTRZIP, Prismic PAS, and VRCX DB.";
+  return provider === "avtrzip" ? "Search the remote AVTRZIP avatar database." : provider === "pas" ? "Search the Prismic AvatarSearch PAS database." : "Search the remote VRCX-compatible avatar database.";
 }
 function updateAvatarDatabaseCopy() {
   const provider = avatarDatabaseProvider();
@@ -749,7 +761,23 @@ function updateAvatarDatabaseCopy() {
       ? "Enter a search, then press Search or Enter to search Prismic PAS."
     : provider === "all"
       ? "Enter a search, then press Search or Enter to search every database."
-    : "Start typing at least three characters to search cached VRCX avatars.";
+    : "Start typing at least three characters to search VRCX-compatible avatars.";
+}
+async function maybeShowVrcxDatabaseNotice() {
+  if (avatarDatabaseProvider() !== "vrcx") return;
+  try {
+    const status = await api("avatarDatabaseVrcxStatus");
+    if (status?.hasLocalDatabase) return;
+    await confirmAction({
+      title: "Local VRCX Database Not Found",
+      message: "No local VRCX database was found. VRCNeph will still use remote VRCX search, so VRCX is not required for database search. VRCX is only needed if you want it to build or update its own local cache outside VRCNeph.",
+      confirmLabel: "OK",
+      confirmClass: "primary",
+      hideCancel: true
+    });
+  } catch (e) {
+    toast(e.message);
+  }
 }
 function resetAvatarDatabaseResults() {
   clearTimeout(state.avatarDatabaseSearchTimer);
@@ -760,6 +788,8 @@ function resetAvatarDatabaseResults() {
   state.avatarDatabaseQuery = "";
   state.avatarDatabaseTotal = null;
   state.avatarDatabaseCounting = false;
+  state.avatarDatabaseLoading = false;
+  state.avatarDatabaseSearched = false;
   state.avatarDatabaseMode = "search";
   state.avatarDatabaseRandomPages = [];
   renderAvatarDatabaseResults();
@@ -853,6 +883,8 @@ async function runAvatarDatabaseSearch(page = 0) {
     state.avatarDatabaseAuthorId = "";
     state.avatarDatabaseTotal = null;
     state.avatarDatabaseCounting = false;
+    state.avatarDatabaseLoading = false;
+    state.avatarDatabaseSearched = false;
     state.avatarDatabaseMode = "search";
     state.avatarDatabaseRandomPages = [];
     renderAvatarDatabaseResults();
@@ -866,6 +898,8 @@ async function runAvatarDatabaseSearch(page = 0) {
     state.avatarDatabaseQuery = query;
     state.avatarDatabaseTotal = null;
     state.avatarDatabaseCounting = false;
+    state.avatarDatabaseLoading = false;
+    state.avatarDatabaseSearched = false;
     state.avatarDatabaseMode = "search";
     state.avatarDatabaseRandomPages = [];
     renderAvatarDatabaseResults();
@@ -874,7 +908,14 @@ async function runAvatarDatabaseSearch(page = 0) {
   }
   $("databasePrevPageBtn").disabled = true;
   $("databaseNextPageBtn").disabled = true;
-  $("avatarDatabaseStatus").textContent = page > 0 ? `Loading ${providerLabel} page ${page + 1}...` : `Searching ${providerLabel}...`;
+  state.avatarDatabaseLoading = true;
+  renderAvatarDatabaseResults();
+  $("avatarDatabaseStatus").textContent = page > 0
+    ? `Loading ${providerLabel} page ${page + 1}...`
+    : state.avatarDatabaseProvider === "all"
+      ? "Searching all databases..."
+      : `Searching ${providerLabel}...`;
+  await new Promise((resolve) => setTimeout(resolve, state.avatarDatabaseProvider === "all" ? 50 : 0));
   try {
     const result = await api("avatarDatabaseSearch", databaseSearchPayload(query, page));
     if (token !== state.avatarDatabaseSearchToken) return;
@@ -884,11 +925,13 @@ async function runAvatarDatabaseSearch(page = 0) {
     state.avatarDatabaseQuery = query;
     state.avatarDatabaseMode = "search";
     state.avatarDatabaseRandomPages = [];
-    state.avatarDatabaseTotal = page === 0 ? null : state.avatarDatabaseTotal;
-    state.avatarDatabaseCounting = page === 0 && state.avatarDatabaseResults.length > 0;
+    state.avatarDatabaseTotal = Number(result.total) > 0 ? Number(result.total) : page === 0 ? null : state.avatarDatabaseTotal;
+    state.avatarDatabaseCounting = page === 0 && state.avatarDatabaseResults.length > 0 && state.avatarDatabaseTotal == null;
+    state.avatarDatabaseLoading = false;
+    state.avatarDatabaseSearched = true;
     renderAvatarDatabaseResults();
     updateAvatarDatabaseStatus();
-    if (page === 0 && state.avatarDatabaseResults.length) countAvatarDatabaseTotal(query, token, databaseSearchPayload(query, 0));
+    if (page === 0 && state.avatarDatabaseResults.length && state.avatarDatabaseTotal == null && !["all", "vrcx"].includes(avatarDatabaseProvider())) countAvatarDatabaseTotal(query, token, databaseSearchPayload(query, 0));
   } catch (e) { handleAvatarDatabaseError(e, token); }
   finally { }
 }
@@ -898,6 +941,8 @@ async function runRandomAvatarDatabasePage() {
   const providerLabel = avatarDatabaseProviderLabel();
   $("databasePrevPageBtn").disabled = true;
   $("databaseNextPageBtn").disabled = true;
+  state.avatarDatabaseLoading = true;
+  renderAvatarDatabaseResults();
   $("avatarDatabaseStatus").textContent = `Loading random ${providerLabel} avatars...`;
   try {
     const result = await api("avatarDatabaseRandom", { provider: avatarDatabaseProvider(), query: "", limit: 50, page: 1 });
@@ -911,6 +956,8 @@ async function runRandomAvatarDatabasePage() {
     state.avatarDatabaseQuery = "";
     state.avatarDatabaseTotal = state.avatarDatabaseResults.length;
     state.avatarDatabaseCounting = false;
+    state.avatarDatabaseLoading = false;
+    state.avatarDatabaseSearched = true;
     renderAvatarDatabaseResults();
     $("avatarDatabaseStatus").textContent = `${state.avatarDatabaseTotal} random ${providerLabel} avatars loaded.`;
   } catch (e) {
@@ -922,6 +969,12 @@ function updateAvatarDatabaseStatus() {
   const providerLabel = avatarDatabaseProviderLabel(state.avatarDatabaseProvider);
   if (!count) { $("avatarDatabaseStatus").textContent = `No ${providerLabel} avatars found.`; return; }
   if (state.avatarDatabaseTotal == null) {
+    if (state.avatarDatabaseProvider === "all") {
+      $("avatarDatabaseStatus").textContent = state.avatarDatabaseCounting
+        ? "Counting total all databases avatars..."
+        : `${state.avatarDatabasePage * 50 + count} all databases avatars shown.`;
+      return;
+    }
     const estimate = state.avatarDatabaseHasMore ? `${Math.max((state.avatarDatabasePage + 2) * 50, count)}+` : String(state.avatarDatabasePage * 50 + count);
     $("avatarDatabaseStatus").textContent = `${estimate} total ${providerLabel} avatars found.`;
     return;
@@ -945,6 +998,8 @@ async function countAvatarDatabaseTotal(query, token, payload) {
 }
 function handleAvatarDatabaseError(error, token) {
   if (token !== state.avatarDatabaseSearchToken) return;
+  state.avatarDatabaseLoading = false;
+  state.avatarDatabaseSearched = true;
   const message = error?.message || String(error || "Database search failed.");
   $("avatarDatabaseStatus").textContent = message;
   toast(message);
@@ -970,19 +1025,64 @@ function currentAvatarDatabasePageResults() {
 }
 function sortedAvatarDatabaseResults() {
   const sort = $("databaseSortSelect").value;
-  const results = [...currentAvatarDatabasePageResults()];
+  const results = dedupeAvatarDatabaseResults(currentAvatarDatabasePageResults());
   if (sort === "updatedDesc") return results.sort((a, b) => new Date(b.remoteUpdatedAt || b.updatedAt || 0) - new Date(a.remoteUpdatedAt || a.updatedAt || 0));
   if (sort === "createdDesc") return results.sort((a, b) => new Date(b.remoteCreatedAt || b.createdAt || 0) - new Date(a.remoteCreatedAt || a.createdAt || 0));
   if (sort === "nameAsc") return results.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
   if (sort === "authorAsc") return results.sort((a, b) => (a.authorName || "").localeCompare(b.authorName || ""));
   return results;
 }
+function dedupeAvatarDatabaseResults(results) {
+  const merged = [];
+  const byDuplicateKey = new Map();
+  for (const avatar of results || []) {
+    const keys = avatarDuplicateKeys(avatar);
+    const existing = keys.map((key) => byDuplicateKey.get(key)).find(Boolean);
+    if (!existing) {
+      for (const key of keys) byDuplicateKey.set(key, avatar);
+      merged.push(avatar);
+      continue;
+    }
+    existing.source = mergeTextList(existing.source, avatar.source, /[,+|;]/);
+    existing.platforms = mergeTextList(existing.platforms, avatar.platforms, /,/);
+    existing.tags = mergeTextList(existing.tags, avatar.tags, /,/);
+    for (const field of ["name", "authorName", "authorId", "description", "releaseStatus", "version", "sourceUrl", "rawJson", "remoteCreatedAt", "remoteUpdatedAt"]) {
+      if (!String(existing[field] || "").trim() && String(avatar[field] || "").trim()) existing[field] = avatar[field];
+    }
+    if (!String(existing.imageUrl || "").trim() && String(avatar.imageUrl || "").trim()) existing.imageUrl = avatar.imageUrl;
+    if (!String(existing.thumbnailImageUrl || "").trim()) existing.thumbnailImageUrl = avatar.thumbnailImageUrl || avatar.imageUrl || "";
+  }
+  return merged;
+}
+function avatarDuplicateKeys(avatar) {
+  const keys = [];
+  const id = String(avatar?.avatarId || avatar?.id || "").trim().toLowerCase();
+  if (id) keys.push(`id:${id}`);
+  const name = normalizeDuplicateText(avatar?.name);
+  const image = normalizeDuplicateImageUrl(avatar?.thumbnailImageUrl || avatar?.imageUrl);
+  if (name && image) {
+    const author = normalizeDuplicateText(avatar?.authorName);
+    keys.push(`visual:${name}|${author}|${image}`, `visual-name:${name}|${image}`);
+  }
+  const authorName = normalizeDuplicateText(avatar?.authorName);
+  if (name && authorName) keys.push(`name-author:${name}|${authorName}`);
+  return keys;
+}
+function normalizeDuplicateText(value) {
+  return String(value || "").replace(/[^a-z0-9]/gi, "").trim().toLowerCase();
+}
+function normalizeDuplicateImageUrl(value) {
+  return String(value || "").trim().split("?")[0].replace(/\/+$/, "").toLowerCase();
+}
+function mergeTextList(a, b, splitter) {
+  return [...new Set([...(String(a || "").split(splitter)), ...(String(b || "").split(splitter))].map((x) => x.trim()).filter(Boolean))].join(", ");
+}
 function renderAvatarDatabaseResults() {
   const allResults = sortedAvatarDatabaseResults();
   const results = allResults;
   const grid = $("avatarDatabaseResults");
   grid.innerHTML = "";
-  $("avatarDatabaseEmptyState").hidden = allResults.length !== 0;
+  $("avatarDatabaseEmptyState").hidden = state.avatarDatabaseLoading || !state.avatarDatabaseSearched || allResults.length !== 0;
   const databaseMax = databaseMaxPage("database");
   const hasMultipleDatabasePages = state.avatarDatabasePage > 0 || state.avatarDatabaseHasMore || databaseMax > 1;
   $("avatarDatabasePagination").hidden = !hasMultipleDatabasePages;
@@ -992,11 +1092,10 @@ function renderAvatarDatabaseResults() {
   $("databasePageStatus").textContent = allResults.length ? `Page ${state.avatarDatabasePage + 1}${totalText}` : "";
   for (const avatar of results) {
     const image = avatar.thumbnailImageUrl || avatar.imageUrl;
-    const releaseClass = String(avatar.releaseStatus ?? "").toLowerCase() === "public" ? "public" : "private";
     const card = document.createElement("article");
     card.className = "avatar-card";
     card.dataset.avatarId = avatar.avatarId || avatar.id;
-    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name || avatar.avatarId)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="meta-line">${escapeHtml(avatar.avatarId || avatar.id)}</div><div class="badges">${avatar.releaseStatus ? `<span class="badge ${releaseClass}">${escapeHtml(avatar.releaseStatus)}</span>` : ""}${platformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}${avatarSourceBadgeHtml(avatar.source)}</div></div></button>`;
+    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name || avatar.avatarId)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="meta-line">${escapeHtml(avatar.avatarId || avatar.id)}</div><div class="badges">${databasePlatformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}${avatarSourceBadgeHtml(avatar.source)}</div></div></button>`;
     card.querySelector("button").addEventListener("click", () => openAvatarDialog({ ...avatar, groupId: state.activeGroupId }));
     card.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -1079,7 +1178,7 @@ function showContextMenu(x, y, actions) {
     action.action();
   }));
 }
-function hideContextMenu() { $("contextMenu").hidden = true; hideSortMenu(); hideSortMenu("databaseSortMenu", "databaseSortMenuBtn"); hideSortMenu("groupFilterMenu", "groupFilterMenuBtn"); }
+function hideContextMenu() { $("contextMenu").hidden = true; hideSortMenu(); hideSortMenu("databaseSortMenu", "databaseSortMenuBtn"); hideSortMenu("groupFilterMenu", "groupFilterMenuBtn"); hideSortMenu("avatarDatabaseProviderMenu", "avatarDatabaseProviderMenuBtn"); }
 function renderSortMenu(selectId = "sortSelect", menuId = "sortMenu", buttonId = "sortMenuBtn", onChange = resetAvatarPageAndRender) {
   const select = $(selectId);
   const menu = $(menuId);
@@ -1998,10 +2097,12 @@ $("clearAvatarDatabaseBtn").addEventListener("click", clearAvatarDatabaseSearch)
 $("avatarDatabaseProviderMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "avatarDatabaseProviderSelect", "avatarDatabaseProviderMenu", "avatarDatabaseProviderMenuBtn", () => {
   state.avatarDatabaseProvider = avatarDatabaseProvider();
   resetAvatarDatabaseResults();
+  maybeShowVrcxDatabaseNotice();
 }));
 $("avatarDatabaseProviderSelect").addEventListener("change", () => {
   state.avatarDatabaseProvider = avatarDatabaseProvider();
   resetAvatarDatabaseResults();
+  maybeShowVrcxDatabaseNotice();
 });
 ["databaseSearchAvatarToggle", "databaseSearchAuthorToggle", "databaseSearchDescriptionToggle", "databaseSearchTagsToggle"].forEach((id) => $(id).addEventListener("change", () => { state.avatarDatabaseAuthorId = ""; }));
 $("randomAvatarDatabaseBtn").addEventListener("click", runRandomAvatarDatabasePage);

@@ -92,7 +92,7 @@
       </section>
       <section id="databasePage" class="workspace-page" hidden>
         <header class="toolbar">
-          <div class="toolbar-title"><h2>Database Search</h2><p id="avatarDatabaseStatus">Search VRCX DB, AVTRZIP, and Prismic PAS.</p></div>
+          <div class="toolbar-title"><h2>Database Search</h2><p id="avatarDatabaseStatus">Search AVTRZIP, Prismic PAS, and VRCX DB.</p></div>
           <div class="toolbar-actions database-toolbar-actions">
             <input id="avatarDatabaseSearchInput" type="search" placeholder="Search all databases">
             <button id="searchAvatarDatabaseBtn" type="button" class="primary">Search</button>
@@ -102,9 +102,9 @@
               <div id="avatarDatabaseProviderMenu" class="sort-menu" hidden></div>
               <select id="avatarDatabaseProviderSelect" class="database-provider-select" title="Database source" aria-label="Database source" hidden>
                 <option value="all" selected>All Databases</option>
-                <option value="vrcx">VRCX DB</option>
                 <option value="avtrzip">AVTRZIP</option>
                 <option value="pas">Prismic PAS</option>
+                <option value="vrcx">VRCX DB</option>
               </select>
             </div>
             <div class="sort-control">
@@ -129,7 +129,7 @@
           </div>
         </header>
         <section id="avatarDatabaseResults" class="avatar-grid"></section>
-        <section id="avatarDatabaseEmptyState" class="empty-state"><h3>No database results</h3><p>Search at least three characters to show matches.</p></section>
+        <section id="avatarDatabaseEmptyState" class="empty-state" hidden><h3>No database results</h3><p>Search at least three characters to show matches.</p></section>
         <footer id="avatarDatabasePagination" class="database-pagination" hidden><button id="databasePrevPageBtn" type="button">Previous</button><button id="databasePageStatus" class="page-jump-button" type="button"></button><button id="databaseNextPageBtn" type="button">Next</button></footer>
       </section>
       <aside id="avatarDetailsPanel" class="avatar-details-panel" hidden>

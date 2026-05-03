@@ -207,8 +207,9 @@ internal static class Program
                 "settingsSave" => Settings.Save(GetPayload<AppSettings>(request)),
                 "backgroundGet" => Background.GetBackground(),
                 "avatarDatabaseSearch" => await AvatarDatabase.SearchAsync(GetPayload<AvatarSearchInput>(request), VrChat),
-                "avatarDatabaseCount" => await AvatarDatabase.CountAsync(GetPayload<AvatarSearchInput>(request), VrChat),
+                "avatarDatabaseCount" => await AvatarDatabase.CountAsync(GetPayload<AvatarSearchInput>(request)),
                 "avatarDatabaseRandom" => await AvatarDatabase.RandomAsync(GetPayload<AvatarSearchInput>(request), VrChat),
+                "avatarDatabaseVrcxStatus" => AvatarDatabase.GetVrcxStatus(),
                 "avatarDatabasePasUpdateStatus" => await AvatarDatabase.GetPasUpdateStatusAsync(),
                 "avatarDatabasePasUpdate" => await AvatarDatabase.UpdatePasDatabaseAsync(),
                 "appVersion" => AppUpdateClient.CurrentVersionInfo(UpdateRepositoryOwner, UpdateRepositoryName),
@@ -431,7 +432,7 @@ internal sealed class AvatarStore
         }
         else
         {
-            SaveSplitFiles(Load());
+            Save(Load());
         }
     }
 
@@ -714,7 +715,7 @@ internal sealed class AvatarStore
             var group = lib.Groups.FirstOrDefault(x => x.Id == id) ?? throw new InvalidOperationException("Group not found.");
             var summary = GroupSummary(group, lib.Avatars.Where(x => x.GroupId == id).OrderBy(x => x.Order));
             Directory.CreateDirectory(_exportDirectory);
-            var path = Path.Combine(_exportDirectory, $"{SafeFileName(group.Name)}-{group.Id}.json");
+            var path = UniqueBackupPath(_exportDirectory, $"{SafeFileNameOrDefault(group.Name, "Group")}.json");
             File.WriteAllText(path, JsonSerializer.Serialize(summary, ProgramJson.Options));
             return new ExportResult(path);
         }
@@ -865,15 +866,16 @@ internal sealed class AvatarStore
     private void SaveGroupFiles(LibraryData lib)
     {
         var currentFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var groupFileNames = GroupFileNames(lib.Groups);
         foreach (var group in lib.Groups)
         {
-            var path = Path.Combine(_dataDirectory, GroupFileName(group));
+            var path = Path.Combine(_dataDirectory, groupFileNames[group.Id]);
             currentFiles.Add(Path.GetFileName(path));
             File.WriteAllText(path, JsonSerializer.Serialize(GroupSummary(group, lib.Avatars.Where(x => x.GroupId == group.Id).OrderBy(x => x.Order)), ProgramJson.Options));
         }
-        ArchiveStaleGroupFiles(currentFiles);
+        ArchiveStaleGroupFiles(currentFiles, lib.Groups.Select(x => x.Id).ToHashSet(StringComparer.OrdinalIgnoreCase));
     }
-    private void ArchiveStaleGroupFiles(HashSet<string> currentFiles)
+    private void ArchiveStaleGroupFiles(HashSet<string> currentFiles, HashSet<string> currentGroupIds)
     {
         var reservedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -887,6 +889,12 @@ internal sealed class AvatarStore
             var fileName = Path.GetFileName(file);
             if (reservedFiles.Contains(fileName) || currentFiles.Contains(fileName))
             {
+                continue;
+            }
+
+            if (IsLegacyGroupFileForCurrentGroup(fileName, currentGroupIds))
+            {
+                File.Delete(file);
                 continue;
             }
 
@@ -904,7 +912,7 @@ internal sealed class AvatarStore
     {
         Directory.CreateDirectory(_backupDirectory);
         var timestamp = DateTimeOffset.Now.ToString("yyyyMMdd-HHmmss");
-        var fileName = $"{timestamp}-{SafeFileName(group.Name)}-{group.Id}-{reason}.json";
+        var fileName = $"{timestamp}-{SafeFileNameOrDefault(group.Name, "Group")}-{reason}.json";
         var path = UniqueBackupPath(_backupDirectory, fileName);
         File.WriteAllText(path, JsonSerializer.Serialize(GroupSummary(group, lib.Avatars.Where(x => x.GroupId == group.Id).OrderBy(x => x.Order)), ProgramJson.Options));
         return new ExportResult(path);
@@ -1340,7 +1348,32 @@ internal sealed class AvatarStore
     private static string CleanRequired(string? value, string label) => string.IsNullOrWhiteSpace(value) ? throw new InvalidOperationException($"{label} is required.") : value.Trim();
     private static string NewId(string prefix) => $"{prefix}_{Guid.NewGuid():N}";
     private static string SafeFileName(string name) => string.Join("_", name.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries)).Trim();
-    private static string GroupFileName(AvatarGroup group) => $"{SafeFileName(group.Name)}-{group.Id}.json";
+    private static string SafeFileNameOrDefault(string name, string fallback)
+    {
+        var safe = SafeFileName(name);
+        return string.IsNullOrWhiteSpace(safe) ? fallback : safe;
+    }
+    private static Dictionary<string, string> GroupFileNames(IEnumerable<AvatarGroup> groups)
+    {
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var fileNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var group in groups.OrderBy(x => x.Order).ThenBy(x => x.CreatedAt))
+        {
+            var baseName = SafeFileNameOrDefault(group.Name, "Group");
+            var fileName = $"{baseName}.json";
+            for (var i = 2; !used.Add(fileName); i++)
+            {
+                fileName = $"{baseName} {i}.json";
+            }
+            fileNames[group.Id] = fileName;
+        }
+        return fileNames;
+    }
+    private static bool IsLegacyGroupFileForCurrentGroup(string fileName, HashSet<string> currentGroupIds)
+    {
+        var name = Path.GetFileNameWithoutExtension(fileName);
+        return currentGroupIds.Any(groupId => name.EndsWith($"-{groupId}", StringComparison.OrdinalIgnoreCase));
+    }
     private static string UniqueBackupPath(string backupDirectory, string fileName)
     {
         var target = Path.Combine(backupDirectory, fileName);
@@ -1844,6 +1877,10 @@ internal sealed class VrChatRateLimitGate
 internal sealed class AvatarDatabaseClient
 {
     private const string VrcxDatabaseFileName = "VRCX.sqlite3";
+    private const string VrcxRemoteDatabaseUrl = "https://api.avtrdb.com/v3/avatar/search/vrcx";
+    private const int VrcxRemotePageSize = 50;
+    private const int VrcxRemoteRandomPageCeiling = 1000;
+    private const int DatabaseFullSearchPageLimit = 1000;
     private const string AvtrZipSearchBaseUrl = "https://g.avtr.zip/s/";
     private const string AvtrZipAuthorBaseUrl = "https://g.avtr.zip/sa/";
     private const string AvtrZipActionBaseUrl = "https://g.avtr.zip/a/";
@@ -1858,6 +1895,7 @@ internal sealed class AvatarDatabaseClient
     private static readonly SemaphoreSlim QueryGate = new(1, 1);
     private static readonly HttpClient AvtrZipHttp = CreateAvtrZipHttpClient();
     private static readonly HttpClient PasHttp = CreatePasHttpClient();
+    private static readonly HttpClient VrcxRemoteHttp = CreateVrcxRemoteHttpClient();
 
     public async Task<AvatarDatabaseSearchResult> SearchAsync(AvatarSearchInput input, VrChatClient? vrchat = null)
     {
@@ -1867,24 +1905,8 @@ internal sealed class AvatarDatabaseClient
 
         var query = input.Query?.Trim() ?? "";
         if (query.Length < 3 && !IsAuthorIdOnlySearch(input)) throw new InvalidOperationException("Enter at least 3 characters to search the avatar database.");
-        var page = Math.Max(1, input.Page);
-        var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
         if (!HasSearchField(input)) throw new InvalidOperationException("Enable at least one search field.");
-        var databasePath = ResolveVrcxDatabasePath() ?? throw new InvalidOperationException($"VRCX database not found. Put {VrcxDatabaseFileName} in {AppPaths.DatabaseDirectory} or keep a VRCX database under %AppData%\\VRCX.");
-        var cacheKey = SearchCacheKey(input, page, limit, databasePath);
-        if (Cache.TryGetValue(cacheKey, out var cached) && DateTimeOffset.UtcNow - cached.CachedAt < TimeSpan.FromMinutes(10)) return cached with { CachedAt = DateTimeOffset.UtcNow };
-
-        await QueryGate.WaitAsync();
-        try
-        {
-            var result = await QuerySearchAsync(databasePath, input, page, limit);
-            Cache[cacheKey] = result;
-            return result;
-        }
-        finally
-        {
-            QueryGate.Release();
-        }
+        return await SearchRemoteVrcxAsync(input, vrchat);
     }
 
     public async Task<AvatarDatabaseCountResult> CountAsync(AvatarSearchInput input, VrChatClient? vrchat = null)
@@ -1896,25 +1918,7 @@ internal sealed class AvatarDatabaseClient
         var query = input.Query?.Trim() ?? "";
         if (query.Length < 3 && !IsAuthorIdOnlySearch(input)) throw new InvalidOperationException("Enter at least 3 characters to search the avatar database.");
         if (!HasSearchField(input)) throw new InvalidOperationException("Enable at least one search field.");
-        var databasePath = ResolveVrcxDatabasePath() ?? throw new InvalidOperationException($"VRCX database not found. Put {VrcxDatabaseFileName} in {AppPaths.DatabaseDirectory} or keep a VRCX database under %AppData%\\VRCX.");
-        var countKey = SearchCacheKey(input, 1, 50, databasePath);
-        if (CountCache.TryGetValue(countKey, out var cached) && DateTimeOffset.UtcNow - cached.CachedAt < TimeSpan.FromMinutes(10)) return cached;
-
-        await QueryGate.WaitAsync();
-        try
-        {
-            using var connection = OpenReadOnlyConnection(databasePath);
-            using var command = connection.CreateCommand();
-            command.CommandText = $"SELECT COUNT(*) FROM cache_avatar a {BuildWhereClause(input, command)}";
-            var total = Convert.ToInt32(await command.ExecuteScalarAsync());
-            var count = new AvatarDatabaseCountResult(query, total, DateTimeOffset.UtcNow);
-            CountCache[countKey] = count;
-            return count;
-        }
-        finally
-        {
-            QueryGate.Release();
-        }
+        return await CountRemoteVrcxAsync(input, vrchat);
     }
 
     public async Task<AvatarDatabaseSearchResult> RandomAsync(AvatarSearchInput input, VrChatClient? vrchat = null)
@@ -1924,31 +1928,13 @@ internal sealed class AvatarDatabaseClient
         if (IsPasProvider(input)) return await RandomPasAsync(input, vrchat);
 
         var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
-        var databasePath = ResolveVrcxDatabasePath() ?? throw new InvalidOperationException($"VRCX database not found. Put {VrcxDatabaseFileName} in {AppPaths.DatabaseDirectory} or keep a VRCX database under %AppData%\\VRCX.");
+        return await RandomRemoteVrcxAsync(input with { Query = string.IsNullOrWhiteSpace(input.Query) ? "avatar" : input.Query, Limit = limit }, vrchat);
+    }
 
-        await QueryGate.WaitAsync();
-        try
-        {
-            using var connection = OpenReadOnlyConnection(databasePath);
-            using var command = connection.CreateCommand();
-            command.CommandText = $"""
-                {SelectAvatarSql}
-                ORDER BY RANDOM()
-                LIMIT @limit
-                """;
-            command.Parameters.AddWithValue("@limit", limit);
-            var results = new List<AvatarInput>();
-            using var reader = await command.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                results.Add(ReadDatabaseAvatar(reader));
-            }
-            return new AvatarDatabaseSearchResult(results, 1, false, DateTimeOffset.UtcNow);
-        }
-        finally
-        {
-            QueryGate.Release();
-        }
+    public VrcxDatabaseStatus GetVrcxStatus()
+    {
+        var path = ResolveVrcxDatabasePath();
+        return new VrcxDatabaseStatus(!string.IsNullOrWhiteSpace(path), path ?? "", AppPaths.DatabaseDirectory);
     }
 
     public async Task<PasUpdateStatus> GetPasUpdateStatusAsync()
@@ -1989,45 +1975,30 @@ internal sealed class AvatarDatabaseClient
         var page = Math.Max(1, input.Page);
         var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
         var errors = new List<string>();
-        var results = new List<AvatarInput>();
-        var hasMore = false;
+        var providerPages = new List<AvatarDatabaseSearchResult>();
 
-        try
-        {
-            var vrcx = await SearchAsync(input with { Provider = "vrcx" }, vrchat);
-            results.AddRange(vrcx.Results);
-            hasMore = hasMore || vrcx.HasMore;
-        }
-        catch (Exception ex)
-        {
-            errors.Add($"VRCX DB: {ex.Message}");
-        }
-
-        try
-        {
-            var avtrZip = await SearchAsync(input with { Provider = "avtrzip" }, vrchat);
-            results.AddRange(avtrZip.Results);
-            hasMore = hasMore || avtrZip.HasMore;
-        }
+        try { providerPages.Add(await SearchAvtrZipAsync(input with { Provider = "avtrzip", Page = page, Limit = limit }, vrchat)); }
         catch (Exception ex)
         {
             errors.Add($"AVTRZIP: {ex.Message}");
         }
 
-        try
-        {
-            var pas = await SearchAsync(input with { Provider = "pas" }, vrchat);
-            results.AddRange(pas.Results);
-            hasMore = hasMore || pas.HasMore;
-        }
+        try { providerPages.Add(await SearchPasAsync(input with { Provider = "pas", Page = page, Limit = limit }, vrchat)); }
         catch (Exception ex)
         {
             errors.Add($"Prismic PAS: {ex.Message}");
         }
 
-        var merged = MergeAvatarResults(results, limit);
-        if (merged.Count == 0 && errors.Count == 3) throw new InvalidOperationException(string.Join(" | ", errors));
-        return new AvatarDatabaseSearchResult(merged, page, hasMore, DateTimeOffset.UtcNow);
+        try { providerPages.Add(await SearchRemoteVrcxAsync(input with { Provider = "vrcx", Page = page, Limit = limit }, vrchat)); }
+        catch (Exception ex)
+        {
+            errors.Add($"VRCX DB: {ex.Message}");
+        }
+
+        var pageResults = HideDuplicateAvatarResults(providerPages, limit, out var hiddenOverflow);
+        var hasMore = hiddenOverflow || providerPages.Any(x => x.HasMore);
+        if (pageResults.Count == 0 && errors.Count == 3) throw new InvalidOperationException(string.Join(" | ", errors));
+        return new AvatarDatabaseSearchResult(pageResults, page, hasMore, DateTimeOffset.UtcNow);
     }
 
     private async Task<AvatarDatabaseCountResult> CountAllAsync(AvatarSearchInput input, VrChatClient? vrchat)
@@ -2035,35 +2006,76 @@ internal sealed class AvatarDatabaseClient
         var errors = new List<string>();
         var total = 0;
 
-        try { total += (await CountAsync(input with { Provider = "vrcx" }, vrchat)).Total; }
-        catch (Exception ex) { errors.Add($"VRCX DB: {ex.Message}"); }
-
-        try { total += (await CountAsync(input with { Provider = "avtrzip" }, vrchat)).Total; }
+        try { total += (await CountAvtrZipAsync(input with { Provider = "avtrzip" }, vrchat)).Total; }
         catch (Exception ex) { errors.Add($"AVTRZIP: {ex.Message}"); }
 
-        try { total += (await CountAsync(input with { Provider = "pas" }, vrchat)).Total; }
+        try { total += (await CountPasAsync(input with { Provider = "pas" })).Total; }
         catch (Exception ex) { errors.Add($"Prismic PAS: {ex.Message}"); }
 
-        if (total == 0 && errors.Count == 3) throw new InvalidOperationException(string.Join(" | ", errors));
+        if (total == 0 && errors.Count == 2) throw new InvalidOperationException(string.Join(" | ", errors));
         return new AvatarDatabaseCountResult(input.Query?.Trim() ?? "", total, DateTimeOffset.UtcNow);
+    }
+
+    private async Task<List<AvatarInput>> LoadSearchWindowAsync(AvatarSearchInput input, VrChatClient? vrchat, int maxPages)
+    {
+        var results = new List<AvatarInput>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var page = 1; page <= Math.Max(1, maxPages); page++)
+        {
+            var result = await SearchAsync(input with { Page = page }, vrchat);
+            var added = 0;
+            foreach (var avatar in result.Results)
+            {
+                var key = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
+                if (string.IsNullOrWhiteSpace(key) || !seen.Add(key)) continue;
+                results.Add(avatar);
+                added++;
+            }
+            if (!result.HasMore) break;
+            if (added == 0) break;
+        }
+        return results;
+    }
+
+    private static async Task<List<AvatarInput>> LoadPasSearchWindowAsync(AvatarSearchInput input)
+    {
+        var query = input.Query?.Trim() ?? "";
+        if (query.Length < 3 && !IsAuthorIdOnlySearch(input)) throw new InvalidOperationException("Enter at least 3 characters to search the Prismic PAS database.");
+        if (!HasSearchField(input)) throw new InvalidOperationException("Enable at least one search field.");
+        await QueryGate.WaitAsync();
+        try
+        {
+            var database = await LoadPasDatabaseAsync();
+            var results = new List<AvatarInput>();
+            for (var i = 0; i < database.FileAvatarCount; i++)
+            {
+                if (PasRecordMatches(database, i, input)) results.Add(ReadPasAvatar(database, i));
+            }
+            return results;
+        }
+        finally
+        {
+            QueryGate.Release();
+        }
     }
 
     private async Task<AvatarDatabaseSearchResult> RandomAllAsync(AvatarSearchInput input, VrChatClient? vrchat)
     {
         var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
-        var perProvider = Math.Max(1, limit / 2);
+        var perProvider = Math.Max(1, (int)Math.Ceiling(limit / 3.0));
         var errors = new List<string>();
         var results = new List<AvatarInput>();
 
         try { results.AddRange((await RandomAsync(input with { Provider = "vrcx", Limit = perProvider }, vrchat)).Results); }
         catch (Exception ex) { errors.Add($"VRCX DB: {ex.Message}"); }
 
-        try { results.AddRange((await RandomAsync(input with { Provider = "avtrzip", Limit = limit - perProvider }, vrchat)).Results); }
+        try { results.AddRange((await RandomAsync(input with { Provider = "avtrzip", Limit = perProvider }, vrchat)).Results); }
         catch (Exception ex) { errors.Add($"AVTRZIP: {ex.Message}"); }
 
         try { results.AddRange((await RandomAsync(input with { Provider = "pas", Limit = Math.Max(1, limit - results.Count) }, vrchat)).Results); }
         catch (Exception ex) { errors.Add($"Prismic PAS: {ex.Message}"); }
 
+        Shuffle(results);
         var merged = MergeAvatarResults(results, limit);
         if (merged.Count == 0 && errors.Count == 3) throw new InvalidOperationException(string.Join(" | ", errors));
         return new AvatarDatabaseSearchResult(merged, 1, false, DateTimeOffset.UtcNow);
@@ -2145,6 +2157,67 @@ internal sealed class AvatarDatabaseClient
         {
             QueryGate.Release();
         }
+    }
+
+    private static async Task<AvatarDatabaseSearchResult> RandomRemoteVrcxAsync(AvatarSearchInput input, VrChatClient? vrchat)
+    {
+        var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
+        var queryInput = input with { Query = string.IsNullOrWhiteSpace(input.Query) ? "avatar" : input.Query, Limit = VrcxRemotePageSize };
+        var results = new List<AvatarInput>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var attempts = Math.Clamp((int)Math.Ceiling(limit / 10.0) + 2, 3, 7);
+
+        for (var attempt = 0; results.Count < limit && attempt < attempts; attempt++)
+        {
+            var page = Random.Shared.Next(1, VrcxRemoteRandomPageCeiling + 1);
+            List<AvatarInput> pageResults;
+            try
+            {
+                pageResults = await LoadRemoteVrcxAvatarsAsync(queryInput, page, VrcxRemotePageSize);
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (pageResults.Count == 0) continue;
+            Shuffle(pageResults);
+            foreach (var avatar in pageResults.Take(12))
+            {
+                var key = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
+                if (string.IsNullOrWhiteSpace(key) || !seen.Add(key)) continue;
+                results.Add(avatar);
+                if (results.Count >= limit) break;
+            }
+        }
+
+        if (results.Count < Math.Min(limit, 10))
+        {
+            for (var page = 1; results.Count < limit && page <= 8; page++)
+            {
+                List<AvatarInput> pageResults;
+                try
+                {
+                    pageResults = await LoadRemoteVrcxAvatarsAsync(queryInput, page, VrcxRemotePageSize);
+                }
+                catch
+                {
+                    continue;
+                }
+                Shuffle(pageResults);
+                foreach (var avatar in pageResults.Take(12))
+                {
+                    var key = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
+                    if (string.IsNullOrWhiteSpace(key) || !seen.Add(key)) continue;
+                    results.Add(avatar);
+                    if (results.Count >= limit) break;
+                }
+            }
+        }
+
+        Shuffle(results);
+        if (vrchat is not null) await HydrateAvtrZipResultsAsync(results, vrchat);
+        return new AvatarDatabaseSearchResult(results.Take(limit).ToList(), 1, false, DateTimeOffset.UtcNow);
     }
 
     private static AvatarDatabaseSearchResult QueryPasDatabase(PasDatabaseData database, AvatarSearchInput input, int page, int limit)
@@ -2554,6 +2627,95 @@ internal sealed class AvatarDatabaseClient
         return merged;
     }
 
+    private static void Shuffle<T>(IList<T> items)
+    {
+        for (var i = items.Count - 1; i > 0; i--)
+        {
+            var j = Random.Shared.Next(i + 1);
+            (items[i], items[j]) = (items[j], items[i]);
+        }
+    }
+
+    private static List<AvatarInput> HideDuplicateAvatarResults(IReadOnlyList<AvatarDatabaseSearchResult> providerPages, int limit, out bool hiddenOverflow)
+    {
+        var unique = new List<AvatarInput>();
+        var byDuplicateKey = new Dictionary<string, AvatarInput>(StringComparer.OrdinalIgnoreCase);
+        var maxResults = providerPages.Count == 0 ? 0 : providerPages.Max(x => x.Results.Count);
+        for (var index = 0; index < maxResults; index++)
+        {
+            foreach (var page in providerPages)
+            {
+                if (index >= page.Results.Count) continue;
+                var avatar = page.Results[index];
+                var keys = AvatarDuplicateKeys(avatar).ToList();
+                var existing = keys
+                    .Select(key => byDuplicateKey.TryGetValue(key, out var found) ? found : null)
+                    .FirstOrDefault(found => found is not null);
+                if (existing is not null)
+                {
+                    AddHiddenDuplicateBadges(existing, avatar);
+                    continue;
+                }
+
+                foreach (var key in keys) byDuplicateKey.TryAdd(key, avatar);
+                unique.Add(avatar);
+            }
+        }
+
+        hiddenOverflow = unique.Count > limit;
+        return unique.Take(limit).ToList();
+    }
+
+    private static IEnumerable<string> AvatarDuplicateKeys(AvatarInput avatar)
+    {
+        var id = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
+        if (!string.IsNullOrWhiteSpace(id)) yield return "id:" + id.Trim();
+
+        var name = NormalizeDuplicateText(avatar.Name);
+        var image = NormalizeDuplicateImageUrl(string.IsNullOrWhiteSpace(avatar.ThumbnailImageUrl) ? avatar.ImageUrl : avatar.ThumbnailImageUrl);
+        if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(image))
+        {
+            var author = NormalizeDuplicateText(avatar.AuthorName);
+            yield return $"visual:{name}|{author}|{image}";
+            yield return $"visual-name:{name}|{image}";
+        }
+
+        var authorName = NormalizeDuplicateText(avatar.AuthorName);
+        if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(authorName))
+        {
+            yield return $"name-author:{name}|{authorName}";
+        }
+    }
+
+    private static string NormalizeDuplicateText(string? value) =>
+        string.Concat((value ?? "").Where(char.IsLetterOrDigit)).Trim().ToLowerInvariant();
+
+    private static string NormalizeDuplicateImageUrl(string? value)
+    {
+        var text = (value ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(text)) return "";
+        var queryIndex = text.IndexOf('?', StringComparison.Ordinal);
+        if (queryIndex >= 0) text = text[..queryIndex];
+        return text.TrimEnd('/').ToLowerInvariant();
+    }
+
+    private static void AddHiddenDuplicateBadges(AvatarInput target, AvatarInput hidden)
+    {
+        target.Source = MergeSourceTags(target.Source, hidden.Source);
+        target.Platforms = MergeTagText(target.Platforms, hidden.Platforms);
+        target.Tags = MergeTagText(target.Tags, hidden.Tags);
+        if (string.IsNullOrWhiteSpace(target.Name)) target.Name = hidden.Name;
+        if (string.IsNullOrWhiteSpace(target.AuthorId)) target.AuthorId = hidden.AuthorId;
+        if (string.IsNullOrWhiteSpace(target.AuthorName)) target.AuthorName = hidden.AuthorName;
+        if (string.IsNullOrWhiteSpace(target.Description)) target.Description = hidden.Description;
+        if (string.IsNullOrWhiteSpace(target.ImageUrl)) target.ImageUrl = hidden.ImageUrl;
+        if (string.IsNullOrWhiteSpace(target.ThumbnailImageUrl)) target.ThumbnailImageUrl = string.IsNullOrWhiteSpace(hidden.ThumbnailImageUrl) ? hidden.ImageUrl : hidden.ThumbnailImageUrl;
+        if (string.IsNullOrWhiteSpace(target.ReleaseStatus)) target.ReleaseStatus = hidden.ReleaseStatus;
+        if (string.IsNullOrWhiteSpace(target.Version)) target.Version = hidden.Version;
+        if (string.IsNullOrWhiteSpace(target.SourceUrl)) target.SourceUrl = hidden.SourceUrl;
+        if (string.IsNullOrWhiteSpace(target.RawJson)) target.RawJson = hidden.RawJson;
+    }
+
     private static void MergeAvatarResultData(AvatarInput target, AvatarInput incoming)
     {
         target.Source = MergeSourceTags(target.Source, incoming.Source);
@@ -2642,14 +2804,48 @@ internal sealed class AvatarDatabaseClient
 
     private static async Task<AvatarDatabaseSearchResult> RandomAvtrZipAsync(AvatarSearchInput input, VrChatClient? vrchat)
     {
+        var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
         await QueryGate.WaitAsync();
         try
         {
             var firstPage = await LoadAvtrZipSearchPageAsync(AvtrZipSearchUrl(input.Query?.Trim() ?? ""));
             if (firstPage.RandomCode < 0) throw new InvalidOperationException("AVTRZIP did not return a random-page action.");
-            var result = (await LoadAvtrZipSearchPageAsync(AvtrZipActionUrl(firstPage.RandomCode))).Result;
-            if (vrchat is not null) await HydrateAvtrZipResultsAsync(result.Results, vrchat);
-            return result;
+            var results = new List<AvatarInput>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var randomCode = firstPage.RandomCode;
+            var attempts = Math.Max(10, limit / 4 + 6);
+
+            for (var attempt = 0; results.Count < limit && attempt < attempts; attempt++)
+            {
+                var randomPage = await LoadAvtrZipSearchPageAsync(AvtrZipActionUrl(randomCode));
+                if (randomPage.RandomCode >= 0) randomCode = randomPage.RandomCode;
+                var pageResults = randomPage.Result.Results;
+                Shuffle(pageResults);
+                foreach (var avatar in pageResults.Take(5))
+                {
+                    var key = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
+                    if (string.IsNullOrWhiteSpace(key) || !seen.Add(key)) continue;
+                    results.Add(avatar);
+                    if (results.Count >= limit) break;
+                }
+            }
+
+            if (results.Count < limit)
+            {
+                Shuffle(firstPage.Result.Results);
+                foreach (var avatar in firstPage.Result.Results)
+                {
+                    var key = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
+                    if (string.IsNullOrWhiteSpace(key) || !seen.Add(key)) continue;
+                    results.Add(avatar);
+                    if (results.Count >= limit) break;
+                }
+            }
+
+            Shuffle(results);
+            var finalResults = results.Take(limit).ToList();
+            if (vrchat is not null) await HydrateAvtrZipResultsAsync(finalResults, vrchat);
+            return new AvatarDatabaseSearchResult(finalResults, 1, false, DateTimeOffset.UtcNow);
         }
         finally
         {
@@ -2771,7 +2967,7 @@ internal sealed class AvatarDatabaseClient
 
         using var gate = new SemaphoreSlim(5, 5);
         var tasks = avatars
-            .Where(x => !string.IsNullOrWhiteSpace(x.AvatarId) && (string.IsNullOrWhiteSpace(x.ThumbnailImageUrl) || string.IsNullOrWhiteSpace(x.ImageUrl)))
+            .Where(NeedsVrChatAvatarHydration)
             .Select(async avatar =>
             {
                 await gate.WaitAsync();
@@ -2787,9 +2983,16 @@ internal sealed class AvatarDatabaseClient
                 {
                     gate.Release();
                 }
-            });
+        });
         await Task.WhenAll(tasks);
     }
+
+    private static bool NeedsVrChatAvatarHydration(AvatarInput avatar) =>
+        !string.IsNullOrWhiteSpace(avatar.AvatarId)
+        && (string.IsNullOrWhiteSpace(avatar.ThumbnailImageUrl)
+            || string.IsNullOrWhiteSpace(avatar.ImageUrl)
+            || string.IsNullOrWhiteSpace(avatar.AuthorName)
+            || string.IsNullOrWhiteSpace(avatar.AuthorId));
 
     private static async Task<AvatarInput?> FetchCachedVrChatAvatarAsync(VrChatClient vrchat, string avatarId)
     {
@@ -2809,6 +3012,8 @@ internal sealed class AvatarDatabaseClient
         if (string.IsNullOrWhiteSpace(avatar.ThumbnailImageUrl)) avatar.ThumbnailImageUrl = string.IsNullOrWhiteSpace(details.ThumbnailImageUrl) ? details.ImageUrl : details.ThumbnailImageUrl;
         if (string.IsNullOrWhiteSpace(avatar.AuthorId)) avatar.AuthorId = details.AuthorId;
         if (string.IsNullOrWhiteSpace(avatar.Description)) avatar.Description = details.Description;
+        if (string.IsNullOrWhiteSpace(avatar.AuthorName)) avatar.AuthorName = details.AuthorName;
+        if (string.IsNullOrWhiteSpace(avatar.Name)) avatar.Name = details.Name;
         if (string.IsNullOrWhiteSpace(avatar.Version)) avatar.Version = details.Version;
         if (string.IsNullOrWhiteSpace(avatar.Platforms)) avatar.Platforms = details.Platforms;
         if (string.IsNullOrWhiteSpace(avatar.ReleaseStatus)) avatar.ReleaseStatus = details.ReleaseStatus;
@@ -2847,6 +3052,149 @@ internal sealed class AvatarDatabaseClient
         input.SearchAuthor && !input.SearchAvatar && !input.SearchDescription && !input.SearchTags && !string.IsNullOrWhiteSpace(input.Query);
     private static string AvtrZipCacheKey(AvatarSearchInput input, int page, int limit) =>
         $"avtrzip\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{page}\n{limit}";
+    private static async Task<AvatarDatabaseSearchResult> SearchRemoteVrcxAsync(AvatarSearchInput input, VrChatClient? vrchat)
+    {
+        var query = input.Query?.Trim() ?? "";
+        if (query.Length < 3 && !IsAuthorIdOnlySearch(input)) throw new InvalidOperationException("Enter at least 3 characters to search the VRCX-compatible remote database.");
+        if (!HasSearchField(input)) throw new InvalidOperationException("Enable at least one search field.");
+        var page = Math.Max(1, input.Page);
+        var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
+        var cacheKey = RemoteVrcxCacheKey(input, page, limit) + "\ndirect-page";
+        if (Cache.TryGetValue(cacheKey, out var cached) && DateTimeOffset.UtcNow - cached.CachedAt < TimeSpan.FromMinutes(3))
+        {
+            if (vrchat is not null) await HydrateAvtrZipResultsAsync(cached.Results, vrchat);
+            return cached with { CachedAt = DateTimeOffset.UtcNow };
+        }
+
+        var results = await LoadRemoteVrcxAvatarsAsync(input, page, VrcxRemotePageSize);
+        if (vrchat is not null) await HydrateAvtrZipResultsAsync(results, vrchat);
+        var hasMore = results.Count >= VrcxRemotePageSize;
+        if (results.Count > limit) results.RemoveRange(limit, results.Count - limit);
+        var result = new AvatarDatabaseSearchResult(results, page, hasMore, DateTimeOffset.UtcNow);
+        Cache[cacheKey] = result;
+        return result;
+    }
+
+    private static async Task<AvatarDatabaseCountResult> CountRemoteVrcxAsync(AvatarSearchInput input, VrChatClient? vrchat)
+    {
+        var query = input.Query?.Trim() ?? "";
+        if (query.Length < 3 && !IsAuthorIdOnlySearch(input)) throw new InvalidOperationException("Enter at least 3 characters to search the VRCX-compatible remote database.");
+        if (!HasSearchField(input)) throw new InvalidOperationException("Enable at least one search field.");
+        var countKey = RemoteVrcxCacheKey(input, 1, DatabaseFullSearchPageLimit * VrcxRemotePageSize) + "\nfull-scan";
+        if (CountCache.TryGetValue(countKey, out var cached) && DateTimeOffset.UtcNow - cached.CachedAt < TimeSpan.FromMinutes(3)) return cached;
+
+        var count = new AvatarDatabaseCountResult(query, (await LoadRemoteVrcxAvatarWindowAsync(input, DatabaseFullSearchPageLimit)).Count, DateTimeOffset.UtcNow);
+        CountCache[countKey] = count;
+        return count;
+    }
+
+    private static async Task<List<AvatarInput>> LoadRemoteVrcxAvatarsAsync(AvatarSearchInput input, int page, int limit)
+    {
+        var url = RemoteVrcxUrl(input, page, Math.Clamp(limit, 1, VrcxRemotePageSize));
+        var body = await GetRemoteVrcxStringAsync(url);
+        using var document = JsonDocument.Parse(body);
+        if (document.RootElement.ValueKind != JsonValueKind.Array) throw new InvalidOperationException("Remote VRCX-compatible database returned an unexpected response.");
+        var results = document.RootElement
+            .EnumerateArray()
+            .Select(ReadRemoteVrcxAvatar)
+            .Where(x => !string.IsNullOrWhiteSpace(x.AvatarId))
+            .ToList();
+        return results;
+    }
+
+    private static async Task<string> GetRemoteVrcxStringAsync(string url)
+    {
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            using var response = await VrcxRemoteHttp.GetAsync(url);
+            var body = await response.Content.ReadAsStringAsync();
+            if (response.IsSuccessStatusCode) return body;
+            if (response.StatusCode == HttpStatusCode.TooManyRequests && attempt < 3)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(800 * attempt));
+                continue;
+            }
+            throw new InvalidOperationException($"Remote VRCX-compatible database request failed ({(int)response.StatusCode}).");
+        }
+
+        throw new InvalidOperationException("Remote VRCX-compatible database request failed.");
+    }
+
+    private static async Task<List<AvatarInput>> LoadRemoteVrcxAvatarWindowAsync(AvatarSearchInput input, int maxPages)
+    {
+        var avatars = new List<AvatarInput>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var page = 1; page <= Math.Max(1, maxPages); page++)
+        {
+            var results = await LoadRemoteVrcxAvatarsAsync(input, page, VrcxRemotePageSize);
+            foreach (var avatar in results)
+            {
+                var key = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
+                if (!string.IsNullOrWhiteSpace(key) && seen.Add(key)) avatars.Add(avatar);
+            }
+            if (results.Count < VrcxRemotePageSize) break;
+        }
+        return avatars;
+    }
+
+    private static AvatarInput ReadRemoteVrcxAvatar(JsonElement item)
+    {
+        var id = ReadString(item, "id");
+        var name = ReadString(item, "name");
+        var authorId = ReadString(item, "authorId");
+        var authorName = ReadString(item, "authorName");
+        var description = ReadString(item, "description");
+        var imageUrl = FirstString(item, "imageUrl", "thumbnailImageUrl", "image", "thumbnail");
+        var thumbnailImageUrl = FirstString(item, "thumbnailImageUrl", "imageUrl", "thumbnail", "image");
+        var createdAt = FirstString(item, "createdAt", "created_at");
+        var updatedAt = FirstString(item, "updatedAt", "updated_at");
+        var tags = RemoteVrcxTags(item);
+
+        return new AvatarInput
+        {
+            AvatarId = id,
+            Name = string.IsNullOrWhiteSpace(name) ? id : name,
+            Description = description,
+            AuthorId = authorId,
+            AuthorName = authorName,
+            ImageUrl = imageUrl,
+            ThumbnailImageUrl = string.IsNullOrWhiteSpace(thumbnailImageUrl) ? imageUrl : thumbnailImageUrl,
+            ReleaseStatus = string.IsNullOrWhiteSpace(FirstString(item, "releaseStatus", "release_status")) ? "public" : FirstString(item, "releaseStatus", "release_status"),
+            Platforms = tags,
+            Tags = tags,
+            SourceUrl = string.IsNullOrWhiteSpace(id) ? VrcxRemoteDatabaseUrl : $"https://vrchat.com/home/avatar/{id}",
+            Notes = "Found in the remote VRCX-compatible avatar database.",
+            RawJson = item.GetRawText(),
+            Source = "avatar-database",
+            RemoteCreatedAt = createdAt,
+            RemoteUpdatedAt = string.IsNullOrWhiteSpace(updatedAt) ? createdAt : updatedAt
+        };
+    }
+
+    private static string RemoteVrcxUrl(AvatarSearchInput input, int page, int limit)
+    {
+        var parameters = new List<string> { $"n={limit}", $"page={Math.Max(0, page - 1)}" };
+        if (IsAuthorIdOnlySearch(input)) parameters.Add($"authorId={Uri.EscapeDataString(input.AuthorId.Trim())}");
+        else parameters.Add($"search={Uri.EscapeDataString(input.Query?.Trim() ?? "")}");
+        return $"{VrcxRemoteDatabaseUrl}?{string.Join("&", parameters)}";
+    }
+
+    private static string RemoteVrcxCacheKey(AvatarSearchInput input, int page, int limit) =>
+        $"vrcx-remote\n{VrcxRemoteDatabaseUrl}\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{page}\n{limit}";
+
+    private static string RemoteVrcxTags(JsonElement item)
+    {
+        if (!item.TryGetProperty("performance", out var performance) || performance.ValueKind != JsonValueKind.Object) return "remote vrcx-compatible";
+        var tags = new List<string> { "remote vrcx-compatible" };
+        foreach (var platform in new[] { ("pc_rating", "PC"), ("android_rating", "Quest"), ("ios_rating", "iOS") })
+        {
+            var rating = ReadString(performance, platform.Item1);
+            if (!string.IsNullOrWhiteSpace(rating)) tags.Add($"{platform.Item2}: {rating}");
+        }
+        if (ReadString(performance, "has_impostor").Equals("true", StringComparison.OrdinalIgnoreCase)) tags.Add("Impostor");
+        return string.Join(", ", tags.Distinct(StringComparer.OrdinalIgnoreCase));
+    }
+
     private static HttpClient CreateAvtrZipHttpClient()
     {
         var client = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
@@ -2857,6 +3205,14 @@ internal sealed class AvatarDatabaseClient
     {
         var client = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
         client.DefaultRequestHeaders.UserAgent.ParseAdd("VRCNeph/1.0");
+        return client;
+    }
+    private static HttpClient CreateVrcxRemoteHttpClient()
+    {
+        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+        client.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/plain, */*");
+        client.DefaultRequestHeaders.Referrer = new Uri("https://vrcx.app/");
         return client;
     }
     private static string CombineAvtrZipTags(string tags, string aiTags) =>
@@ -3148,8 +3504,9 @@ internal sealed record BackgroundResult(string DataUrl, string Folder);
 internal sealed record ExportResult(string Path);
 internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int SchemaVersion = 5);
 internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string Provider = "vrcx");
-internal sealed record AvatarDatabaseSearchResult(List<AvatarInput> Results, int Page, bool HasMore, DateTimeOffset CachedAt);
+internal sealed record AvatarDatabaseSearchResult(List<AvatarInput> Results, int Page, bool HasMore, DateTimeOffset CachedAt, int Total = 0);
 internal sealed record AvatarDatabaseCountResult(string Query, int Total, DateTimeOffset CachedAt);
+internal sealed record VrcxDatabaseStatus(bool HasLocalDatabase, string Path, string DatabaseDirectory);
 internal sealed record PasUpdateStatus(bool HasLocalFile, bool HasUpdate, string LocalFileDate, string RemoteFileDate, long LocalBytes, long RemoteBytes, string Url, string Message);
 internal sealed record AvtrZipSearchPage(AvatarDatabaseSearchResult Result, int TotalCount, int TotalPages, int NextCode, int RandomCode, int InputPageCode);
 internal sealed record PasDatabaseData(string Path, string PlatformLabel, string FileDate, int AvatarCount, int AuthorCount, int FileAvatarCount, int FileAuthorCount, byte[] DynamicBytes, byte[] AvatarIds, uint[] AuthorIds, string[] AvatarNames, string[] AuthorNames);
