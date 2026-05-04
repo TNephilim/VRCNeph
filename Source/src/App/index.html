@@ -90,6 +90,8 @@
             <button id="editGroupBtn">Edit Group</button>
             <button id="copyGroupBtn">Copy Group</button>
             <button id="deleteGroupBtn" class="danger">Delete Group</button>
+            <button id="unfavoriteAllBtn" type="button" class="danger">Unfavorite All</button>
+            <button id="checkDeletedFavoritesBtn" type="button" hidden>Check for Deleted/Private</button>
             <button id="addAvatarBtn" class="primary">Add Avatar</button>
           </div>
         </header>
@@ -167,6 +169,13 @@
     <menu><button type="button" data-close="groupDialog">Cancel</button><button id="saveGroupBtn" class="primary">Save</button></menu>
   </form></dialog>
 
+  <dialog id="copyGroupDialog"><form method="dialog" class="dialog-form">
+    <header><h3>Copy Group</h3><button type="button" class="icon-button" data-close="copyGroupDialog">x</button></header>
+    <p id="copyGroupMessage" class="dialog-note"></p>
+    <label id="copyGroupTargetWrap" hidden>Target group<select id="copyGroupTargetInput"></select></label>
+    <menu><button type="button" data-close="copyGroupDialog">Cancel</button><button id="copyGroupFullBtn" type="button">Copy Full Group</button><button id="copyGroupToExistingBtn" type="button" class="primary">Copy to Existing</button></menu>
+  </form></dialog>
+
   <dialog id="addDatabaseAvatarDialog"><form method="dialog" class="dialog-form">
     <header><h3>Add to Group</h3><button type="button" class="icon-button" data-close="addDatabaseAvatarDialog">x</button></header>
     <p id="addDatabaseAvatarName" class="dialog-note"></p><label>Group<select id="databaseAvatarGroupInput"></select></label>
@@ -212,7 +221,8 @@
       <label id="panelOpacityValue" class="page-slider-value">Opacity <input id="panelOpacityNumber" type="number" min="0" max="100" step="1" value="35">%</label>
     </section>
     <section id="settingsLogsPanel" class="settings-panel" hidden>
-      <div class="settings-empty"><h4>No logs yet</h4><p>App logs will appear here when logging is added.</p></div>
+      <div class="settings-panel-actions"><button id="refreshLogsBtn" type="button">Refresh</button><button id="copyLogsBtn" type="button">Copy Logs</button><button id="openLogsFolderBtn" type="button">Open Logs Folder</button><button id="clearLogsBtn" type="button" class="danger">Clear Logs</button></div>
+      <div id="settingsLogsList" class="settings-list logs-list"></div>
     </section>
     <section id="settingsBackupsPanel" class="settings-panel" hidden>
       <div class="settings-panel-actions"><button id="openBackupsFolderBtn" type="button">Open Backups Folder</button></div>

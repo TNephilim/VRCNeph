@@ -31,6 +31,7 @@ const state = {
   pendingMoveAvatarId: "",
   pendingAvatarGroupAction: "",
   pendingAvatarSort: null,
+  pendingCopyGroupId: "",
   avatarDialogGroupId: null,
   avatarDialogSource: "",
   avatarDialogHistory: null,
@@ -38,7 +39,7 @@ const state = {
   dragPoint: null,
   dragScrollFrame: null,
   positionEdit: null,
-  vrchatSyncTimer: null,
+  vrchatStartupSyncDone: false,
   vrchatSyncBusy: false,
   vrchatSyncLoggedIn: false,
   settingsSaveTimer: null,
@@ -187,6 +188,8 @@ function isDeletedGroup(groupId) { return String(groupId || "").toLowerCase() ==
 function isRecentGroup(groupId) { return String(groupId || "").toLowerCase() === "recent_avatars"; }
 function isPinnedSystemGroup(groupId) { return isRecentGroup(groupId) || isDeletedGroup(groupId); }
 function isDefaultReorderLockedGroup(groupId) { return isSyncedGroup(groupId) || isPinnedSystemGroup(groupId); }
+function canManuallyAddToGroup(groupId) { return !isPinnedSystemGroup(groupId); }
+function canCopyGroupIntoGroup(groupId) { return !isSyncedGroup(groupId) && !isPinnedSystemGroup(groupId); }
 function isGroupReorderLocked(group) {
   if (!group) return false;
   if (isDefaultReorderLockedGroup(group.id)) return true;
@@ -197,7 +200,7 @@ function isDefaultLocalGroup(group) { return String(group?.description || "").to
 function isCustomLocalGroup(group) { return group && !isSyncedGroup(group.id) && !isPinnedSystemGroup(group.id) && !isDefaultLocalGroup(group); }
 function isSyncedAvatarEditActive(groupId = state.activeGroupId) { return Boolean(groupId && state.syncedAvatarEdit.groupId === groupId); }
 function canEditSyncedAvatarOrder(group = activeGroup()) { return Boolean(group && isSyncedGroup(group.id) && !isPinnedSystemGroup(group.id)); }
-function canReorderAvatarsInGroup(groupId = state.activeGroupId) { return !isSyncedGroup(groupId) || isSyncedAvatarEditActive(groupId); }
+function canReorderAvatarsInGroup(groupId = state.activeGroupId) { return !isPinnedSystemGroup(groupId) && (!isSyncedGroup(groupId) || isSyncedAvatarEditActive(groupId)); }
 function isSyncedAvatarEditDrag() { return state.dragSort?.type === "avatar" && isSyncedAvatarEditActive(state.dragSort.groupId); }
 function exitSyncedAvatarEditMode(message = "") {
   if (!state.syncedAvatarEdit.groupId || state.syncedAvatarEdit.applying) return false;
@@ -343,6 +346,10 @@ function renderGroups() {
       startDragAutoScroll(event);
       if (state.dragSort?.type === "avatar") {
         if (isSyncedAvatarEditDrag()) return;
+        if (!canManuallyAddToGroup(group.id)) {
+          clearDropIndicators({ clearPlaceholder: true });
+          return;
+        }
         clearDropIndicators({ clearPlaceholder: true });
         item.classList.add("drop-target");
         return;
@@ -359,6 +366,12 @@ function renderGroups() {
       event.stopPropagation();
       if (state.dragSort?.type === "avatar") {
         if (isSyncedAvatarEditDrag()) return;
+        if (!canManuallyAddToGroup(group.id)) {
+          state.dragSort = null;
+          clearDragSortIndicators();
+          toast("Recent and Deleted groups are managed automatically.");
+          return;
+        }
         const draggedId = state.dragSort.id;
         clearDragSortIndicators();
         state.dragSort = null;
@@ -384,13 +397,14 @@ function renderGroups() {
       if (groupChanged) exitSyncedAvatarEditMode("Edit mode turned off.");
       state.activeGroupId = group.id;
       state.avatarPage = 0;
+      if (state.activePage !== "favorites") state.activePage = "favorites";
       render();
     });
     item.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       const actions = [
         { label: "Edit Group", disabled: pinned || synced, action: () => openGroupDialog(group) },
-        { label: "Copy Group", disabled: pinned, action: () => copyGroup(group) },
+        { label: "Copy Group", disabled: pinned, action: () => openCopyGroupDialog(group) },
         { label: "Delete Group", className: "danger", disabled: pinned || synced, action: () => deleteGroup(group) }
       ];
       showContextMenu(event.clientX, event.clientY, actions);
@@ -402,6 +416,7 @@ function renderToolbar() {
   const group = activeGroup();
   const pinned = isPinnedSystemGroup(group?.id);
   const synced = isSyncedGroup(group?.id);
+  const systemGroup = isPinnedSystemGroup(group?.id);
   const syncedEditVisible = canEditSyncedAvatarOrder(group);
   const syncedEditActive = isSyncedAvatarEditActive(group?.id);
   $("activeGroupName").textContent = group?.name ?? "Favorites";
@@ -414,15 +429,28 @@ function renderToolbar() {
   $("applySyncedAvatarOrderBtn").disabled = state.syncedAvatarEdit.applying;
   $("cancelSyncedAvatarOrderBtn").disabled = state.syncedAvatarEdit.applying;
   $("sortMenuBtn").disabled = syncedEditActive;
-  $("editGroupBtn").disabled = pinned || synced;
-  $("copyGroupBtn").disabled = pinned;
-  $("deleteGroupBtn").disabled = pinned || synced || state.library.groups.length <= 1;
+  $("editGroupBtn").hidden = systemGroup || synced;
+  $("copyGroupBtn").hidden = systemGroup;
+  $("deleteGroupBtn").hidden = systemGroup || synced;
+  $("addAvatarBtn").hidden = systemGroup;
+  $("editGroupBtn").disabled = synced;
+  $("copyGroupBtn").disabled = false;
+  $("deleteGroupBtn").disabled = synced || state.library.groups.length <= 1;
+  $("unfavoriteAllBtn").hidden = !group;
+  $("unfavoriteAllBtn").textContent = isRecentGroup(group?.id) ? "Clear Recents" : isDeletedGroup(group?.id) ? "Clear Deleted" : "Unfavorite All";
+  $("unfavoriteAllBtn").disabled = state.vrchatSyncBusy || state.syncedAvatarEdit.applying || !groupAvatars(group?.id).length || (synced && !state.vrchat?.isLoggedIn);
+  $("checkDeletedFavoritesBtn").hidden = !isDeletedGroup(group?.id);
+  $("checkDeletedFavoritesBtn").textContent = state.vrchatSyncBusy && isDeletedGroup(group?.id) ? "Checking..." : "Check for Deleted/Private";
+  $("checkDeletedFavoritesBtn").disabled = !state.vrchat?.isLoggedIn || state.vrchatSyncBusy;
+  $("addAvatarBtn").disabled = false;
+  $("saveCurrentAvatarBtn").disabled = pinned;
   updateSortButton();
   updateSortButton("databaseSortSelect", "databaseSortMenuBtn");
 }
 function renderAvatars() {
   const active = activeGroup();
   const canReorderCurrentGroup = canReorderAvatarsInGroup(active?.id);
+  const canDragAvatarsToGroup = isPinnedSystemGroup(active?.id);
   const syncedEditActive = isSyncedAvatarEditActive(active?.id);
   const syncedReorderBlocked = Boolean(isSyncedGroup(active?.id) && !syncedEditActive);
   if (syncedEditActive && $("sortSelect").value !== "manual") $("sortSelect").value = "manual";
@@ -453,9 +481,9 @@ function renderAvatars() {
     const card = document.createElement("article");
     card.className = `avatar-card ${canReorderCurrentGroup ? "avatar-reorder-enabled" : "avatar-reorder-locked"} ${syncedEditActive ? "synced-edit-card" : ""}`;
     card.dataset.avatarId = avatar.id;
-    card.draggable = canReorderCurrentGroup || syncedReorderBlocked;
+    card.draggable = canReorderCurrentGroup || syncedReorderBlocked || canDragAvatarsToGroup;
     const image = avatar.thumbnailImageUrl || avatar.imageUrl;
-    const reorderTitle = canReorderCurrentGroup ? "Drag to reorder" : "Enable edit mode to reorder synced avatars";
+    const reorderTitle = canReorderCurrentGroup ? "Drag to reorder" : canDragAvatarsToGroup ? "Drag to copy to another group" : "Enable edit mode to reorder synced avatars";
     const release = releaseStatusBadge(avatar.releaseStatus);
     card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="badges">${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${platformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}</div></div></button><div class="avatar-card-footer"><button class="avatar-position" type="button" title="${reorderTitle}" ${canReorderCurrentGroup ? "" : "disabled"}>#${listPosition(orderedAvatars, avatar.id)}</button><button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
     card.querySelector("button").addEventListener("click", () => openAvatarDialog(avatar));
@@ -467,19 +495,19 @@ function renderAvatars() {
         return;
       }
       const rect = card.getBoundingClientRect();
-      state.dragSort = { type: "avatar", id: avatar.id, groupId: avatar.groupId, dragWidth: rect.width, dragHeight: rect.height, blockedSynced: syncedReorderBlocked };
-      if (!syncedReorderBlocked) {
+      state.dragSort = { type: "avatar", id: avatar.id, groupId: avatar.groupId, dragWidth: rect.width, dragHeight: rect.height, blockedSynced: syncedReorderBlocked, copyOnly: canDragAvatarsToGroup };
+      if (!syncedReorderBlocked && !canDragAvatarsToGroup) {
         $("sortSelect").value = "manual";
         updateSortButton();
       }
-      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.effectAllowed = canDragAvatarsToGroup ? "copy" : "move";
       event.dataTransfer.setData("text/plain", avatar.id);
       setEmptyDragPreview(event);
       createFloatingAvatarDragPreview(card.querySelector(".thumb"), event);
       card.classList.add("dragging");
       startDragAutoScroll(event);
     };
-    if (canReorderCurrentGroup || syncedReorderBlocked) {
+    if (canReorderCurrentGroup || syncedReorderBlocked || canDragAvatarsToGroup) {
       card.addEventListener("dragstart", startAvatarDrag);
       card.addEventListener("dragend", () => { state.dragSort = null; clearDragSortIndicators(); });
     }
@@ -497,6 +525,12 @@ function renderAvatars() {
       if (state.dragSort?.id === avatar.id) {
         state.dragSort = null;
         clearDragSortIndicators();
+        return;
+      }
+      if (state.dragSort?.copyOnly) {
+        state.dragSort = null;
+        clearDragSortIndicators();
+        showSystemGroupSortBlocked(state.activeGroupId);
         return;
       }
       updateAvatarDropTarget(event);
@@ -517,17 +551,19 @@ function renderAvatars() {
 }
 function showAvatarContextMenu(event, avatar, canReorderCurrentGroup) {
   const pending = state.pendingAvatarSort;
+  const systemSourceGroup = isPinnedSystemGroup(avatar.groupId);
   const canPlacePending = Boolean(pending && pending.id !== avatar.id && pending.groupId === avatar.groupId && canReorderCurrentGroup);
+  const sortAction = () => startAvatarContextSort(avatar);
   const actions = [
     ...(canPlacePending ? [
       { label: "Move Before", action: () => placeContextSortedAvatar(avatar, "before") },
       { label: "Move After", action: () => placeContextSortedAvatar(avatar, "after") },
       { label: "Swap Places", action: () => placeContextSortedAvatar(avatar, "swap") },
-      { label: "Sort Avatar", className: "separated", disabled: !canReorderCurrentGroup, action: () => startAvatarContextSort(avatar) }
+      { label: "Sort Avatar", className: "separated", disabled: !canReorderCurrentGroup, action: sortAction }
     ] : [
-      { label: "Sort Avatar", disabled: !canReorderCurrentGroup, action: () => startAvatarContextSort(avatar) }
+      { label: "Sort Avatar", disabled: !canReorderCurrentGroup, action: sortAction }
     ]),
-    { label: "Move to Group", action: () => openAvatarGroupActionDialog(avatar, "move") },
+    { label: "Move to Group", disabled: systemSourceGroup, action: () => openAvatarGroupActionDialog(avatar, "move") },
     { label: "Copy to Group", action: () => openAvatarGroupActionDialog(avatar, "copy") },
     { label: "Delete Avatar", className: "danger", action: () => deleteAvatarById(avatar.id, avatar.name) }
   ];
@@ -536,6 +572,16 @@ function showAvatarContextMenu(event, avatar, canReorderCurrentGroup) {
 function startAvatarContextSort(avatar) {
   state.pendingAvatarSort = { id: avatar.id, groupId: avatar.groupId, name: avatar.name || avatar.avatarId || avatar.id };
   toast(`Choose another avatar to place "${state.pendingAvatarSort.name}".`);
+}
+function showSystemGroupSortBlocked(groupId) {
+  const name = isRecentGroup(groupId) ? "Recent" : isDeletedGroup(groupId) ? "Deleted" : "this";
+  confirmAction({
+    title: "Sorting Disabled",
+    message: `You can't sort avatars in ${name} group.`,
+    confirmLabel: "OK",
+    confirmClass: "primary",
+    hideCancel: true
+  });
 }
 function showSyncedEditModeRequired() {
   if (showSyncedEditModeRequired.open) return;
@@ -619,7 +665,15 @@ function openGroupDialog(group = null) {
   $("groupDescriptionInput").value = group?.description ?? "";
   $("groupDialog").showModal();
 }
-function fillSelectWithGroups(select, selectedId) { select.innerHTML = state.library.groups.map((g) => `<option value="${escapeAttr(g.id)}" ${g.id === selectedId ? "selected" : ""}>${escapeHtml(g.name)}</option>`).join(""); }
+function fillSelectWithGroups(select, selectedId, { includeGroup = canManuallyAddToGroup } = {}) {
+  const groups = state.library.groups.filter((group) => includeGroup(group.id));
+  select.innerHTML = groups.map((g) => `<option value="${escapeAttr(g.id)}" ${g.id === selectedId ? "selected" : ""}>${escapeHtml(g.name)}</option>`).join("");
+  if (selectedId && groups.some((group) => group.id === selectedId)) select.value = selectedId;
+  else if (groups.length) select.value = groups[0].id;
+}
+function fillCopyGroupTargets(sourceGroupId = "") {
+  fillSelectWithGroups($("copyGroupTargetInput"), state.activeGroupId, { includeGroup: (groupId) => groupId !== sourceGroupId && canCopyGroupIntoGroup(groupId) });
+}
 function openAvatarGroupActionDialog(avatar, action) {
   state.pendingMoveAvatarId = avatar.id;
   state.pendingAvatarGroupAction = action;
@@ -1175,10 +1229,11 @@ function renderAvatarDatabaseResults() {
   $("databasePageStatus").textContent = allResults.length ? `Page ${state.avatarDatabasePage + 1}${totalText}` : "";
   for (const avatar of results) {
     const image = avatar.thumbnailImageUrl || avatar.imageUrl;
+    const release = releaseStatusBadge(avatar.releaseStatus);
     const card = document.createElement("article");
     card.className = "avatar-card database-avatar-card";
     card.dataset.avatarId = avatar.avatarId || avatar.id;
-    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name || avatar.avatarId)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="badges">${databasePlatformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}${avatarSourceBadgeHtml(avatar.source)}</div></div></button><div class="avatar-card-footer"><button class="avatar-card-save primary" type="button" title="Save avatar">Save</button><button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
+    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name || avatar.avatarId)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="badges">${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${databasePlatformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}${avatarSourceBadgeHtml(avatar.source)}</div></div></button><div class="avatar-card-footer"><button class="avatar-card-save primary" type="button" title="Save avatar">Save</button><button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
     card.querySelector("button").addEventListener("click", () => openAvatarDialog({ ...avatar, groupId: state.activeGroupId }));
     card.querySelector(".avatar-card-save").addEventListener("click", (event) => { event.stopPropagation(); openAddDatabaseAvatarDialog(avatar); });
     card.querySelector(".avatar-card-equip").addEventListener("click", (event) => { event.stopPropagation(); equipAvatar(avatar.avatarId || avatar.id); });
@@ -1195,6 +1250,7 @@ function openAddDatabaseAvatarDialog(avatar) {
   state.pendingDatabaseAvatar = avatar;
   $("addDatabaseAvatarName").textContent = `Choose a group for "${avatar.name || avatar.avatarId}".`;
   fillSelectWithGroups($("databaseAvatarGroupInput"), state.activeGroupId);
+  $("confirmAddDatabaseAvatarBtn").disabled = !$("databaseAvatarGroupInput").value;
   $("addDatabaseAvatarDialog").showModal();
 }
 function openDatabaseJumpDialog() {
@@ -1595,6 +1651,11 @@ async function commitDraggedGroupDrop() {
 async function commitDraggedAvatarDrop() {
   const drag = state.dragSort;
   if (drag?.type !== "avatar") return;
+  if (drag.copyOnly) {
+    state.dragSort = null;
+    clearDragSortIndicators();
+    return;
+  }
   const targetId = drag.dropTargetId;
   const groupId = drag.groupId || state.activeGroupId;
   const draggedId = drag.id;
@@ -1796,6 +1857,8 @@ async function moveAvatarToGroup(id, groupId, { confirm = true } = {}) {
   const avatar = state.library.avatars.find((x) => x.id === id);
   const group = state.library.groups.find((x) => x.id === groupId);
   if (!avatar || !group || avatar.groupId === groupId) return;
+  if (isPinnedSystemGroup(avatar.groupId)) { toast("Recent and Deleted avatars can only be copied to another group."); return; }
+  if (!canManuallyAddToGroup(groupId)) { toast("Recent and Deleted groups are managed automatically."); return; }
   if (avatarAlreadyInGroup(avatar, groupId, id)) return showAvatarAlreadyInGroup(avatar, group);
   if (!syncedGroupHasCapacity(groupId, avatar.avatarId || avatar.id, id)) return;
   if (confirm && !await confirmAction({ title: "Move Avatar", message: `Move "${avatar.name || avatar.avatarId}" to "${group.name}"?`, confirmLabel: "Move", confirmClass: "primary" })) return;
@@ -1815,8 +1878,9 @@ async function moveOrCopyAvatarToGroup(id, groupId) {
   const avatar = state.library.avatars.find((x) => x.id === id);
   const group = state.library.groups.find((x) => x.id === groupId);
   if (!avatar || !group || avatar.groupId === groupId) return;
+  if (!canManuallyAddToGroup(groupId)) { toast("Recent and Deleted groups are managed automatically."); return; }
   if (avatarAlreadyInGroup(avatar, groupId, id)) return showAvatarAlreadyInGroup(avatar, group);
-  const choice = await chooseMoveOrCopyAvatar(avatar, group);
+  const choice = await chooseMoveOrCopyAvatar(avatar, group, { copyOnly: isPinnedSystemGroup(avatar.groupId) });
   if (choice === "copy") await copyAvatarToGroup(id, groupId);
   else if (choice === "move") await moveAvatarToGroup(id, groupId, { confirm: false });
 }
@@ -1824,6 +1888,7 @@ async function copyAvatarToGroup(id, groupId) {
   const avatar = state.library.avatars.find((x) => x.id === id);
   const group = state.library.groups.find((x) => x.id === groupId);
   if (!avatar || !group || avatar.groupId === groupId) return;
+  if (!canManuallyAddToGroup(groupId)) { toast("Recent and Deleted groups are managed automatically."); return; }
   if (avatarAlreadyInGroup(avatar, groupId, id)) return showAvatarAlreadyInGroup(avatar, group);
   if (!syncedGroupHasCapacity(groupId, avatar.avatarId || avatar.id)) return;
   try {
@@ -1860,12 +1925,17 @@ function showAvatarAlreadyInGroup(avatar, group) {
     hideCancel: true
   });
 }
-function chooseMoveOrCopyAvatar(avatar, group) {
+function chooseMoveOrCopyAvatar(avatar, group, { copyOnly = false } = {}) {
   return new Promise((resolve) => {
-    $("confirmDialogTitle").textContent = "Move or Copy Avatar";
-    $("confirmDeleteMessage").textContent = `Move or copy "${avatar.name || avatar.avatarId}" to "${group.name}"?`;
+    const moveDisabled = isPinnedSystemGroup(avatar.groupId);
+    $("confirmDialogTitle").textContent = copyOnly ? "Copy Avatar" : "Move or Copy Avatar";
+    $("confirmDeleteMessage").textContent = moveDisabled
+      ? `Recent and Deleted avatars can only be copied. Copy "${avatar.name || avatar.avatarId}" to "${group.name}"?`
+      : `Move or copy "${avatar.name || avatar.avatarId}" to "${group.name}"?`;
     $("runConfirmBtn").textContent = "Move";
     $("runConfirmBtn").className = "primary";
+    $("runConfirmBtn").hidden = copyOnly;
+    $("runConfirmBtn").disabled = moveDisabled;
     $("cancelConfirmBtn").hidden = false;
     $("cancelConfirmBtn").textContent = "Cancel";
     const copyBtn = document.createElement("button");
@@ -1875,7 +1945,7 @@ function chooseMoveOrCopyAvatar(avatar, group) {
     $("runConfirmBtn").after(copyBtn);
     let settled = false;
     const done = (value) => { if (settled) return; settled = true; $("confirmDeleteDialog").close(); cleanup(); resolve(value); };
-    const cleanup = () => { $("runConfirmBtn").onclick = null; $("cancelConfirmBtn").onclick = null; $("cancelConfirmBtn").textContent = "Cancel"; copyBtn.remove(); $("confirmDeleteDialog").removeEventListener("close", closeAsCancel); };
+    const cleanup = () => { $("runConfirmBtn").onclick = null; $("runConfirmBtn").hidden = false; $("runConfirmBtn").disabled = false; $("cancelConfirmBtn").onclick = null; $("cancelConfirmBtn").textContent = "Cancel"; copyBtn.remove(); $("confirmDeleteDialog").removeEventListener("close", closeAsCancel); };
     const closeAsCancel = () => done("");
     $("runConfirmBtn").onclick = () => done("move");
     $("cancelConfirmBtn").onclick = () => done("");
@@ -1945,10 +2015,11 @@ async function syncVrChatFavoritesSilent() {
     state.vrchat = await api("vrchatSession");
     await refreshCurrentAvatarSummarySilent();
     await logCurrentAvatarSilent();
-    if (!state.library.groups.some((group) => group.id === previousActiveId)) {
+    const desiredActiveId = state.activeGroupId === previousActiveId ? previousActiveId : state.activeGroupId;
+    if (!state.library.groups.some((group) => group.id === desiredActiveId)) {
       state.activeGroupId = state.library.groups[0]?.id ?? null;
     } else {
-      state.activeGroupId = previousActiveId;
+      state.activeGroupId = desiredActiveId;
     }
     render();
   } catch {
@@ -1957,11 +2028,13 @@ async function syncVrChatFavoritesSilent() {
   }
 }
 function updateVrChatSyncTimer() {
-  clearInterval(state.vrchatSyncTimer);
-  state.vrchatSyncTimer = null;
-  if (!state.vrchat?.isLoggedIn) return;
+  if (!state.vrchat?.isLoggedIn) {
+    state.vrchatStartupSyncDone = false;
+    return;
+  }
+  if (state.vrchatStartupSyncDone) return;
+  state.vrchatStartupSyncDone = true;
   syncVrChatFavoritesSilent();
-  state.vrchatSyncTimer = setInterval(syncVrChatFavoritesSilent, 15000);
 }
 function openPositionDialog(type, item) {
   if (type === "group" && isGroupReorderLocked(item)) return;
@@ -2001,6 +2074,92 @@ function stepBackgroundOpacity(delta) {
   state.settings.backgroundOpacity = Math.min(100, Math.max(0, Number(state.settings.backgroundOpacity) + delta));
   applyBackgroundOpacity();
 }
+async function checkDeletedFavoritesManual() {
+  if (!state.vrchat?.isLoggedIn) { toast("Log in to VRChat first."); return; }
+  if (state.vrchatSyncBusy) return;
+  state.vrchatSyncBusy = true;
+  const selectedGroupId = state.activeGroupId;
+  $("checkDeletedFavoritesBtn").textContent = "Checking...";
+  $("checkDeletedFavoritesBtn").disabled = true;
+  toast("Checking VRChat favorites for deleted or private avatars...");
+  try {
+    const result = await api("vrchatSyncFavorites");
+    state.library = result.library;
+    state.vrchat = await api("vrchatSession");
+    if (state.library.groups.some((group) => group.id === "deleted_avatars")) state.activeGroupId = "deleted_avatars";
+    else if (state.library.groups.some((group) => group.id === selectedGroupId)) state.activeGroupId = selectedGroupId;
+    else state.activeGroupId = state.library.groups[0]?.id ?? null;
+    state.vrchatSyncBusy = false;
+    render();
+    showDeletedScanResult(result);
+  } catch (e) {
+    toast(e.message);
+    state.vrchatSyncBusy = false;
+    renderToolbar();
+  } finally {
+    renderToolbar();
+  }
+}
+function showDeletedScanResult(result) {
+  const entries = (result.deletedAvatarResults || []).filter((entry) => entry?.name);
+  if (!entries.length) {
+    confirmAction({
+      title: "Check Complete",
+      message: "No deleted or privated avatars were found.",
+      confirmLabel: "OK",
+      confirmClass: "primary",
+      hideCancel: true
+    });
+    return;
+  }
+
+  const privateNames = entries.filter((entry) => String(entry.status || "").toLowerCase() === "private").map((entry) => entry.name);
+  const deletedNames = entries.filter((entry) => String(entry.status || "").toLowerCase() !== "private").map((entry) => entry.name);
+  const lines = [];
+  if (privateNames.length) lines.push(`Private: ${privateNames.join(", ")}`);
+  if (deletedNames.length) lines.push(`Deleted: ${deletedNames.join(", ")}`);
+  confirmAction({
+    title: "Moved to Deleted Avatars",
+    message: lines.join("\n"),
+    confirmLabel: "OK",
+    confirmClass: "primary",
+    hideCancel: true
+  });
+}
+async function unfavoriteAllInActiveGroup() {
+  const group = activeGroup();
+  if (!group) return;
+  const count = groupAvatars(group.id).length;
+  if (!count) { toast("No avatars in this group."); return; }
+  if (isSyncedGroup(group.id) && !state.vrchat?.isLoggedIn) { toast("Log in to VRChat first."); return; }
+  const synced = isSyncedGroup(group.id);
+  const recent = isRecentGroup(group.id);
+  const deleted = isDeletedGroup(group.id);
+  const label = recent ? "Clear Recents" : deleted ? "Clear Deleted" : "Unfavorite All";
+  const message = synced
+    ? `Remove all ${count} avatars from "${group.name}" in your VRChat favorites? A local backup will be created first.`
+    : recent
+      ? `Clear all ${count} avatars from Recent Avatars locally? A backup will be created first.`
+    : deleted
+      ? `Clear all ${count} avatars from Deleted Avatars locally? A backup will be created first.`
+    : `Remove all ${count} avatars from "${group.name}" locally? A backup will be created first.`;
+  if (!await confirmAction({ title: label, message, confirmLabel: label, confirmClass: "danger" })) return;
+  try {
+    state.vrchatSyncBusy = true;
+    renderToolbar();
+    const result = await api("clearGroupAvatars", { id: group.id }, 1800000);
+    state.library = result.library;
+    state.syncedAvatarEdit = { groupId: "", avatarIds: [], backupPath: "", applying: false };
+    state.activeGroupId = state.library.groups.some((item) => item.id === group.id) ? group.id : state.library.groups[0]?.id ?? null;
+    render();
+    toast(`${label} removed ${result.removed || count} avatars from "${group.name}".`);
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    state.vrchatSyncBusy = false;
+    renderToolbar();
+  }
+}
 function syncBackgroundOpacityFromNumber() {
   state.settings.backgroundOpacity = Number($("backgroundOpacityNumber").value);
   applyBackgroundOpacity();
@@ -2025,6 +2184,7 @@ function setSettingsTab(tab) {
     $(`settings${name[0].toUpperCase()}${name.slice(1)}Panel`).hidden = name !== tab;
   }
   if (tab === "backups") loadSettingsBackups();
+  if (tab === "logs") loadSettingsLogs();
 }
 function formatFileSize(bytes) {
   const value = Number(bytes) || 0;
@@ -2044,6 +2204,53 @@ async function loadSettingsBackups() {
     list.querySelectorAll("[data-backup-path]").forEach((button) => button.addEventListener("click", () => openBackupRestoreDialog(button.dataset.backupPath, button.dataset.backupName)));
   } catch (e) {
     list.innerHTML = `<div class="settings-empty"><h4>Could not load backups</h4><p>${escapeHtml(e.message)}</p></div>`;
+  }
+}
+async function loadSettingsLogs() {
+  const list = $("settingsLogsList");
+  list.innerHTML = `<div class="settings-empty"><h4>Loading logs</h4></div>`;
+  try {
+    const result = await api("logsList");
+    const entries = result.entries || [];
+    list.innerHTML = entries.length
+      ? entries.map(logEntryHtml).join("")
+      : `<div class="settings-empty"><h4>No logs yet</h4><p>Useful app events, sync results, backups, updates, and errors will appear here.</p></div>`;
+  } catch (e) {
+    list.innerHTML = `<div class="settings-empty"><h4>Could not load logs</h4><p>${escapeHtml(e.message)}</p></div>`;
+  }
+}
+function logEntryHtml(entry) {
+  const level = String(entry.level || "Info");
+  const levelClass = level.toLowerCase();
+  const time = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : "";
+  return `<div class="log-entry ${escapeAttr(levelClass)}"><time>${escapeHtml(time)}</time><span class="log-level">${escapeHtml(level)}</span><div class="log-body"><div class="log-title"><strong>${escapeHtml(entry.area || "App")}</strong><span>${escapeHtml(entry.message || "")}</span></div>${entry.detail ? `<p class="log-detail">${escapeHtml(entry.detail)}</p>` : ""}</div></div>`;
+}
+async function copySettingsLogs() {
+  try {
+    const result = await api("logsList");
+    const text = (result.entries || []).map((entry) => {
+      const time = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : "";
+      return `[${time}] ${entry.level || "Info"} ${entry.area || "App"}: ${entry.message || ""}${entry.detail ? ` - ${entry.detail}` : ""}`;
+    }).join("\n");
+    if (!text) { toast("No logs to copy."); return; }
+    if (await copyTextToClipboard(text)) toast("Logs copied.");
+    else toast("Could not copy logs.");
+  } catch (e) { toast(e.message); }
+}
+async function clearSettingsLogs() {
+  if (!await confirmAction({ title: "Clear Logs", message: "Clear all app logs?", confirmLabel: "Clear", confirmClass: "danger" })) return;
+  try {
+    await api("logsClear");
+    await loadSettingsLogs();
+    toast("Logs cleared.");
+  } catch (e) { toast(e.message); }
+}
+async function openLogsFolder() {
+  try {
+    const result = await api("logsFolder");
+    await api("openFolder", { path: result.path });
+  } catch (e) {
+    toast(e.message);
   }
 }
 function openBackupRestoreDialog(path, name) {
@@ -2095,7 +2302,39 @@ function cancelSettingsDialog() {
   state.settingsDraft = null;
   $("customizationDialog").close();
 }
-async function copyGroup(group) { if (!group) return; try { state.library = await api("copyGroup", { id: group.id }); state.activeGroupId = state.library.groups.at(-1)?.id ?? state.activeGroupId; render(); toast("Group copied."); } catch (e) { toast(e.message); } }
+function openCopyGroupDialog(group) {
+  if (!group || isPinnedSystemGroup(group.id)) return;
+  state.pendingCopyGroupId = group.id;
+  $("copyGroupMessage").textContent = `Copy "${group.name}" as a new group, or copy its avatars into an existing local group.`;
+  fillCopyGroupTargets(group.id);
+  const hasTarget = Boolean($("copyGroupTargetInput").value);
+  $("copyGroupTargetWrap").hidden = !hasTarget;
+  $("copyGroupToExistingBtn").disabled = !hasTarget;
+  $("copyGroupDialog").showModal();
+}
+async function copyGroup(group) {
+  if (!group) return;
+  try {
+    state.library = await api("copyGroup", { id: group.id });
+    const copied = state.library.groups.filter((item) => !isPinnedSystemGroup(item.id) && !isSyncedGroup(item.id)).at(-1);
+    state.activeGroupId = copied?.id ?? state.activeGroupId;
+    $("copyGroupDialog").close();
+    render();
+    toast("Group copied.");
+  } catch (e) { toast(e.message); }
+}
+async function copyGroupToExisting() {
+  const source = state.library.groups.find((group) => group.id === state.pendingCopyGroupId);
+  const targetId = $("copyGroupTargetInput").value;
+  if (!source || !targetId) return;
+  try {
+    state.library = await api("copyGroupToExisting", { id: source.id, targetGroupId: targetId });
+    state.activeGroupId = targetId;
+    $("copyGroupDialog").close();
+    render();
+    toast("Avatars copied to group.");
+  } catch (e) { toast(e.message); }
+}
 async function deleteGroup(group) {
   if (!group || !await confirmAction({ title: "Delete Group", message: `Are you sure you want to delete "${group.name}"?` })) return;
   const previousActiveId = state.activeGroupId;
@@ -2235,8 +2474,10 @@ document.querySelectorAll("dialog").forEach((dialog) => {
 $("addGroupBtn").addEventListener("click", () => openGroupDialog());
 $("groupFilterMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "groupFilterSelect", "groupFilterMenu", "groupFilterMenuBtn", () => { state.groupFilter = $("groupFilterSelect").value; render(); }));
 $("editGroupBtn").addEventListener("click", () => openGroupDialog(activeGroup()));
-$("copyGroupBtn").addEventListener("click", () => copyGroup(activeGroup()));
+$("copyGroupBtn").addEventListener("click", () => openCopyGroupDialog(activeGroup()));
 $("deleteGroupBtn").addEventListener("click", () => deleteGroup(activeGroup()));
+$("unfavoriteAllBtn").addEventListener("click", unfavoriteAllInActiveGroup);
+$("checkDeletedFavoritesBtn").addEventListener("click", checkDeletedFavoritesManual);
 $("addAvatarBtn").addEventListener("click", () => openAvatarDialog());
 $("favoritesTabBtn").addEventListener("click", () => showPage("favorites"));
 $("databaseTabBtn").addEventListener("click", () => showPage("database"));
@@ -2294,6 +2535,10 @@ $("cancelSettingsBtn").addEventListener("click", cancelSettingsDialog);
 $("applySettingsBtn").addEventListener("click", applySettingsDialog);
 $("restoreBackupNewBtn").addEventListener("click", () => restoreBackup("new"));
 $("restoreBackupReplaceBtn").addEventListener("click", () => restoreBackup("replace"));
+$("refreshLogsBtn").addEventListener("click", loadSettingsLogs);
+$("copyLogsBtn").addEventListener("click", copySettingsLogs);
+$("openLogsFolderBtn").addEventListener("click", openLogsFolder);
+$("clearLogsBtn").addEventListener("click", clearSettingsLogs);
 $("openBackupsFolderBtn").addEventListener("click", openBackupsFolder);
 $("openBackgroundFolderBtn").addEventListener("click", openBackgroundFolder);
 ["thumbnailInput", "imageInput"].forEach((id) => $(id).addEventListener("input", updateAvatarPreview));
@@ -2311,7 +2556,7 @@ $("copyAvatarIdBtn").addEventListener("click", async () => {
   } catch (e) { toast(e.message); }
 });
 $("fetchAvatarBtn").addEventListener("click", async (event) => { event.preventDefault(); try { setAvatarForm({ ...(await api("fetchAvatar", { id: $("avatarIdInput").value })), groupId: state.avatarDialogGroupId }); } catch (e) { toast(e.message); } });
-$("saveAvatarBtn").addEventListener("click", (event) => { event.preventDefault(); resetAvatarGroupDialogMode(); $("saveAvatarGroupName").textContent = `Choose a group for "${$("avatarNameInput").value.trim() || $("avatarIdInput").value.trim() || "this avatar"}".`; fillSelectWithGroups($("saveAvatarGroupInput"), state.avatarDialogGroupId ?? state.activeGroupId); $("saveAvatarGroupDialog").showModal(); });
+$("saveAvatarBtn").addEventListener("click", (event) => { event.preventDefault(); resetAvatarGroupDialogMode(); $("saveAvatarGroupName").textContent = `Choose a group for "${$("avatarNameInput").value.trim() || $("avatarIdInput").value.trim() || "this avatar"}".`; fillSelectWithGroups($("saveAvatarGroupInput"), state.avatarDialogGroupId ?? state.activeGroupId); $("confirmSaveAvatarGroupBtn").disabled = !$("saveAvatarGroupInput").value; $("saveAvatarGroupDialog").showModal(); });
 $("deleteAvatarBtn").addEventListener("click", async (event) => { event.preventDefault(); await deleteAvatarById(state.editingAvatarId, $("avatarNameInput").value); closeAvatarDetails(); });
 $("equipAvatarBtn").addEventListener("click", async () => equipAvatar($("avatarIdInput").value));
 $("closeAvatarDetailsBtn").addEventListener("click", closeAvatarDetails);
@@ -2319,6 +2564,8 @@ $("confirmSaveAvatarGroupBtn").addEventListener("click", async (event) => {
   event.preventDefault();
   try {
     const groupId = $("saveAvatarGroupInput").value;
+    if (!groupId) { toast("Choose a group."); return; }
+    if (!canManuallyAddToGroup(groupId)) { toast("Recent and Deleted groups are managed automatically."); return; }
     if (state.pendingMoveAvatarId) {
       const avatarId = state.pendingMoveAvatarId;
       const action = state.pendingAvatarGroupAction || "move";
@@ -2343,6 +2590,8 @@ $("confirmSaveAvatarGroupBtn").addEventListener("click", async (event) => {
   } catch (e) { toast(e.message); }
 });
 $("saveGroupBtn").addEventListener("click", async (event) => { event.preventDefault(); try { state.library = await api(state.editingGroupId ? "updateGroup" : "createGroup", { id: state.editingGroupId ?? "", name: $("groupNameInput").value, description: $("groupDescriptionInput").value }); $("groupDialog").close(); render(); } catch (e) { toast(e.message); } });
+$("copyGroupFullBtn").addEventListener("click", () => copyGroup(state.library.groups.find((group) => group.id === state.pendingCopyGroupId)));
+$("copyGroupToExistingBtn").addEventListener("click", copyGroupToExisting);
 $("avatarDatabaseSearchInput").addEventListener("input", () => { state.avatarDatabaseAuthorId = ""; });
 $("avatarDatabaseSearchInput").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); runAvatarDatabaseSearch(0); } });
 $("searchAvatarDatabaseBtn").addEventListener("click", () => runAvatarDatabaseSearch(0));
@@ -2413,6 +2662,8 @@ $("confirmAddDatabaseAvatarBtn").addEventListener("click", async (event) => {
   if (!avatar) return;
   try {
     const groupId = $("databaseAvatarGroupInput").value;
+    if (!groupId) { toast("Choose a group."); return; }
+    if (!canManuallyAddToGroup(groupId)) { toast("Recent and Deleted groups are managed automatically."); return; }
     if (!syncedGroupHasCapacity(groupId, avatar.avatarId || avatar.id)) return;
     await pushSyncedAvatarAdd(avatar.avatarId || avatar.id, groupId);
     state.library = await api("saveAvatar", { ...avatar, id: "", groupId, source: avatar.source || (avatarDatabaseProvider() === "avtrzip" ? "avtrzip" : "avatar-database") });
@@ -2467,6 +2718,7 @@ $("accountStatus").addEventListener("click", (event) => {
 $("logoutBtn").addEventListener("click", async () => { if (await confirmAction({ title: "Logout", message: "Log out of VRChat?", confirmLabel: "Logout", confirmClass: "danger" })) await logoutVrChat(); });
 $("saveCurrentAvatarBtn").addEventListener("click", async () => {
   try {
+    if (!canManuallyAddToGroup(state.activeGroupId)) { toast("Recent and Deleted groups are managed automatically."); return; }
     const avatar = await api("vrchatCurrentAvatar", { groupId: state.activeGroupId });
     if (!syncedGroupHasCapacity(state.activeGroupId, avatar.avatarId || avatar.id)) return;
     await pushSyncedAvatarAdd(avatar.avatarId || avatar.id, state.activeGroupId);
