@@ -1,4 +1,4 @@
-const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", backgroundOpacity: 20, schemaVersion: 5 };
+const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", backgroundOpacity: 20, panelOpacity: 35, schemaVersion: 6 };
 const AVATAR_PAGE_SIZE = 50;
 const SYNCED_GROUP_AVATAR_LIMIT = 50;
 const state = {
@@ -33,6 +33,7 @@ const state = {
   pendingAvatarSort: null,
   avatarDialogGroupId: null,
   avatarDialogSource: "",
+  avatarDialogHistory: null,
   dragSort: null,
   dragPoint: null,
   dragScrollFrame: null,
@@ -41,6 +42,8 @@ const state = {
   vrchatSyncBusy: false,
   vrchatSyncLoggedIn: false,
   settingsSaveTimer: null,
+  settingsDraft: null,
+  pendingBackupRestore: null,
   activePage: "favorites",
   lastLoggedCurrentAvatarId: "",
   currentAvatarSummary: { id: "", name: "" },
@@ -53,14 +56,8 @@ const BASE_DEVICE_PIXEL_RATIO = window.devicePixelRatio || 1;
 let updatePromptShown = false;
 const AVATAR_DETAIL_FIELD_IDS = [
   "avatarIdInput",
-  "avatarNameInput",
-  "authorNameInput",
-  "authorIdInput",
   "thumbnailInput",
   "imageInput",
-  "releaseStatusInput",
-  "versionInput",
-  "platformsInput",
   "tagsInput",
   "sourceUrlInput",
   "descriptionInput",
@@ -167,6 +164,7 @@ async function loadSettings() {
       databaseGridSize: Number.isFinite(saved.databaseGridSize) ? Math.min(10, Math.max(5, Number(saved.databaseGridSize))) : Number.isFinite(saved.gridSize) ? Math.min(10, Math.max(5, Number(saved.gridSize))) : DEFAULT_SETTINGS.databaseGridSize,
       themeColor: /^#[0-9a-f]{6}$/i.test(saved.themeColor || "") ? saved.themeColor : DEFAULT_SETTINGS.themeColor,
       backgroundOpacity: Number.isFinite(saved.backgroundOpacity) ? Math.min(100, Math.max(0, Number(saved.backgroundOpacity))) : DEFAULT_SETTINGS.backgroundOpacity,
+      panelOpacity: Number.isFinite(saved.panelOpacity) ? Math.min(100, Math.max(0, Number(saved.panelOpacity))) : DEFAULT_SETTINGS.panelOpacity,
       schemaVersion: DEFAULT_SETTINGS.schemaVersion
     };
   } catch { state.settings = { ...DEFAULT_SETTINGS }; }
@@ -175,8 +173,8 @@ async function loadSettings() {
 async function loadBackground() {
   try {
     const bg = await api("backgroundGet");
-    document.documentElement.style.setProperty("--custom-bg-image", bg?.dataUrl ? `url("${bg.dataUrl}")` : "none");
-  } catch { document.documentElement.style.setProperty("--custom-bg-image", "none"); }
+    renderBackground(bg);
+  } catch { renderBackground(null); }
 }
 async function saveSettings() { try { state.settings = await api("settingsSave", state.settings); applySettings(); } catch (e) { toast(e.message); } }
 function queueSaveSettings() { clearTimeout(state.settingsSaveTimer); state.settingsSaveTimer = setTimeout(saveSettings, 220); }
@@ -297,6 +295,7 @@ function showInlineTwoFactor(show) {
   $("inlineTwoFactorPanel").hidden = !show;
   if (!show) return;
   $("inlineTwoFactorMethodInput").innerHTML = (state.vrchat.twoFactorMethods || ["totp"]).map((m) => `<option value="${escapeAttr(m)}">${escapeHtml(m)}</option>`).join("");
+  updateSortButton("inlineTwoFactorMethodInput", "inlineTwoFactorMethodBtn");
   $("inlineTwoFactorCodeInput").focus();
 }
 
@@ -457,7 +456,8 @@ function renderAvatars() {
     card.draggable = canReorderCurrentGroup || syncedReorderBlocked;
     const image = avatar.thumbnailImageUrl || avatar.imageUrl;
     const reorderTitle = canReorderCurrentGroup ? "Drag to reorder" : "Enable edit mode to reorder synced avatars";
-    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="meta-line">${escapeHtml(avatar.avatarId || avatar.id)}</div><div class="badges">${platformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}</div></div></button><div class="avatar-card-footer"><button class="avatar-position" type="button" title="${reorderTitle}" ${canReorderCurrentGroup ? "" : "disabled"}>#${listPosition(orderedAvatars, avatar.id)}</button><button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
+    const release = releaseStatusBadge(avatar.releaseStatus);
+    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="badges">${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${platformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}</div></div></button><div class="avatar-card-footer"><button class="avatar-position" type="button" title="${reorderTitle}" ${canReorderCurrentGroup ? "" : "disabled"}>#${listPosition(orderedAvatars, avatar.id)}</button><button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
     card.querySelector("button").addEventListener("click", () => openAvatarDialog(avatar));
     if (canReorderCurrentGroup) card.querySelector(".avatar-position").addEventListener("click", () => openPositionDialog("avatar", avatar));
     card.querySelector(".avatar-card-equip").addEventListener("click", (event) => { event.stopPropagation(); equipAvatar(avatar.avatarId || avatar.id); });
@@ -529,7 +529,6 @@ function showAvatarContextMenu(event, avatar, canReorderCurrentGroup) {
     ]),
     { label: "Move to Group", action: () => openAvatarGroupActionDialog(avatar, "move") },
     { label: "Copy to Group", action: () => openAvatarGroupActionDialog(avatar, "copy") },
-    { label: "Equip Avatar", action: () => equipAvatar(avatar.avatarId || avatar.id) },
     { label: "Delete Avatar", className: "danger", action: () => deleteAvatarById(avatar.id, avatar.name) }
   ];
   showContextMenu(event.clientX, event.clientY, actions);
@@ -599,6 +598,18 @@ function databasePlatformBadgeLabels(value) {
   }
   return labels;
 }
+function releaseStatusBadge(status) {
+  const value = String(status || "").trim();
+  const lower = value.toLowerCase();
+  if (!value) return null;
+  if (lower === "deleted" || lower === "unavailable") return { label: "Deleted", className: "deleted" };
+  if (lower === "private" || lower === "hidden") return { label: "Private", className: "private" };
+  return { label: lower === "public" ? "Public" : value, className: lower === "public" ? "public" : "private" };
+}
+function isPlaceholderAvatarName(name) {
+  const value = String(name || "").trim();
+  return !value || /^\?+$/.test(value);
+}
 
 function openGroupDialog(group = null) {
   if (group && (isPinnedSystemGroup(group.id) || isSyncedGroup(group.id))) return;
@@ -636,6 +647,7 @@ function openAvatarDialog(avatar = null) {
   $("avatarDetailsPanel").hidden = false;
   document.body.classList.add("details-open");
   requestAnimationFrame(applyGridSize);
+  if (avatar?.avatarId) hydrateAvatarDetailsFromVrChat(avatar.avatarId);
 }
 function closeAvatarDetails() { $("avatarDetailsPanel").hidden = true; document.body.classList.remove("details-open"); requestAnimationFrame(applyGridSize); }
 function applyAvatarDetailReadOnlyMode(mode) {
@@ -646,9 +658,12 @@ function applyAvatarDetailReadOnlyMode(mode) {
     field.classList.toggle("readonly-field", field.readOnly);
   }
   $("fetchAvatarBtn").disabled = mode !== "add";
+  $("fetchAvatarBtn").hidden = mode !== "add";
+  $("copyAvatarIdBtn").hidden = mode === "add";
 }
 function setAvatarForm(avatar) {
   state.avatarDialogSource = avatar.source ?? "";
+  state.avatarDialogHistory = avatar ?? {};
   $("avatarIdInput").value = avatar.avatarId ?? "";
   $("avatarNameInput").value = avatar.name ?? "";
   $("authorNameInput").value = avatar.authorName ?? "";
@@ -658,6 +673,7 @@ function setAvatarForm(avatar) {
   $("releaseStatusInput").value = avatar.releaseStatus ?? "";
   $("versionInput").value = avatar.version ?? "";
   $("platformsInput").value = avatar.platforms ?? "";
+  updateAvatarDetailUpdated(avatar);
   $("tagsInput").value = avatar.tags ?? "";
   $("sourceUrlInput").value = avatar.sourceUrl ?? "";
   $("descriptionInput").value = avatar.description ?? "";
@@ -667,8 +683,38 @@ function setAvatarForm(avatar) {
   updateAvatarPreview();
   updateAvatarDetailBadges();
 }
+function mergeAvatarDetailMetadata(details) {
+  if (!details || $("avatarIdInput").value.trim() !== String(details.avatarId || details.id || "").trim()) return;
+  state.avatarDialogHistory = { ...(state.avatarDialogHistory || {}), ...details };
+  state.avatarDialogSource = details.source || state.avatarDialogSource;
+  if (!isPlaceholderAvatarName(details.name)) $("avatarNameInput").value = details.name;
+  if (details.authorName) $("authorNameInput").value = details.authorName;
+  if (details.authorId) $("authorIdInput").value = details.authorId;
+  if (details.releaseStatus) $("releaseStatusInput").value = details.releaseStatus;
+  if (details.version) $("versionInput").value = details.version;
+  if (details.platforms) $("platformsInput").value = details.platforms;
+  if (details.thumbnailImageUrl && !$("thumbnailInput").value.trim()) $("thumbnailInput").value = details.thumbnailImageUrl;
+  if (details.imageUrl && !$("imageInput").value.trim()) $("imageInput").value = details.imageUrl;
+  if (details.sourceUrl && !$("sourceUrlInput").value.trim()) $("sourceUrlInput").value = details.sourceUrl;
+  if (details.description && !$("descriptionInput").value.trim()) $("descriptionInput").value = details.description;
+  if (details.rawJson && !$("rawJsonInput").value.trim()) $("rawJsonInput").value = details.rawJson;
+  updateAvatarAuthorAction();
+  updateAvatarPreview();
+  updateAvatarDetailBadges();
+  updateAvatarDetailUpdated(state.avatarDialogHistory);
+}
+async function hydrateAvatarDetailsFromVrChat(avatarId) {
+  const expected = String(avatarId || "").trim();
+  if (!expected) return;
+  try {
+    const details = await api("fetchAvatar", { id: expected }, 45000);
+    if ($("avatarDetailsPanel").hidden || String($("avatarIdInput").value || "").trim() !== expected) return;
+    mergeAvatarDetailMetadata(details);
+  } catch {
+  }
+}
 function readAvatarForm(groupId = state.avatarDialogGroupId ?? state.activeGroupId) {
-  return { id: state.editingAvatarId ?? "", groupId, avatarId: $("avatarIdInput").value, name: $("avatarNameInput").value, authorName: $("authorNameInput").value, authorId: $("authorIdInput").value, thumbnailImageUrl: $("thumbnailInput").value, imageUrl: $("imageInput").value, releaseStatus: $("releaseStatusInput").value, version: $("versionInput").value, platforms: $("platformsInput").value, tags: $("tagsInput").value, sourceUrl: $("sourceUrlInput").value, description: $("descriptionInput").value, notes: $("notesInput").value, rawJson: $("rawJsonInput").value };
+  return { id: state.editingAvatarId ?? "", groupId, avatarId: $("avatarIdInput").value, name: $("avatarNameInput").value, authorName: $("authorNameInput").value, authorId: $("authorIdInput").value, thumbnailImageUrl: $("thumbnailInput").value, imageUrl: $("imageInput").value, releaseStatus: $("releaseStatusInput").value, version: $("versionInput").value, platforms: $("platformsInput").value, tags: $("tagsInput").value, sourceUrl: $("sourceUrlInput").value, description: $("descriptionInput").value, notes: $("notesInput").value, rawJson: $("rawJsonInput").value, source: state.avatarDialogHistory?.source || state.avatarDialogSource || "", remoteCreatedAt: state.avatarDialogHistory?.remoteCreatedAt || "", remoteUpdatedAt: state.avatarDialogHistory?.remoteUpdatedAt || "", remoteFavoriteId: state.avatarDialogHistory?.remoteFavoriteId || "" };
 }
 function updateAvatarPreview() {
   const image = $("thumbnailInput").value.trim() || $("imageInput").value.trim();
@@ -678,9 +724,46 @@ function updateAvatarPreview() {
   $("avatarDetailThumbnailButton").disabled = !image;
 }
 function updateAvatarDetailBadges() {
-  const release = $("releaseStatusInput").value.trim();
-  const releaseClass = release.toLowerCase() === "public" ? "public" : "private";
-  $("avatarDetailBadges").innerHTML = `${release ? `<span class="badge ${releaseClass}">${escapeHtml(release)}</span>` : ""}${$("versionInput").value ? `<span class="badge">v${escapeHtml($("versionInput").value)}</span>` : ""}${platformBadgeLabels($("platformsInput").value).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}${avatarSourceBadgeHtml(state.avatarDialogSource)}${splitBadgeValues($("tagsInput").value).slice(0, 10).map((tag) => `<span class="badge">${escapeHtml(tag)}</span>`).join("")}`;
+  const release = releaseStatusBadge($("releaseStatusInput").value);
+  $("avatarDetailBadges").innerHTML = `${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${$("versionInput").value ? `<span class="badge">v${escapeHtml($("versionInput").value)}</span>` : ""}${databasePlatformBadgeLabels($("platformsInput").value).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}`;
+}
+
+function formatAvatarUpdatedAt(avatar) {
+  const value = avatar?.remoteUpdatedAt || "";
+  if (!value) return "Avatar update unknown";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return `Avatar updated: ${String(value)}`;
+  return `Avatar updated: ${date.toLocaleString()}`;
+}
+function updateAvatarDetailUpdated(avatar) {
+  const button = $("avatarDetailUpdated");
+  const label = formatAvatarUpdatedAt(avatar);
+  button.textContent = label || "No update history";
+  button.disabled = avatarUpdateHistoryRows(avatar).length === 0;
+}
+function avatarUpdateHistoryRows(avatar = state.avatarDialogHistory) {
+  const rows = [
+    ["Local created", avatar?.createdAt],
+    ["Local updated", avatar?.updatedAt],
+    ["Avatar created", avatar?.remoteCreatedAt],
+    ["Avatar updated", avatar?.remoteUpdatedAt]
+  ];
+  return rows
+    .map(([label, value]) => ({ label, value: formatHistoryTimestamp(value) }))
+    .filter((row) => row.value);
+}
+function formatHistoryTimestamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString();
+}
+function showAvatarUpdateHistory() {
+  const rows = avatarUpdateHistoryRows();
+  $("avatarUpdateHistoryList").innerHTML = rows.length
+    ? rows.map((row) => `<div><strong>${escapeHtml(row.label)}</strong><span>${escapeHtml(row.value)}</span></div>`).join("")
+    : `<p class="dialog-note">No update history is available for this avatar.</p>`;
+  $("avatarUpdateHistoryDialog").showModal();
 }
 
 function avatarSourceLabels(source) {
@@ -1093,14 +1176,15 @@ function renderAvatarDatabaseResults() {
   for (const avatar of results) {
     const image = avatar.thumbnailImageUrl || avatar.imageUrl;
     const card = document.createElement("article");
-    card.className = "avatar-card";
+    card.className = "avatar-card database-avatar-card";
     card.dataset.avatarId = avatar.avatarId || avatar.id;
-    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name || avatar.avatarId)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="meta-line">${escapeHtml(avatar.avatarId || avatar.id)}</div><div class="badges">${databasePlatformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}${avatarSourceBadgeHtml(avatar.source)}</div></div></button>`;
+    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name || avatar.avatarId)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="badges">${databasePlatformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}${avatarSourceBadgeHtml(avatar.source)}</div></div></button><div class="avatar-card-footer"><button class="avatar-card-save primary" type="button" title="Save avatar">Save</button><button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
     card.querySelector("button").addEventListener("click", () => openAvatarDialog({ ...avatar, groupId: state.activeGroupId }));
+    card.querySelector(".avatar-card-save").addEventListener("click", (event) => { event.stopPropagation(); openAddDatabaseAvatarDialog(avatar); });
+    card.querySelector(".avatar-card-equip").addEventListener("click", (event) => { event.stopPropagation(); equipAvatar(avatar.avatarId || avatar.id); });
     card.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       showContextMenu(event.clientX, event.clientY, [
-        { label: "Equip Avatar", action: () => equipAvatar(avatar.avatarId || avatar.id) },
         { label: "Add to Group", action: () => openAddDatabaseAvatarDialog(avatar) }
       ]);
     });
@@ -1426,6 +1510,23 @@ function wheelScrollDuringDrag(event) {
   target.scrollTop += event.deltaY;
   event.preventDefault();
 }
+function keyScrollDuringDrag(event) {
+  if (!state.dragSort || !["ArrowUp", "ArrowDown"].includes(event.key)) return false;
+  const containers = state.dragSort.type === "group" ? [$("groupList")] : isSyncedAvatarEditDrag() ? [$("avatarGrid")] : [$("avatarGrid"), $("groupList")];
+  const point = state.dragPoint;
+  const target = point ? containers.find((container) => pointInside(container, point)) : containers[0];
+  if (!target) return false;
+  const before = target.scrollTop;
+  target.scrollTop += event.key === "ArrowDown" ? 96 : -96;
+  if (target.scrollTop === before) return false;
+  if (point) {
+    if (state.dragSort.type === "avatar" && target === $("avatarGrid")) updateAvatarDropTarget(point);
+    if (state.dragSort.type === "group" && target === $("groupList")) updateGroupDropTarget(point);
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
 function showZoomIndicator() {
   clearTimeout(showZoomIndicator.readTimer);
   showZoomIndicator.readTimer = setTimeout(() => {
@@ -1636,7 +1737,8 @@ function showDropPlacementMenu(drop) {
   showContextMenu(drop.x, drop.y, [
     { label: "Move Before", action: () => placeDroppedItem(drop, "before") },
     { label: "Move After", action: () => placeDroppedItem(drop, "after") },
-    { label: "Swap Places", action: () => placeDroppedItem(drop, "swap") }
+    { label: "Swap Places", action: () => placeDroppedItem(drop, "swap") },
+    { label: "Cancel", className: "separated", action: hideContextMenu }
   ]);
 }
 async function placeDroppedItem(drop, placement) {
@@ -1770,7 +1872,7 @@ function chooseMoveOrCopyAvatar(avatar, group) {
     copyBtn.type = "button";
     copyBtn.className = "primary";
     copyBtn.textContent = "Copy";
-    $("runConfirmBtn").before(copyBtn);
+    $("runConfirmBtn").after(copyBtn);
     let settled = false;
     const done = (value) => { if (settled) return; settled = true; $("confirmDeleteDialog").close(); cleanup(); resolve(value); };
     const cleanup = () => { $("runConfirmBtn").onclick = null; $("cancelConfirmBtn").onclick = null; $("cancelConfirmBtn").textContent = "Cancel"; copyBtn.remove(); $("confirmDeleteDialog").removeEventListener("close", closeAsCancel); };
@@ -1835,6 +1937,11 @@ async function syncVrChatFavoritesSilent() {
     const previousActiveId = state.activeGroupId;
     const result = await api("vrchatSyncFavorites");
     state.library = result.library;
+    if (result.movedToDeleted > 0) {
+      const names = (result.deletedAvatarNames || []).filter(Boolean);
+      const preview = names.slice(0, 3).join(", ");
+      toast(result.movedToDeleted === 1 ? `"${preview || "An avatar"}" was moved to Deleted Avatars.` : `${result.movedToDeleted} unavailable avatars were moved to Deleted Avatars${preview ? `: ${preview}${names.length > 3 ? ", ..." : ""}` : "."}`);
+    }
     state.vrchat = await api("vrchatSession");
     await refreshCurrentAvatarSummarySilent();
     await logCurrentAvatarSilent();
@@ -1893,12 +2000,100 @@ function syncPositionFromNumber() {
 function stepBackgroundOpacity(delta) {
   state.settings.backgroundOpacity = Math.min(100, Math.max(0, Number(state.settings.backgroundOpacity) + delta));
   applyBackgroundOpacity();
-  queueSaveSettings();
 }
 function syncBackgroundOpacityFromNumber() {
   state.settings.backgroundOpacity = Number($("backgroundOpacityNumber").value);
   applyBackgroundOpacity();
-  queueSaveSettings();
+}
+function stepPanelOpacity(delta) {
+  state.settings.panelOpacity = Math.min(100, Math.max(0, Number(state.settings.panelOpacity) + delta));
+  applyPanelOpacity();
+}
+function syncPanelOpacityFromNumber() {
+  state.settings.panelOpacity = Number($("panelOpacityNumber").value);
+  applyPanelOpacity();
+}
+function openSettingsDialog() {
+  state.settingsDraft = { original: { ...state.settings }, applied: false };
+  $("customizationDialog").showModal();
+  setSettingsTab("customization");
+}
+function setSettingsTab(tab) {
+  const tabs = ["customization", "logs", "backups"];
+  for (const name of tabs) {
+    $(`settings${name[0].toUpperCase()}${name.slice(1)}Tab`).classList.toggle("active", name === tab);
+    $(`settings${name[0].toUpperCase()}${name.slice(1)}Panel`).hidden = name !== tab;
+  }
+  if (tab === "backups") loadSettingsBackups();
+}
+function formatFileSize(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+async function loadSettingsBackups() {
+  const list = $("settingsBackupsList");
+  list.innerHTML = `<div class="settings-empty"><h4>Loading backups</h4></div>`;
+  try {
+    const result = await api("backupList");
+    const files = result.files || [];
+    list.innerHTML = files.length
+      ? files.map((file) => `<div class="settings-list-item"><div><strong>${escapeHtml(file.name)}</strong><span>${escapeHtml(file.reason || "Backup")} - ${escapeHtml(new Date(file.lastModified).toLocaleString())}</span></div><small>${escapeHtml(formatFileSize(file.size))}</small><button type="button" class="restore-action" data-backup-path="${escapeAttr(file.path)}" data-backup-name="${escapeAttr(file.name)}">Restore</button></div>`).join("")
+      : `<div class="settings-empty"><h4>No backups</h4><p>Backups will appear here after group edits, synced order saves, or cleanup moves.</p></div>`;
+    list.querySelectorAll("[data-backup-path]").forEach((button) => button.addEventListener("click", () => openBackupRestoreDialog(button.dataset.backupPath, button.dataset.backupName)));
+  } catch (e) {
+    list.innerHTML = `<div class="settings-empty"><h4>Could not load backups</h4><p>${escapeHtml(e.message)}</p></div>`;
+  }
+}
+function openBackupRestoreDialog(path, name) {
+  state.pendingBackupRestore = { path, name };
+  $("backupRestoreMessage").textContent = `Restore "${name}" as a new group, or replace the original group from that backup.`;
+  $("backupRestoreDialog").showModal();
+}
+async function restoreBackup(mode) {
+  const backup = state.pendingBackupRestore;
+  if (!backup?.path) return;
+  try {
+    state.library = await api("backupRestore", { path: backup.path, mode });
+    $("backupRestoreDialog").close();
+    $("customizationDialog").close();
+    state.pendingBackupRestore = null;
+    ensureActiveGroupExists();
+    render();
+    toast(mode === "replace" ? "Backup restored over original group." : "Backup restored as a new group.");
+  } catch (e) {
+    toast(e.message);
+  }
+}
+async function openBackupsFolder() {
+  try {
+    const result = await api("backupList");
+    await api("openFolder", { path: result.folder });
+  } catch (e) {
+    toast(e.message);
+  }
+}
+async function openBackgroundFolder() {
+  try {
+    const result = await api("backgroundFolder");
+    await api("openFolder", { path: result.path });
+  } catch (e) {
+    toast(e.message);
+  }
+}
+async function applySettingsDialog() {
+  state.settingsDraft = { ...(state.settingsDraft || {}), applied: true };
+  await saveSettings();
+  $("customizationDialog").close();
+}
+function cancelSettingsDialog() {
+  if (state.settingsDraft?.original) {
+    state.settings = { ...state.settingsDraft.original };
+    applySettings();
+  }
+  state.settingsDraft = null;
+  $("customizationDialog").close();
 }
 async function copyGroup(group) { if (!group) return; try { state.library = await api("copyGroup", { id: group.id }); state.activeGroupId = state.library.groups.at(-1)?.id ?? state.activeGroupId; render(); toast("Group copied."); } catch (e) { toast(e.message); } }
 async function deleteGroup(group) {
@@ -1954,7 +2149,7 @@ function confirmAction({ title, message, confirmLabel = "Delete", confirmClass =
   });
 }
 
-function applySettings() { applyGridSize(); applyThemeColor(state.settings.themeColor); applyBackgroundOpacity(); }
+function applySettings() { applyGridSize(); applyThemeColor(state.settings.themeColor); applyBackgroundOpacity(); applyPanelOpacity(); }
 function applyGridSize() {
   const columns = Math.min(10, Math.max(5, Number(state.activePage === "database" ? state.settings.databaseGridSize : state.settings.gridSize) || DEFAULT_SETTINGS.gridSize));
   const activeGrid = state.activePage === "database" ? $("avatarDatabaseResults") : $("avatarGrid");
@@ -1981,13 +2176,45 @@ function applyBackgroundOpacity() {
   $("backgroundOpacityPrevBtn").disabled = value <= 0;
   $("backgroundOpacityNextBtn").disabled = value >= 100;
 }
+function applyPanelOpacity() {
+  const value = Math.min(100, Math.max(0, Number(state.settings.panelOpacity) || 0));
+  state.settings.panelOpacity = value;
+  document.documentElement.style.setProperty("--panel-opacity", String(value / 100));
+  $("panelOpacityInput").value = String(value);
+  $("panelOpacityNumber").value = String(value);
+  $("panelOpacityPrevBtn").disabled = value <= 0;
+  $("panelOpacityNextBtn").disabled = value >= 100;
+}
+function renderBackground(bg) {
+  const layer = $("backgroundLayer");
+  if (!layer) return;
+  layer.replaceChildren();
+  if (!bg?.dataUrl) return;
+  const isVideo = String(bg.mediaType || "").toLowerCase() === "video";
+  const media = document.createElement(isVideo ? "video" : "img");
+  if (isVideo) {
+    media.autoplay = true;
+    media.loop = true;
+    media.muted = true;
+    media.playsInline = true;
+  } else {
+    media.alt = "";
+  }
+  media.src = bg.dataUrl;
+  layer.append(media);
+}
 function applyThemeColor(hex) {
   const rgb = hexToRgb(hex) ?? hexToRgb(DEFAULT_SETTINGS.themeColor);
+  const panel = mix({ r: 18, g: 22, b: 20 }, rgb, .16);
+  const panel2 = mix({ r: 18, g: 22, b: 20 }, rgb, .28);
   document.documentElement.style.setProperty("--accent", rgbToHex(rgb));
+  document.documentElement.style.setProperty("--accent-rgb", `${Math.round(rgb.r)}, ${Math.round(rgb.g)}, ${Math.round(rgb.b)}`);
   document.documentElement.style.setProperty("--accent-ink", luminance(rgb) > .55 ? "#08110c" : "#f6fff8");
   document.documentElement.style.setProperty("--bg", rgbToHex(mix({ r: 0, g: 0, b: 0 }, rgb, .13)));
-  document.documentElement.style.setProperty("--panel", rgbToHex(mix({ r: 18, g: 22, b: 20 }, rgb, .16)));
-  document.documentElement.style.setProperty("--panel-2", rgbToHex(mix({ r: 18, g: 22, b: 20 }, rgb, .28)));
+  document.documentElement.style.setProperty("--panel", rgbToHex(panel));
+  document.documentElement.style.setProperty("--panel-2", rgbToHex(panel2));
+  document.documentElement.style.setProperty("--panel-rgb", `${Math.round(panel.r)}, ${Math.round(panel.g)}, ${Math.round(panel.b)}`);
+  document.documentElement.style.setProperty("--panel-2-rgb", `${Math.round(panel2.r)}, ${Math.round(panel2.g)}, ${Math.round(panel2.b)}`);
   document.documentElement.style.setProperty("--line", rgbToHex(mix({ r: 18, g: 22, b: 20 }, rgb, .48)));
   document.documentElement.style.setProperty("--muted", rgbToHex(mix({ r: 255, g: 255, b: 255 }, rgb, .34)));
   $("themeColorInput").value = rgbToHex(rgb);
@@ -1999,7 +2226,11 @@ function luminance({ r, g, b }) { return (0.2126 * r + 0.7152 * g + 0.0722 * b) 
 
 document.querySelectorAll("[data-close]").forEach((btn) => btn.addEventListener("click", () => $(btn.dataset.close).close()));
 document.querySelectorAll("dialog").forEach((dialog) => {
-  dialog.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
+  dialog.addEventListener("pointerdown", (event) => { dialog.dataset.backdropPointerDown = event.target === dialog ? "true" : "false"; });
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog && dialog.dataset.backdropPointerDown === "true") dialog.close();
+    dialog.dataset.backdropPointerDown = "false";
+  });
 });
 $("addGroupBtn").addEventListener("click", () => openGroupDialog());
 $("groupFilterMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "groupFilterSelect", "groupFilterMenu", "groupFilterMenuBtn", () => { state.groupFilter = $("groupFilterSelect").value; render(); }));
@@ -2017,6 +2248,7 @@ document.addEventListener("dragover", autoScrollDrag);
 document.addEventListener("wheel", wheelScrollDuringDrag, { passive: false, capture: true });
 document.addEventListener("wheel", trackZoomWheel, { passive: true, capture: true });
 document.addEventListener("keydown", (event) => {
+  if (keyScrollDuringDrag(event)) return;
   if (event.key === "Escape") hideContextMenu();
   if (event.key !== "Tab" || document.querySelector("dialog[open]")) return;
   event.preventDefault();
@@ -2029,7 +2261,17 @@ $("groupList").addEventListener("drop", handleGroupListDrop);
 $("gridSizeInput").addEventListener("input", () => { state.settings.gridSize = Number($("gridSizeInput").value); applyGridSize(); queueSaveSettings(); });
 $("databaseGridSizeInput").addEventListener("input", () => { state.settings.databaseGridSize = Number($("databaseGridSizeInput").value); applyGridSize(); queueSaveSettings(); });
 window.addEventListener("resize", applyGridSize);
-$("customizationBtn").addEventListener("click", () => $("customizationDialog").showModal());
+$("customizationBtn").addEventListener("click", openSettingsDialog);
+$("settingsCustomizationTab").addEventListener("click", () => setSettingsTab("customization"));
+$("settingsLogsTab").addEventListener("click", () => setSettingsTab("logs"));
+$("settingsBackupsTab").addEventListener("click", () => setSettingsTab("backups"));
+$("customizationDialog").addEventListener("close", () => {
+  if (state.settingsDraft && !state.settingsDraft.applied) {
+    state.settings = { ...state.settingsDraft.original };
+    applySettings();
+  }
+  state.settingsDraft = null;
+});
 $("syncedAvatarEditToggle").addEventListener("change", async (event) => { await setSyncedAvatarEditMode(event.target.checked); });
 $("applySyncedAvatarOrderBtn").addEventListener("click", applySyncedAvatarEdit);
 $("cancelSyncedAvatarOrderBtn").addEventListener("click", cancelSyncedAvatarEdit);
@@ -2037,17 +2279,28 @@ $("openGameBtn").addEventListener("click", async () => {
   if (!await confirmAction({ title: "Open Game", message: "Open VRChat in desktop mode?", confirmLabel: "Open", confirmClass: "primary" })) return;
   try { await api("openGame"); } catch (e) { toast(e.message); }
 });
-$("themeColorInput").addEventListener("input", () => { state.settings.themeColor = $("themeColorInput").value; applyThemeColor(state.settings.themeColor); queueSaveSettings(); });
-$("backgroundOpacityInput").addEventListener("input", () => { state.settings.backgroundOpacity = Number($("backgroundOpacityInput").value); applyBackgroundOpacity(); queueSaveSettings(); });
+$("themeColorInput").addEventListener("input", () => { state.settings.themeColor = $("themeColorInput").value; applyThemeColor(state.settings.themeColor); });
+$("backgroundOpacityInput").addEventListener("input", () => { state.settings.backgroundOpacity = Number($("backgroundOpacityInput").value); applyBackgroundOpacity(); });
 $("backgroundOpacityNumber").addEventListener("input", syncBackgroundOpacityFromNumber);
 $("backgroundOpacityPrevBtn").addEventListener("click", () => stepBackgroundOpacity(-1));
 $("backgroundOpacityNextBtn").addEventListener("click", () => stepBackgroundOpacity(1));
+$("panelOpacityInput").addEventListener("input", () => { state.settings.panelOpacity = Number($("panelOpacityInput").value); applyPanelOpacity(); });
+$("panelOpacityNumber").addEventListener("input", syncPanelOpacityFromNumber);
+$("panelOpacityPrevBtn").addEventListener("click", () => stepPanelOpacity(-1));
+$("panelOpacityNextBtn").addEventListener("click", () => stepPanelOpacity(1));
 $("checkUpdateBtn").addEventListener("click", () => checkForUpdates());
-$("resetThemeBtn").addEventListener("click", () => { state.settings.themeColor = DEFAULT_SETTINGS.themeColor; state.settings.backgroundOpacity = DEFAULT_SETTINGS.backgroundOpacity; applySettings(); saveSettings(); });
+$("resetThemeBtn").addEventListener("click", () => { state.settings.themeColor = DEFAULT_SETTINGS.themeColor; state.settings.backgroundOpacity = DEFAULT_SETTINGS.backgroundOpacity; state.settings.panelOpacity = DEFAULT_SETTINGS.panelOpacity; applySettings(); });
+$("cancelSettingsBtn").addEventListener("click", cancelSettingsDialog);
+$("applySettingsBtn").addEventListener("click", applySettingsDialog);
+$("restoreBackupNewBtn").addEventListener("click", () => restoreBackup("new"));
+$("restoreBackupReplaceBtn").addEventListener("click", () => restoreBackup("replace"));
+$("openBackupsFolderBtn").addEventListener("click", openBackupsFolder);
+$("openBackgroundFolderBtn").addEventListener("click", openBackgroundFolder);
 ["thumbnailInput", "imageInput"].forEach((id) => $(id).addEventListener("input", updateAvatarPreview));
-["releaseStatusInput", "versionInput", "platformsInput", "tagsInput"].forEach((id) => $(id).addEventListener("input", updateAvatarDetailBadges));
+["tagsInput"].forEach((id) => $(id).addEventListener("input", updateAvatarDetailBadges));
 $("avatarDetailThumbnailButton").addEventListener("click", () => { const image = $("imageInput").value.trim() || $("thumbnailInput").value.trim(); if (!image) return; $("imagePreviewFull").src = image; $("imagePreviewDialog").showModal(); });
 $("avatarDetailAuthorBtn").addEventListener("click", showAvatarAuthorSearchOptions);
+$("avatarDetailUpdated").addEventListener("click", showAvatarUpdateHistory);
 ["avatarNameInput", "avatarIdInput", "authorNameInput", "authorIdInput"].forEach((id) => $(id).addEventListener("input", updateAvatarAuthorAction));
 $("copyAvatarIdBtn").addEventListener("click", async () => {
   const avatarId = $("avatarIdInput").value.trim();
@@ -2194,8 +2447,18 @@ async function runInlineTwoFactor() {
 $("runInlineLoginBtn").addEventListener("click", runInlineLogin);
 $("cancelInlineTwoFactorBtn").addEventListener("click", () => showInlineTwoFactor(false));
 $("runInlineTwoFactorBtn").addEventListener("click", runInlineTwoFactor);
-$("inlineLoginPanel").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); runInlineLogin(); } });
+$("inlineLoginUsernameInput").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  $("inlineLoginPasswordInput").focus();
+});
+$("inlineLoginPasswordInput").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  runInlineLogin();
+});
 $("inlineTwoFactorPanel").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); runInlineTwoFactor(); } });
+$("inlineTwoFactorMethodBtn").addEventListener("click", (event) => toggleSortMenu(event, "inlineTwoFactorMethodInput", "inlineTwoFactorMethodMenu", "inlineTwoFactorMethodBtn", () => {}));
 $("accountStatus").addEventListener("click", (event) => {
   if (!state.vrchat?.isLoggedIn) return;
   event.stopPropagation();

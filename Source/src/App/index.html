@@ -7,13 +7,14 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <div id="backgroundLayer" class="background-layer" aria-hidden="true"></div>
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand">
-        <div><h1>VRCNeph</h1><p>Local avatar favorites</p></div>
+        <div><h1>VRCNeph</h1></div>
         <div class="brand-actions">
           <button id="openGameBtn" type="button">Open Game</button>
-          <button id="customizationBtn" type="button">Customize</button>
+          <button id="customizationBtn" type="button">Settings</button>
         </div>
       </div>
       <section class="account-panel">
@@ -30,7 +31,13 @@
           <div class="account-actions"><button id="cancelInlineLoginBtn" type="button">Cancel</button><button id="runInlineLoginBtn" type="button" class="primary">Login</button></div>
         </div>
         <div id="inlineTwoFactorPanel" class="inline-login" hidden>
-          <label>Method<select id="inlineTwoFactorMethodInput"></select></label>
+          <label>Method
+            <div class="sort-control two-factor-method-control">
+              <button id="inlineTwoFactorMethodBtn" type="button">TOTP</button>
+              <div id="inlineTwoFactorMethodMenu" class="sort-menu" hidden></div>
+              <select id="inlineTwoFactorMethodInput" hidden></select>
+            </div>
+          </label>
           <label>Code<input id="inlineTwoFactorCodeInput" inputmode="numeric" autocomplete="one-time-code"></label>
           <div id="twoFactorStatus" class="login-status"></div>
           <div class="account-actions"><button id="cancelInlineTwoFactorBtn" type="button">Cancel</button><button id="runInlineTwoFactorBtn" type="button" class="primary">Verify</button></div>
@@ -138,14 +145,13 @@
           <div class="lookup-row"><label>Avatar ID<input id="avatarIdInput" placeholder="avtr_..."></label><button id="copyAvatarIdBtn" type="button">Copy ID</button><button id="fetchAvatarBtn">Fetch</button></div>
           <div class="avatar-detail-preview">
             <button id="avatarDetailThumbnailButton" class="avatar-detail-thumb" type="button" disabled><img id="avatarDetailThumbnail" alt="" hidden><span id="avatarDetailThumbnailEmpty">No thumbnail</span></button>
-            <div class="avatar-detail-side"><div id="avatarDetailName" class="avatar-detail-name"></div><button id="avatarDetailAuthorBtn" class="avatar-detail-author" type="button" hidden></button><div id="avatarDetailBadges" class="avatar-detail-badges"></div></div>
+            <div class="avatar-detail-side"><div id="avatarDetailName" class="avatar-detail-name"></div><button id="avatarDetailAuthorBtn" class="avatar-detail-author" type="button" hidden></button><div id="avatarDetailBadges" class="avatar-detail-badges"></div><button id="avatarDetailUpdated" class="avatar-detail-updated" type="button"></button></div>
           </div>
           <div class="form-grid">
-            <label>Name<input id="avatarNameInput" required></label>
-            <label>Author<input id="authorNameInput"></label><label>Author ID<input id="authorIdInput"></label>
+            <input id="avatarNameInput" type="hidden"><input id="authorNameInput" type="hidden"><input id="authorIdInput" type="hidden">
             <label>Thumbnail URL<input id="thumbnailInput"></label><label>Image URL<input id="imageInput"></label>
-            <label>Release Status<input id="releaseStatusInput"></label><label>Version<input id="versionInput"></label>
-            <label>Platforms<input id="platformsInput"></label><label>Tags<input id="tagsInput"></label><label>Source URL<input id="sourceUrlInput"></label>
+            <input id="releaseStatusInput" type="hidden"><input id="versionInput" type="hidden"><input id="platformsInput" type="hidden">
+            <label>Tags<input id="tagsInput"></label><label>Source URL<input id="sourceUrlInput"></label>
             <label class="detail-wide detail-description">Description<textarea id="descriptionInput" rows="3"></textarea></label><label class="detail-wide detail-notes">Notes<textarea id="notesInput" rows="3"></textarea></label><label class="detail-wide detail-raw">Raw JSON<textarea id="rawJsonInput" rows="5" spellcheck="false"></textarea></label>
           </div>
           <menu><button id="deleteAvatarBtn" class="danger">Delete</button><button id="equipAvatarBtn" type="button" class="primary">Equip Avatar</button><button id="saveAvatarBtn" class="primary">Save Avatar</button></menu>
@@ -188,18 +194,42 @@
     <menu><button type="button" data-close="positionDialog">Cancel</button><button id="confirmPositionBtn" class="primary">Move</button></menu>
   </form></dialog>
 
-  <dialog id="customizationDialog"><form method="dialog" class="dialog-form">
-    <header><h3>Customize</h3><button type="button" class="icon-button" data-close="customizationDialog">x</button></header>
-    <label class="theme-control">Theme<input id="themeColorInput" type="color" value="#303735"></label>
-    <label>Background opacity</label>
-    <div class="page-slider-row"><button id="backgroundOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="backgroundOpacityInput" type="range" min="0" max="100" value="20"><button id="backgroundOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button></div>
-    <label id="backgroundOpacityValue" class="page-slider-value">Opacity <input id="backgroundOpacityNumber" type="number" min="0" max="100" step="1" value="20">%</label>
-    <menu><button id="checkUpdateBtn" type="button">Check Updates</button><button id="resetThemeBtn" type="button">Reset Theme</button><button type="button" data-close="customizationDialog" class="primary">Done</button></menu>
+  <dialog id="customizationDialog" class="settings-dialog"><form method="dialog" class="dialog-form">
+    <header><h3>Settings</h3><button type="button" class="icon-button" data-close="customizationDialog">x</button></header>
+    <div class="settings-tabs" role="tablist">
+      <button id="settingsCustomizationTab" type="button" class="active">Customization</button>
+      <button id="settingsLogsTab" type="button">Logs</button>
+      <button id="settingsBackupsTab" type="button">Backups</button>
+    </div>
+    <section id="settingsCustomizationPanel" class="settings-panel">
+      <div class="settings-panel-actions"><button id="openBackgroundFolderBtn" type="button">Open Background Folder</button><button id="resetThemeBtn" type="button">Reset Theme</button></div>
+      <label class="theme-control">Theme<input id="themeColorInput" type="color" value="#303735"></label>
+      <label>Background opacity</label>
+      <div class="page-slider-row"><button id="backgroundOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="backgroundOpacityInput" type="range" min="0" max="100" value="20"><button id="backgroundOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button></div>
+      <label id="backgroundOpacityValue" class="page-slider-value">Opacity <input id="backgroundOpacityNumber" type="number" min="0" max="100" step="1" value="20">%</label>
+      <label>Panel opacity</label>
+      <div class="page-slider-row"><button id="panelOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="panelOpacityInput" type="range" min="0" max="100" value="35"><button id="panelOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button></div>
+      <label id="panelOpacityValue" class="page-slider-value">Opacity <input id="panelOpacityNumber" type="number" min="0" max="100" step="1" value="35">%</label>
+    </section>
+    <section id="settingsLogsPanel" class="settings-panel" hidden>
+      <div class="settings-empty"><h4>No logs yet</h4><p>App logs will appear here when logging is added.</p></div>
+    </section>
+    <section id="settingsBackupsPanel" class="settings-panel" hidden>
+      <div class="settings-panel-actions"><button id="openBackupsFolderBtn" type="button">Open Backups Folder</button></div>
+      <div id="settingsBackupsList" class="settings-list"></div>
+    </section>
+    <menu><button id="checkUpdateBtn" type="button">Check Updates</button><button id="cancelSettingsBtn" type="button">Cancel</button><button id="applySettingsBtn" type="button" class="primary">Apply</button></menu>
+  </form></dialog>
+  <dialog id="backupRestoreDialog"><form method="dialog" class="dialog-form">
+    <header><h3>Restore Backup</h3><button type="button" class="icon-button" data-close="backupRestoreDialog">x</button></header>
+    <p id="backupRestoreMessage" class="dialog-note"></p>
+    <menu><button type="button" data-close="backupRestoreDialog">Cancel</button><button id="restoreBackupNewBtn" type="button">Restore as New Group</button><button id="restoreBackupReplaceBtn" type="button" class="primary">Replace Original</button></menu>
   </form></dialog>
 
   <dialog id="imagePreviewDialog" class="image-preview-dialog"><button type="button" class="icon-button image-preview-close" data-close="imagePreviewDialog">x</button><img id="imagePreviewFull" alt=""></dialog>
   <dialog id="captchaDialog" class="captcha-dialog"><form method="dialog" class="dialog-form"><header><h3>AVTRZIP Verification</h3><button id="closeCaptchaDialogBtn" type="button" class="icon-button">x</button></header><iframe id="captchaFrame" title="AVTRZIP verification"></iframe><menu><button id="captchaDoneBtn" type="button" class="primary">Done</button></menu></form></dialog>
   <dialog id="confirmDeleteDialog" class="confirm-dialog"><form method="dialog" class="dialog-form"><header><h3 id="confirmDialogTitle">Delete</h3><button type="button" class="icon-button" data-close="confirmDeleteDialog">x</button></header><p id="confirmDeleteMessage" class="confirm-message"></p><menu><button id="cancelConfirmBtn" type="button">Cancel</button><button id="runConfirmBtn" type="button" class="danger">Delete</button></menu></form></dialog>
+  <dialog id="avatarUpdateHistoryDialog" class="confirm-dialog"><form method="dialog" class="dialog-form"><header><h3>Update History</h3><button type="button" class="icon-button" data-close="avatarUpdateHistoryDialog">x</button></header><div id="avatarUpdateHistoryList" class="update-history-list"></div><menu><button type="button" data-close="avatarUpdateHistoryDialog" class="primary">OK</button></menu></form></dialog>
   <dialog id="importDialog" class="wide-dialog"><form method="dialog" class="dialog-form wide"><header><h3>Import Library</h3><button type="button" class="icon-button" data-close="importDialog">x</button></header><label id="importDropZone" class="import-drop-zone">JSON<textarea id="importJsonInput" rows="12" spellcheck="false"></textarea></label><menu><button type="button" data-close="importDialog">Cancel</button><button id="runImportBtn" class="primary">Import</button></menu></form></dialog>
   <div id="toast" role="status" aria-live="polite"></div>
   <div id="zoomIndicator" class="zoom-indicator" role="status" aria-live="polite" hidden>100%</div>
