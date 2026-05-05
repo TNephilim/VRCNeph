@@ -3,11 +3,16 @@ using System.Drawing;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using Microsoft.Data.Sqlite;
 using Photino.NET;
+using OpenFileDialog = System.Windows.Forms.OpenFileDialog;
+using DialogResult = System.Windows.Forms.DialogResult;
 
 namespace VRCNeph;
 
@@ -100,6 +105,7 @@ internal static class AppPaths
 
 internal static class Program
 {
+    private const string AppUserModelId = "VRCNeph.Desktop";
     private const string UpdateRepositoryOwner = "TNephilim";
     private const string UpdateRepositoryName = "VRCNeph";
     private static readonly AvatarStore Store = new();
@@ -109,10 +115,13 @@ internal static class Program
     private static readonly AvatarDatabaseClient AvatarDatabase = new();
     private static readonly AppUpdateClient Updater = new(UpdateRepositoryOwner, UpdateRepositoryName);
     private static readonly AppLogStore Logs = new();
+    private static readonly object SyncedOrderProgressGate = new();
+    private static SyncedAvatarOrderProgress SyncedOrderProgress = new("", "idle", "", 0, 0);
 
     [STAThread]
     private static void Main()
     {
+        TrySetAppUserModelId();
         Logs.Info("App", $"VRCNeph {AppUpdateClient.CurrentVersionInfo(UpdateRepositoryOwner, UpdateRepositoryName).CurrentVersion} started.");
         if (!VrChat.HasSavedSession)
         {
@@ -151,6 +160,26 @@ internal static class Program
         .Load(appPath);
 
         window.WaitForClose();
+    }
+
+    private static void TrySetAppUserModelId()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try { SetCurrentProcessExplicitAppUserModelID(AppUserModelId); }
+        catch { }
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern int SetCurrentProcessExplicitAppUserModelID(string appID);
+
+    private static void UpdateSyncedOrderProgress(SyncedAvatarOrderProgress progress)
+    {
+        lock (SyncedOrderProgressGate) SyncedOrderProgress = progress;
+    }
+
+    private static SyncedAvatarOrderProgress GetSyncedOrderProgress()
+    {
+        lock (SyncedOrderProgressGate) return SyncedOrderProgress;
     }
 
     private static string ExtractAppFiles()
@@ -195,13 +224,15 @@ internal static class Program
                 "copyAvatar" => Store.CopyAvatar(GetPayload<MoveAvatarInput>(request)),
                 "reorderAvatar" => Store.ReorderAvatar(GetPayload<ReorderInput>(request)),
                 "backupGroup" => Store.BackupGroup(GetPayload<IdInput>(request).Id),
-                "applySyncedAvatarOrder" => await Store.ApplySyncedGroupAvatarOrderAsync(GetPayload<SyncedAvatarOrderInput>(request), VrChat),
+                "applySyncedAvatarOrder" => await Store.ApplySyncedGroupAvatarOrderAsync(GetPayload<SyncedAvatarOrderInput>(request), VrChat, UpdateSyncedOrderProgress),
+                "syncedAvatarOrderProgress" => GetSyncedOrderProgress(),
                 "clearGroupAvatars" => await Store.ClearGroupAvatarsAsync(GetPayload<IdInput>(request).Id, VrChat),
                 "importLibrary" => Store.Import(request.Payload),
                 "exportLibrary" => Store.ExportToFile(),
                 "exportGroup" => Store.ExportGroup(GetPayload<IdInput>(request).Id),
                 "openFolder" => OpenFolder(GetPayload<IdInput>(request).Path),
                 "openGame" => OpenGame(),
+                "pickGroupIcon" => PickGroupIcon(),
                 "fetchAvatar" => await VrChat.FetchAvatarAsync(GetPayload<IdInput>(request).Id),
                 "vrchatSession" => await VrChat.GetSessionAsync(),
                 "vrchatLogin" => await VrChat.LoginAsync(GetPayload<LoginInput>(request)),
@@ -271,7 +302,7 @@ internal static class Program
             case "vrchatTwoFactor": Logs.Info("VRChat", "VRChat two-factor verification completed."); break;
             case "vrchatLogout": Logs.Info("VRChat", "VRChat logout completed."); break;
             case "vrchatSyncFavorites":
-                if (result is VrChatSyncResult sync) Logs.Info("VRChat", $"Favorites synced. Groups: {sync.GroupsSynced}. Avatars: {sync.AvatarsSynced}. Moved to deleted: {sync.MovedToDeleted}.");
+                if (result is VrChatSyncResult sync) Logs.Info("VRChat", $"Favorites synced. Groups: {sync.GroupsSynced}. Avatars: {sync.AvatarsSynced}. Updated: {sync.UpdatedAvatars}. Uploaded: {sync.UploadedAvatars}. Moved to deleted: {sync.MovedToDeleted}.");
                 else Logs.Info("VRChat", "Favorites synced.");
                 break;
             case "vrchatSaveCurrentAvatar": Logs.Info("VRChat", "Current avatar saved."); break;
@@ -319,6 +350,66 @@ internal static class Program
         Process.Start(new ProcessStartInfo("steam://run/438100//--no-vr") { UseShellExecute = true });
         return new { ok = true };
     }
+    private static object PickGroupIcon()
+    {
+        string icon = "";
+        Exception? error = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                using var dialog = new OpenFileDialog
+                {
+                    Title = "Choose Group Icon",
+                    Filter = "Image files|*.png;*.jpg;*.jpeg;*.gif;*.bmp|All files|*.*",
+                    Multiselect = false,
+                    CheckFileExists = true
+                };
+                if (dialog.ShowDialog() == DialogResult.OK && !string.IsNullOrWhiteSpace(dialog.FileName))
+                {
+                    icon = BuildGroupIconDataUrl(dialog.FileName);
+                }
+            }
+            catch (Exception ex)
+            {
+                error = ex;
+            }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+
+        if (error is not null) throw error;
+        if (string.IsNullOrWhiteSpace(icon))
+        {
+            return new { canceled = true, icon = "" };
+        }
+
+        return new { canceled = false, icon };
+    }
+    private static string BuildGroupIconDataUrl(string path)
+    {
+        using var source = Image.FromFile(path);
+        using var canvas = new Bitmap(64, 64);
+        canvas.SetResolution(96, 96);
+        using (var graphics = Graphics.FromImage(canvas))
+        {
+            graphics.Clear(Color.Transparent);
+            graphics.CompositingQuality = CompositingQuality.HighQuality;
+            graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            graphics.SmoothingMode = SmoothingMode.HighQuality;
+            var scale = Math.Min(64f / source.Width, 64f / source.Height);
+            var width = Math.Max(1, (int)Math.Round(source.Width * scale));
+            var height = Math.Max(1, (int)Math.Round(source.Height * scale));
+            var x = (64 - width) / 2;
+            var y = (64 - height) / 2;
+            graphics.DrawImage(source, x, y, width, height);
+        }
+
+        using var stream = new MemoryStream();
+        canvas.Save(stream, ImageFormat.Png);
+        return $"data:image/png;base64,{Convert.ToBase64String(stream.ToArray())}";
+    }
 
     private static object ListBackups()
     {
@@ -326,9 +417,22 @@ internal static class Program
         var files = Directory.EnumerateFiles(AppPaths.BackupsDirectory, "*", SearchOption.TopDirectoryOnly)
             .Select(path => new FileInfo(path))
             .OrderByDescending(file => file.LastWriteTimeUtc)
-            .Select(file => new BackupFileInfo(file.Name, file.FullName, file.Length, file.LastWriteTime, BackupReason(file.Name)))
+            .Select(file => new BackupFileInfo(file.Name, BackupDisplayName(file.FullName), file.FullName, file.Length, file.LastWriteTime, BackupReason(file.Name)))
             .ToList();
         return new BackupListResult(AppPaths.BackupsDirectory, files);
+    }
+
+    private static string BackupDisplayName(string path)
+    {
+        try
+        {
+            var summary = JsonSerializer.Deserialize<GroupFileSummary>(File.ReadAllText(path), ProgramJson.Options);
+            if (!string.IsNullOrWhiteSpace(summary?.Name)) return summary.Name.Trim();
+        }
+        catch
+        {
+        }
+        return Path.GetFileNameWithoutExtension(path);
     }
 
     private static string BackupReason(string fileName)
@@ -496,7 +600,7 @@ internal sealed class AppUpdateClient(string owner, string repository)
 internal sealed record AppVersionInfo(string CurrentVersion, string ReleaseUrl);
 internal sealed record AppUpdateInfo(bool UpdateAvailable, string CurrentVersion, string LatestVersion, string ReleaseUrl, string AssetUrl, string Notes);
 internal sealed record AppUpdateInstallResult(bool Restarting, string Message);
-internal sealed record BackupFileInfo(string Name, string Path, long Size, DateTime LastModified, string Reason);
+internal sealed record BackupFileInfo(string Name, string DisplayName, string Path, long Size, DateTime LastModified, string Reason);
 internal sealed record BackupListResult(string Folder, List<BackupFileInfo> Files);
 
 internal sealed class AvatarStore
@@ -507,6 +611,10 @@ internal sealed class AvatarStore
     private const string RecentAvatarGroupName = "Recent Avatars";
     private const string DeletedAvatarGroupId = "deleted_avatars";
     private const string DeletedAvatarGroupName = "Deleted Avatars";
+    private const string UploadedAvatarGroupId = "uploaded_avatars";
+    private const string UploadedAvatarGroupName = "Uploaded Avatars";
+    private const string UpdatedAvatarGroupId = "updated_avatars";
+    private const string UpdatedAvatarGroupName = "Updated Avatars";
     private readonly string _dataDirectory = AppPaths.GroupsDirectory;
     private readonly string _exportDirectory = AppPaths.ExportDirectory;
     private readonly string _backupDirectory = AppPaths.BackupsDirectory;
@@ -548,7 +656,7 @@ internal sealed class AvatarStore
         {
             var lib = Load();
             var now = DateTimeOffset.UtcNow;
-            lib.Groups.Add(new AvatarGroup { Id = NewId("grp"), Name = CleanRequired(input.Name, "Group name"), Description = input.Description?.Trim() ?? "", Order = NextGroupOrder(lib), CreatedAt = now, UpdatedAt = now });
+            lib.Groups.Add(new AvatarGroup { Id = NewId("grp"), Name = CleanRequired(input.Name, "Group name"), Description = input.Description?.Trim() ?? "", Icon = CleanGroupIcon(input.Icon), Order = NextGroupOrder(lib), CreatedAt = now, UpdatedAt = now });
             Save(lib);
             return lib;
         }
@@ -563,6 +671,7 @@ internal sealed class AvatarStore
             if (IsSyncedGroupId(group.Id)) throw new InvalidOperationException("Rename synced VRChat groups in VRChat.");
             group.Name = CleanRequired(input.Name, "Group name");
             group.Description = input.Description?.Trim() ?? "";
+            group.Icon = CleanGroupIcon(input.Icon);
             group.UpdatedAt = DateTimeOffset.UtcNow;
             Save(lib);
             return lib;
@@ -595,7 +704,7 @@ internal sealed class AvatarStore
             if (IsPinnedSystemGroupId(source.Id)) throw new InvalidOperationException("That system group cannot be copied.");
             var now = DateTimeOffset.UtcNow;
             var groupId = NewId("grp");
-            var group = new AvatarGroup { Id = groupId, Name = UniqueGroupName(lib, $"{source.Name} Copy"), Description = source.Description, Order = NextGroupOrder(lib), CreatedAt = now, UpdatedAt = now };
+            var group = new AvatarGroup { Id = groupId, Name = UniqueGroupName(lib, $"{source.Name} Copy"), Description = source.Description, Icon = source.Icon, Order = NextGroupOrder(lib), CreatedAt = now, UpdatedAt = now };
             lib.Groups.Add(group);
             var order = 0;
             foreach (var avatar in lib.Avatars.Where(x => x.GroupId == source.Id).OrderBy(x => x.Order).ToList())
@@ -789,6 +898,7 @@ internal sealed class AvatarStore
             }
 
             group.Description = summary.Description ?? "";
+            group.Icon = CleanGroupIcon(summary.Icon);
             group.ReorderLocked = IsDefaultReorderLockedGroupId(group.Id) ? true : group.ReorderLocked;
             group.UpdatedAt = now;
 
@@ -804,7 +914,7 @@ internal sealed class AvatarStore
             return lib;
         }
     }
-    public async Task<SyncedAvatarOrderApplyResult> ApplySyncedGroupAvatarOrderAsync(SyncedAvatarOrderInput input, VrChatClient client)
+    public async Task<SyncedAvatarOrderApplyResult> ApplySyncedGroupAvatarOrderAsync(SyncedAvatarOrderInput input, VrChatClient client, Action<SyncedAvatarOrderProgress>? progress = null)
     {
         List<string> avatarIds;
         string backupPath;
@@ -814,10 +924,11 @@ internal sealed class AvatarStore
             var group = lib.Groups.FirstOrDefault(x => x.Id.Equals(input.GroupId, StringComparison.OrdinalIgnoreCase)) ?? throw new InvalidOperationException("Group not found.");
             if (!IsSyncedGroupId(group.Id)) throw new InvalidOperationException("Only synced VRChat groups can be applied to VRChat.");
             avatarIds = OrderedSyncedAvatarIds(lib, group.Id, input.AvatarIds ?? []);
+            progress?.Invoke(new SyncedAvatarOrderProgress(group.Id, "backup", "Creating backup...", 0, avatarIds.Count));
             backupPath = WriteGroupBackup(lib, group, "pre-save").Path;
         }
 
-        var remoteResult = await client.RecompileFavoriteAvatarGroupAsync(input.GroupId, avatarIds);
+        var remoteResult = await client.RecompileFavoriteAvatarGroupAsync(input.GroupId, avatarIds, progress);
 
         lock (_gate)
         {
@@ -836,6 +947,7 @@ internal sealed class AvatarStore
                 }
             }
             Save(lib);
+            progress?.Invoke(new SyncedAvatarOrderProgress(group.Id, "complete", "Refavoriting finished.", remoteResult.Added, remoteResult.Added));
             return new SyncedAvatarOrderApplyResult(lib, remoteResult.Removed, remoteResult.Added, remoteResult.Tag, backupPath);
         }
     }
@@ -881,7 +993,7 @@ internal sealed class AvatarStore
             foreach (var incoming in imported.Groups.OrderBy(x => x.Order).ThenBy(x => x.CreatedAt))
             {
                 var newId = NewId("grp");
-                var group = new AvatarGroup { Id = newId, Name = UniqueGroupName(lib, incoming.Name), Description = incoming.Description ?? "", Order = NextGroupOrder(lib), CreatedAt = now, UpdatedAt = now };
+                var group = new AvatarGroup { Id = newId, Name = UniqueGroupName(lib, incoming.Name), Description = incoming.Description ?? "", Icon = CleanGroupIcon(incoming.Icon), Order = NextGroupOrder(lib), CreatedAt = now, UpdatedAt = now };
                 lib.Groups.Add(group);
                 if (!string.IsNullOrWhiteSpace(incoming.Id)) groupMap[incoming.Id] = newId;
             }
@@ -929,7 +1041,8 @@ internal sealed class AvatarStore
     public async Task<VrChatSyncResult> SyncVrChatFavoritesAsync(VrChatClient client)
     {
         var imported = await client.GetFavoriteAvatarsAsync();
-        var unavailableStoredAvatars = await FindUnavailableStoredFavoriteAvatarsAsync(client);
+        var uploadedAvatars = await TryGetUploadedAvatarsAsync(client);
+        var storedAvatarRefresh = await RefreshStoredFavoriteAvatarsAsync(client);
         lock (_gate)
         {
             var lib = Load();
@@ -954,6 +1067,10 @@ internal sealed class AvatarStore
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             lib.Groups.RemoveAll(x => x.Id.StartsWith("vrc_", StringComparison.OrdinalIgnoreCase));
             lib.Avatars.RemoveAll(x => x.GroupId.StartsWith("vrc_", StringComparison.OrdinalIgnoreCase));
+            lib.Groups.RemoveAll(x => x.Id.Equals(UpdatedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
+            lib.Avatars.RemoveAll(x => x.GroupId.Equals(UpdatedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
+            lib.Groups.RemoveAll(x => x.Id.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
+            lib.Avatars.RemoveAll(x => x.GroupId.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
             var now = DateTimeOffset.UtcNow;
             var newSyncedGroupOrder = lib.Groups.Count == 0 ? 0 : lib.Groups.Min(x => x.Order) - imported.Groups.Count;
             var newSyncedGroupIndex = 0;
@@ -991,14 +1108,18 @@ internal sealed class AvatarStore
                     lib.Avatars.Add(CreateSyncedFavorite(item.Avatar, item.Previous, groupId, now, order++));
                 }
             }
+            ApplyStoredAvatarDetailRefreshes(lib, storedAvatarRefresh.UpdatedAvatars, now);
             var movedToDeleted = ArchiveDeletedVrChatAvatars(lib, imported.DeletedAvatars, previousSynced, previousDeleted, activeAvatarIds, now);
-            movedToDeleted.AddRange(ArchiveUnavailableStoredFavoriteAvatars(lib, unavailableStoredAvatars, previousDeleted, now));
+            movedToDeleted.AddRange(ArchiveUnavailableStoredFavoriteAvatars(lib, storedAvatarRefresh.UnavailableAvatars, previousDeleted, now));
+            AddUploadedAvatarGroup(lib, uploadedAvatars, now);
             NormalizeOrders(lib);
-            Save(lib);
-            return new VrChatSyncResult(lib, imported.Groups.Count, imported.Avatars.Count, movedToDeleted.Count, movedToDeleted.Select(x => x.Name).ToList(), movedToDeleted);
+            Save(lib, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { UploadedAvatarGroupId, UpdatedAvatarGroupId });
+            AddUpdatedAvatarGroup(lib, storedAvatarRefresh.ChangedAvatars, now);
+            NormalizeOrders(lib);
+            return new VrChatSyncResult(lib, imported.Groups.Count, imported.Avatars.Count, movedToDeleted.Count, movedToDeleted.Select(x => x.Name).ToList(), movedToDeleted, storedAvatarRefresh.ChangedAvatars.Count, storedAvatarRefresh.ChangedAvatars.Select(x => string.IsNullOrWhiteSpace(x.Name) ? x.AvatarId : x.Name).Where(x => !string.IsNullOrWhiteSpace(x)).ToList(), uploadedAvatars.Count, imported.Groups.Count);
         }
     }
-    private async Task<List<AvatarInput>> FindUnavailableStoredFavoriteAvatarsAsync(VrChatClient client)
+    private async Task<StoredAvatarRefreshResult> RefreshStoredFavoriteAvatarsAsync(VrChatClient client)
     {
         List<AvatarInput> candidates;
         lock (_gate)
@@ -1007,25 +1128,38 @@ internal sealed class AvatarStore
             candidates = lib.Avatars
                 .Where(x => !string.IsNullOrWhiteSpace(x.AvatarId)
                     && !x.GroupId.Equals(DeletedAvatarGroupId, StringComparison.OrdinalIgnoreCase)
-                    && !x.GroupId.Equals(RecentAvatarGroupId, StringComparison.OrdinalIgnoreCase))
+                    && !x.GroupId.Equals(RecentAvatarGroupId, StringComparison.OrdinalIgnoreCase)
+                    && !x.GroupId.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase)
+                    && !x.GroupId.Equals(UpdatedAvatarGroupId, StringComparison.OrdinalIgnoreCase))
                 .GroupBy(x => x.AvatarId, StringComparer.OrdinalIgnoreCase)
                 .Select(x => AvatarInputFromFavorite(x.OrderByDescending(a => a.UpdatedAt).First()))
                 .ToList();
         }
 
-        if (candidates.Count == 0) return [];
+        if (candidates.Count == 0) return new StoredAvatarRefreshResult([], [], []);
 
+        var updated = new List<AvatarInput>();
+        var changed = new List<AvatarInput>();
         var unavailable = new List<AvatarInput>();
-        using var gate = new SemaphoreSlim(5, 5);
+        using var gate = new SemaphoreSlim(8, 8);
         var tasks = candidates.Select(async candidate =>
         {
             await gate.WaitAsync();
             try
             {
                 var live = await client.FetchAvatarAsync(candidate.AvatarId);
-                if (!IsStoredUnavailableReleaseStatus(live.ReleaseStatus)) return;
-                MergeUnavailableStoredDetails(candidate, live);
-                lock (unavailable) unavailable.Add(candidate);
+                if (IsStoredUnavailableReleaseStatus(live.ReleaseStatus))
+                {
+                    MergeUnavailableStoredDetails(candidate, live);
+                    lock (unavailable) unavailable.Add(candidate);
+                    return;
+                }
+
+                lock (updated) updated.Add(live);
+                if (AvatarMetadataChanged(candidate, live))
+                {
+                    lock (changed) changed.Add(live);
+                }
             }
             catch
             {
@@ -1036,8 +1170,25 @@ internal sealed class AvatarStore
             }
         });
         await Task.WhenAll(tasks);
-        return unavailable;
+        var uniqueChanged = changed
+            .Where(x => !string.IsNullOrWhiteSpace(x.AvatarId))
+            .GroupBy(x => x.AvatarId, StringComparer.OrdinalIgnoreCase)
+            .Select(x => x.First())
+            .ToList();
+        return new StoredAvatarRefreshResult(updated, unavailable, uniqueChanged);
     }
+    private static async Task<List<AvatarInput>> TryGetUploadedAvatarsAsync(VrChatClient client)
+    {
+        try
+        {
+            return await client.GetUploadedAvatarsAsync();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+    private sealed record StoredAvatarRefreshResult(List<AvatarInput> UpdatedAvatars, List<AvatarInput> UnavailableAvatars, List<AvatarInput> ChangedAvatars);
     private static AvatarInput AvatarInputFromFavorite(AvatarFavorite favorite) => new()
     {
         Id = favorite.Id,
@@ -1067,6 +1218,120 @@ internal sealed class AvatarStore
         if (!string.IsNullOrWhiteSpace(live.RawJson)) stored.RawJson = live.RawJson;
         if (!string.IsNullOrWhiteSpace(live.Source)) stored.Source = live.Source;
         if (!string.IsNullOrWhiteSpace(live.SourceUrl)) stored.SourceUrl = live.SourceUrl;
+    }
+    private static void ApplyStoredAvatarDetailRefreshes(LibraryData lib, List<AvatarInput> updates, DateTimeOffset now)
+    {
+        if (updates.Count == 0) return;
+        var byAvatarId = updates
+            .Where(x => !string.IsNullOrWhiteSpace(x.AvatarId) && !IsStoredUnavailableReleaseStatus(x.ReleaseStatus))
+            .GroupBy(x => x.AvatarId, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(x => x.Key, x => x.First(), StringComparer.OrdinalIgnoreCase);
+        if (byAvatarId.Count == 0) return;
+
+        foreach (var avatar in lib.Avatars)
+        {
+            if (string.IsNullOrWhiteSpace(avatar.AvatarId)
+                || avatar.GroupId.Equals(DeletedAvatarGroupId, StringComparison.OrdinalIgnoreCase)
+                || avatar.GroupId.Equals(RecentAvatarGroupId, StringComparison.OrdinalIgnoreCase)
+                || !byAvatarId.TryGetValue(avatar.AvatarId, out var live))
+            {
+                continue;
+            }
+
+            RefreshAvatarMetadata(avatar, live, now);
+        }
+    }
+    private static void AddUploadedAvatarGroup(LibraryData lib, List<AvatarInput> uploadedAvatars, DateTimeOffset now)
+    {
+        if (uploadedAvatars.Count == 0) return;
+        lib.Groups.Add(new AvatarGroup
+        {
+            Id = UploadedAvatarGroupId,
+            Name = UploadedAvatarGroupName,
+            Description = $"Uploaded avatars from your VRChat account. {uploadedAvatars.Count} avatars. Last synced {DateTimeOffset.Now:g}.",
+            Order = 0,
+            ReorderLocked = true,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+
+        var order = 0;
+        foreach (var avatar in uploadedAvatars
+            .Where(x => !string.IsNullOrWhiteSpace(x.AvatarId))
+            .GroupBy(x => x.AvatarId, StringComparer.OrdinalIgnoreCase)
+            .Select(x => x.First()))
+        {
+            avatar.Source = "vrchat-uploaded";
+            var favorite = CloneAvatar(avatar, UploadedAvatarGroupId, now, order++);
+            favorite.Id = $"{UploadedAvatarGroupId}_{favorite.AvatarId}";
+            lib.Avatars.Add(favorite);
+        }
+    }
+    private static void AddUpdatedAvatarGroup(LibraryData lib, List<AvatarInput> changedAvatars, DateTimeOffset now)
+    {
+        if (changedAvatars.Count == 0) return;
+        lib.Groups.Add(new AvatarGroup
+        {
+            Id = UpdatedAvatarGroupId,
+            Name = UpdatedAvatarGroupName,
+            Description = "Avatars whose VRChat metadata changed during this sync. This temporary group clears on restart.",
+            Order = 0,
+            ReorderLocked = true,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+
+        var order = 0;
+        foreach (var avatar in changedAvatars
+            .Where(x => !string.IsNullOrWhiteSpace(x.AvatarId))
+            .GroupBy(x => x.AvatarId, StringComparer.OrdinalIgnoreCase)
+            .Select(x => x.First()))
+        {
+            avatar.Source = "vrchat-updated";
+            var favorite = CloneAvatar(avatar, UpdatedAvatarGroupId, now, order++);
+            favorite.Id = $"{UpdatedAvatarGroupId}_{favorite.AvatarId}";
+            lib.Avatars.Add(favorite);
+        }
+    }
+    private static void RefreshAvatarMetadata(AvatarFavorite avatar, AvatarInput live, DateTimeOffset now)
+    {
+        if (!string.IsNullOrWhiteSpace(live.Name)) avatar.Name = live.Name.Trim();
+        avatar.Description = live.Description?.Trim() ?? avatar.Description;
+        avatar.AuthorId = live.AuthorId?.Trim() ?? avatar.AuthorId;
+        avatar.AuthorName = live.AuthorName?.Trim() ?? avatar.AuthorName;
+        avatar.ImageUrl = live.ImageUrl?.Trim() ?? avatar.ImageUrl;
+        avatar.ThumbnailImageUrl = live.ThumbnailImageUrl?.Trim() ?? avatar.ThumbnailImageUrl;
+        avatar.ReleaseStatus = live.ReleaseStatus?.Trim() ?? avatar.ReleaseStatus;
+        avatar.Version = live.Version?.Trim() ?? avatar.Version;
+        avatar.Platforms = live.Platforms?.Trim() ?? avatar.Platforms;
+        avatar.Tags = live.Tags?.Trim() ?? avatar.Tags;
+        avatar.SourceUrl = live.SourceUrl?.Trim() ?? avatar.SourceUrl;
+        avatar.RawJson = live.RawJson?.Trim() ?? avatar.RawJson;
+        if (!string.IsNullOrWhiteSpace(live.Source)) avatar.Source = live.Source.Trim();
+        if (!string.IsNullOrWhiteSpace(live.RemoteCreatedAt)) avatar.RemoteCreatedAt = live.RemoteCreatedAt.Trim();
+        if (!string.IsNullOrWhiteSpace(live.RemoteUpdatedAt)) avatar.RemoteUpdatedAt = live.RemoteUpdatedAt.Trim();
+        avatar.UpdatedAt = now;
+    }
+    private static bool AvatarMetadataChanged(AvatarInput stored, AvatarInput live)
+    {
+        if (IsStoredUnavailableReleaseStatus(live.ReleaseStatus)) return false;
+        if (HasChanged(stored.RemoteUpdatedAt, live.RemoteUpdatedAt)) return true;
+        return HasChanged(stored.Name, live.Name)
+            || HasChanged(stored.Description, live.Description)
+            || HasChanged(stored.AuthorId, live.AuthorId)
+            || HasChanged(stored.AuthorName, live.AuthorName)
+            || HasChanged(stored.ImageUrl, live.ImageUrl)
+            || HasChanged(stored.ThumbnailImageUrl, live.ThumbnailImageUrl)
+            || HasChanged(stored.ReleaseStatus, live.ReleaseStatus)
+            || HasChanged(stored.Version, live.Version)
+            || HasChanged(stored.Platforms, live.Platforms)
+            || HasChanged(stored.Tags, live.Tags);
+    }
+    private static bool HasChanged(string? oldValue, string? newValue)
+    {
+        var next = newValue?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(next)) return false;
+        return !string.Equals(oldValue?.Trim() ?? "", next, StringComparison.Ordinal);
     }
     private static bool IsStoredUnavailableReleaseStatus(string? status)
     {
@@ -1167,6 +1432,8 @@ internal sealed class AvatarStore
         var lib = JsonSerializer.Deserialize<LibraryData>(File.ReadAllText(_libraryPath), ProgramJson.Options) ?? new LibraryData();
         lib.Groups ??= [];
         lib.Avatars ??= [];
+        lib.Groups.RemoveAll(x => x.Id.Equals(UpdatedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
+        lib.Avatars.RemoveAll(x => x.GroupId.Equals(UpdatedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
         EnsureDefaultGroups(lib, DateTimeOffset.UtcNow);
         NormalizeOrders(lib);
         return lib;
@@ -1192,10 +1459,12 @@ internal sealed class AvatarStore
     {
         var currentFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var groupFileNames = GroupFileNames(lib.Groups);
+        Directory.CreateDirectory(GroupFileDirectory(false));
+        Directory.CreateDirectory(GroupFileDirectory(true));
         foreach (var group in lib.Groups)
         {
-            var path = Path.Combine(_dataDirectory, groupFileNames[group.Id]);
-            currentFiles.Add(Path.GetFileName(path));
+            var path = Path.Combine(GroupFileDirectory(IsSyncedOrSystemGroupFile(group.Id)), groupFileNames[group.Id]);
+            currentFiles.Add(Path.GetFullPath(path));
             File.WriteAllText(path, JsonSerializer.Serialize(GroupSummary(group, lib.Avatars.Where(x => x.GroupId == group.Id).OrderBy(x => x.Order)), ProgramJson.Options));
         }
         ArchiveStaleGroupFiles(currentFiles, lib.Groups.Select(x => x.Id).ToHashSet(StringComparer.OrdinalIgnoreCase), removedGroupIds);
@@ -1209,15 +1478,21 @@ internal sealed class AvatarStore
             "vrchat-session.json"
         };
         Directory.CreateDirectory(_backupDirectory);
-        foreach (var file in Directory.EnumerateFiles(_dataDirectory, "*.json", SearchOption.TopDirectoryOnly))
+        foreach (var file in GroupFileCleanupDirectories().SelectMany(path => Directory.Exists(path) ? Directory.EnumerateFiles(path, "*.json", SearchOption.TopDirectoryOnly) : []))
         {
             var fileName = Path.GetFileName(file);
-            if (reservedFiles.Contains(fileName) || currentFiles.Contains(fileName))
+            if (reservedFiles.Contains(fileName) || currentFiles.Contains(Path.GetFullPath(file)))
             {
                 continue;
             }
 
             if (IsLegacyGroupFileForCurrentGroup(fileName, currentGroupIds))
+            {
+                File.Delete(file);
+                continue;
+            }
+
+            if (IsGroupFileForCurrentGroup(file, currentGroupIds))
             {
                 File.Delete(file);
                 continue;
@@ -1239,6 +1514,14 @@ internal sealed class AvatarStore
             File.Move(file, target);
         }
     }
+    private string GroupFileDirectory(bool synced) => Path.Combine(_dataDirectory, synced ? "synced" : "local");
+    private IEnumerable<string> GroupFileCleanupDirectories()
+    {
+        yield return _dataDirectory;
+        yield return GroupFileDirectory(false);
+        yield return GroupFileDirectory(true);
+    }
+    private static bool IsSyncedOrSystemGroupFile(string groupId) => IsSyncedGroupId(groupId) || IsPinnedSystemGroupId(groupId);
     private ExportResult WriteGroupBackup(LibraryData lib, AvatarGroup group, string reason)
     {
         Directory.CreateDirectory(_backupDirectory);
@@ -1288,7 +1571,7 @@ internal sealed class AvatarStore
         }
     }
     private static CleanLibraryExport CleanExport(LibraryData lib) => new(lib.Groups.OrderBy(x => x.Order).Select(g => GroupSummary(g, lib.Avatars.Where(a => a.GroupId == g.Id).OrderBy(a => a.Order))).ToList());
-    private static GroupFileSummary GroupSummary(AvatarGroup group, IEnumerable<AvatarFavorite> avatars) => new(group.Id, group.Name, group.Description, avatars.Select(ExportAvatar).ToList());
+    private static GroupFileSummary GroupSummary(AvatarGroup group, IEnumerable<AvatarFavorite> avatars) => new(group.Id, group.Name, group.Description, group.Icon, avatars.Select(ExportAvatar).ToList());
     private static AvatarInput ExportAvatar(AvatarFavorite avatar) => new()
     {
         Id = avatar.AvatarId,
@@ -1308,6 +1591,8 @@ internal sealed class AvatarStore
         Notes = avatar.Notes,
         RawJson = avatar.RawJson,
         Source = avatar.Source,
+        RemoteCreatedAt = avatar.RemoteCreatedAt,
+        RemoteUpdatedAt = avatar.RemoteUpdatedAt,
         RemoteFavoriteId = avatar.RemoteFavoriteId
     };
     private static LibraryData ReadImport(JsonElement payload)
@@ -1319,6 +1604,11 @@ internal sealed class AvatarStore
             return imported;
         }
         if (payload.ValueKind != JsonValueKind.Object) return imported;
+        if (payload.TryGetProperty("name", out _) && payload.TryGetProperty("avatars", out var groupAvatarsElement) && groupAvatarsElement.ValueKind == JsonValueKind.Array)
+        {
+            ReadImportedGroup(payload, imported);
+            return imported;
+        }
         if (payload.TryGetProperty("groups", out var groupsElement) && groupsElement.ValueKind == JsonValueKind.Array)
         {
             foreach (var groupElement in groupsElement.EnumerateArray()) ReadImportedGroup(groupElement, imported);
@@ -1370,6 +1660,8 @@ internal sealed class AvatarStore
             Notes = input.Notes,
             RawJson = input.RawJson,
             Source = input.Source,
+            RemoteCreatedAt = input.RemoteCreatedAt,
+            RemoteUpdatedAt = input.RemoteUpdatedAt,
             RemoteFavoriteId = input.RemoteFavoriteId
         };
     }
@@ -1391,6 +1683,8 @@ internal sealed class AvatarStore
         a.Notes = input.Notes?.Trim() ?? "";
         a.RawJson = input.RawJson?.Trim() ?? "";
         if (!string.IsNullOrWhiteSpace(input.Source)) a.Source = input.Source.Trim();
+        a.RemoteCreatedAt = input.RemoteCreatedAt?.Trim() ?? a.RemoteCreatedAt;
+        a.RemoteUpdatedAt = input.RemoteUpdatedAt?.Trim() ?? a.RemoteUpdatedAt;
         a.RemoteFavoriteId = input.RemoteFavoriteId?.Trim() ?? a.RemoteFavoriteId;
         a.UpdatedAt = now;
     }
@@ -1399,14 +1693,14 @@ internal sealed class AvatarStore
         Id = NewId("local"), GroupId = groupId, AvatarId = avatar.AvatarId, Name = avatar.Name, Description = avatar.Description, AuthorId = avatar.AuthorId,
         AuthorName = avatar.AuthorName, ImageUrl = avatar.ImageUrl, ThumbnailImageUrl = avatar.ThumbnailImageUrl, ReleaseStatus = avatar.ReleaseStatus,
         Version = avatar.Version, Platforms = avatar.Platforms, Tags = avatar.Tags, SourceUrl = avatar.SourceUrl, Notes = avatar.Notes, RawJson = avatar.RawJson,
-        Source = avatar.Source, RemoteFavoriteId = avatar.RemoteFavoriteId, Order = order, CreatedAt = now, UpdatedAt = now
+        Source = avatar.Source, RemoteCreatedAt = avatar.RemoteCreatedAt, RemoteUpdatedAt = avatar.RemoteUpdatedAt, RemoteFavoriteId = avatar.RemoteFavoriteId, Order = order, CreatedAt = now, UpdatedAt = now
     };
     private static AvatarFavorite CloneAvatar(AvatarInput avatar, string groupId, DateTimeOffset now, int order) => new()
     {
         Id = NewId("local"), GroupId = groupId, AvatarId = avatar.AvatarId, Name = avatar.Name, Description = avatar.Description, AuthorId = avatar.AuthorId,
         AuthorName = avatar.AuthorName, ImageUrl = avatar.ImageUrl, ThumbnailImageUrl = avatar.ThumbnailImageUrl, ReleaseStatus = avatar.ReleaseStatus,
         Version = avatar.Version, Platforms = avatar.Platforms, Tags = avatar.Tags, SourceUrl = avatar.SourceUrl, Notes = avatar.Notes, RawJson = avatar.RawJson,
-        Source = avatar.Source, RemoteFavoriteId = avatar.RemoteFavoriteId, Order = order, CreatedAt = now, UpdatedAt = now
+        Source = avatar.Source, RemoteCreatedAt = avatar.RemoteCreatedAt, RemoteUpdatedAt = avatar.RemoteUpdatedAt, RemoteFavoriteId = avatar.RemoteFavoriteId, Order = order, CreatedAt = now, UpdatedAt = now
     };
     private static List<DeletedAvatarMoveSummary> ArchiveDeletedVrChatAvatars(
         LibraryData lib,
@@ -1521,8 +1815,12 @@ internal sealed class AvatarStore
     }
     private static void ResetSyncedGroupsToDefaults(LibraryData lib, DateTimeOffset now)
     {
-        lib.Avatars.RemoveAll(x => IsSyncedGroupId(x.GroupId));
-        lib.Groups.RemoveAll(x => IsSyncedGroupId(x.Id));
+        lib.Avatars.RemoveAll(x => IsSyncedGroupId(x.GroupId)
+            || x.GroupId.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase)
+            || x.GroupId.Equals(UpdatedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
+        lib.Groups.RemoveAll(x => IsSyncedGroupId(x.Id)
+            || x.Id.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase)
+            || x.Id.Equals(UpdatedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
         EnsureDefaultSyncedGroups(lib, now);
     }
     private static void EnsureDefaultSyncedGroups(LibraryData lib, DateTimeOffset now)
@@ -1611,7 +1909,9 @@ internal sealed class AvatarStore
     private static bool IsSyncedGroupId(string groupId) => groupId.StartsWith("vrc_", StringComparison.OrdinalIgnoreCase);
     private static bool IsPinnedSystemGroupId(string groupId) =>
         groupId.Equals(RecentAvatarGroupId, StringComparison.OrdinalIgnoreCase) ||
-        groupId.Equals(DeletedAvatarGroupId, StringComparison.OrdinalIgnoreCase);
+        groupId.Equals(DeletedAvatarGroupId, StringComparison.OrdinalIgnoreCase) ||
+        groupId.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase) ||
+        groupId.Equals(UpdatedAvatarGroupId, StringComparison.OrdinalIgnoreCase);
     private static bool IsDefaultReorderLockedGroupId(string groupId) => IsSyncedGroupId(groupId) || IsPinnedSystemGroupId(groupId);
     private static bool IsGroupReorderLocked(AvatarGroup group) => IsDefaultReorderLockedGroupId(group.Id);
     private static void EnsureDefaultReorderLocks(LibraryData lib)
@@ -1651,9 +1951,11 @@ internal sealed class AvatarStore
     private static int GroupBucket(AvatarGroup group)
     {
         if (IsSyncedGroupId(group.Id)) return 0;
-        if (group.Id.Equals(RecentAvatarGroupId, StringComparison.OrdinalIgnoreCase)) return 2;
-        if (group.Id.Equals(DeletedAvatarGroupId, StringComparison.OrdinalIgnoreCase)) return 3;
-        return 1;
+        if (group.Id.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase)) return 1;
+        if (group.Id.Equals(UpdatedAvatarGroupId, StringComparison.OrdinalIgnoreCase)) return 2;
+        if (group.Id.Equals(RecentAvatarGroupId, StringComparison.OrdinalIgnoreCase)) return 4;
+        if (group.Id.Equals(DeletedAvatarGroupId, StringComparison.OrdinalIgnoreCase)) return 5;
+        return 3;
     }
     private static int GroupBucketOrder(AvatarGroup group)
     {
@@ -1685,6 +1987,12 @@ internal sealed class AvatarStore
         for (var i = 2; ; i++) if (!names.Contains($"{clean} {i}")) return $"{clean} {i}";
     }
     private static string CleanRequired(string? value, string label) => string.IsNullOrWhiteSpace(value) ? throw new InvalidOperationException($"{label} is required.") : value.Trim();
+    private static string CleanGroupIcon(string? value)
+    {
+        var icon = value?.Trim() ?? "";
+        if (icon.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase)) return icon.Length <= 40000 ? icon : "";
+        return icon.Length <= 32 ? icon : icon[..32];
+    }
     private static string NewId(string prefix) => $"{prefix}_{Guid.NewGuid():N}";
     private static string SafeFileName(string name) => string.Join("_", name.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries)).Trim();
     private static string SafeFileNameOrDefault(string name, string fallback)
@@ -1712,6 +2020,18 @@ internal sealed class AvatarStore
     {
         var name = Path.GetFileNameWithoutExtension(fileName);
         return currentGroupIds.Any(groupId => name.EndsWith($"-{groupId}", StringComparison.OrdinalIgnoreCase));
+    }
+    private static bool IsGroupFileForCurrentGroup(string path, HashSet<string> currentGroupIds)
+    {
+        try
+        {
+            var summary = JsonSerializer.Deserialize<GroupFileSummary>(File.ReadAllText(path), ProgramJson.Options);
+            return !string.IsNullOrWhiteSpace(summary?.Id) && currentGroupIds.Contains(summary.Id);
+        }
+        catch
+        {
+            return false;
+        }
     }
     private static bool IsGroupFileForRemovedGroup(string path, HashSet<string> removedGroupIds)
     {
@@ -1960,6 +2280,37 @@ internal sealed class VrChatClient
         if (string.IsNullOrWhiteSpace(user.CurrentAvatarId)) throw new InvalidOperationException("No current avatar is available.");
         return await FetchAvatarAsync(user.CurrentAvatarId);
     }
+    public async Task<List<AvatarInput>> GetUploadedAvatarsAsync()
+    {
+        var avatars = new List<AvatarInput>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var offset = 0;
+        const int pageSize = 100;
+        while (true)
+        {
+            using var response = await _client.GetAsync($"avatars?user=me&n={pageSize}&offset={offset}&sort=updated&order=descending");
+            var json = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat uploaded avatars returned {(int)response.StatusCode}.");
+            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) break;
+
+            var count = doc.RootElement.GetArrayLength();
+            if (count == 0) break;
+            foreach (var item in doc.RootElement.EnumerateArray())
+            {
+                var avatar = ReadAvatar(item);
+                if (!string.IsNullOrWhiteSpace(avatar.AvatarId) && seen.Add(avatar.AvatarId) && !IsUnavailableAvatarStatus(avatar.ReleaseStatus))
+                {
+                    avatar.Source = "vrchat-uploaded";
+                    avatars.Add(avatar);
+                }
+            }
+
+            if (count < pageSize) break;
+            offset += count;
+        }
+        return avatars;
+    }
     public async Task<object> SelectAvatarAsync(string id)
     {
         using var response = await _client.PutAsync($"avatars/{WebUtility.UrlEncode(id)}/select", null);
@@ -2002,7 +2353,7 @@ internal sealed class VrChatClient
         _favoriteRateLimitGate.PaceMutation();
         return new { input.AvatarId, tag };
     }
-    public async Task<VrChatFavoriteRecompileResult> RecompileFavoriteAvatarGroupAsync(string groupId, IReadOnlyList<string> avatarIds)
+    public async Task<VrChatFavoriteRecompileResult> RecompileFavoriteAvatarGroupAsync(string groupId, IReadOnlyList<string> avatarIds, Action<SyncedAvatarOrderProgress>? progress = null)
     {
         var tag = SyncTagFromGroupId(groupId);
         if (string.IsNullOrWhiteSpace(tag)) throw new InvalidOperationException("That is not a synced VRChat favorite group.");
@@ -2011,15 +2362,19 @@ internal sealed class VrChatClient
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         var existing = await GetFavoriteAvatarRefsAsync(tag);
+        var removeTotal = existing.Count(x => !string.IsNullOrWhiteSpace(x.RemoteFavoriteId));
+        progress?.Invoke(new SyncedAvatarOrderProgress(groupId, "unfavorite", "Unfavoriting existing avatars...", 0, removeTotal));
         var removed = 0;
         foreach (var favorite in existing.Where(x => !string.IsNullOrWhiteSpace(x.RemoteFavoriteId)))
         {
             using var response = await SendFavoriteRequestWithRateLimitRetryAsync(() => new HttpRequestMessage(HttpMethod.Delete, $"favorites/{WebUtility.UrlEncode(favorite.RemoteFavoriteId)}"));
             if (!response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.NotFound) throw new InvalidOperationException($"VRChat favorite clear returned {(int)response.StatusCode}.");
             removed++;
+            progress?.Invoke(new SyncedAvatarOrderProgress(groupId, "unfavorite", "Unfavoriting existing avatars...", removed, removeTotal));
             _favoriteRateLimitGate.PaceMutation();
         }
 
+        progress?.Invoke(new SyncedAvatarOrderProgress(groupId, "refavorite", "Unfavoriting finished. Refavoriting avatars...", 0, uniqueAvatarIds.Count));
         var added = 0;
         foreach (var avatarId in uniqueAvatarIds.AsEnumerable().Reverse())
         {
@@ -2027,6 +2382,7 @@ internal sealed class VrChatClient
             using var response = await SendFavoriteRequestWithRateLimitRetryAsync(() => new HttpRequestMessage(HttpMethod.Post, "favorites") { Content = new StringContent(payload, Encoding.UTF8, "application/json") });
             if (!response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.Conflict) throw new InvalidOperationException($"VRChat favorite add returned {(int)response.StatusCode}.");
             added++;
+            progress?.Invoke(new SyncedAvatarOrderProgress(groupId, "refavorite", "Refavoriting avatars...", added, uniqueAvatarIds.Count));
             _favoriteRateLimitGate.PaceMutation();
         }
 
@@ -4029,9 +4385,9 @@ internal static class ProgramJson
 internal sealed record ApiRequest(string Id, string Command, JsonElement Payload);
 internal sealed record ApiResponse(string? Id, bool Ok, object? Data, string? Error) { public static ApiResponse Success(string id, object? data) => new(id, true, data, null); public static ApiResponse Failure(string? id, string error) => new(id, false, null, error); }
 internal sealed class LibraryData { public List<AvatarGroup> Groups { get; set; } = []; public List<AvatarFavorite> Avatars { get; set; } = []; }
-internal sealed class AvatarGroup { public string Id { get; set; } = ""; public string Name { get; set; } = ""; public string Description { get; set; } = ""; public int Order { get; set; } public bool? ReorderLocked { get; set; } public DateTimeOffset CreatedAt { get; set; } public DateTimeOffset UpdatedAt { get; set; } }
+internal sealed class AvatarGroup { public string Id { get; set; } = ""; public string Name { get; set; } = ""; public string Description { get; set; } = ""; public string Icon { get; set; } = ""; public int Order { get; set; } public bool? ReorderLocked { get; set; } public DateTimeOffset CreatedAt { get; set; } public DateTimeOffset UpdatedAt { get; set; } }
 internal sealed class AvatarFavorite : AvatarInput { public int Order { get; set; } = -1; public DateTimeOffset CreatedAt { get; set; } public DateTimeOffset UpdatedAt { get; set; } }
-internal sealed class GroupInput { public string Id { get; set; } = ""; public string Name { get; set; } = ""; public string Description { get; set; } = ""; }
+internal sealed class GroupInput { public string Id { get; set; } = ""; public string Name { get; set; } = ""; public string Description { get; set; } = ""; public string Icon { get; set; } = ""; }
 internal sealed class GroupLockInput { public string Id { get; set; } = ""; public bool ReorderLocked { get; set; } = true; }
 internal sealed class CopyGroupToExistingInput { public string Id { get; set; } = ""; public string TargetGroupId { get; set; } = ""; }
 internal class AvatarInput { public string Id { get; set; } = ""; public string GroupId { get; set; } = ""; public string AvatarId { get; set; } = ""; public string Name { get; set; } = ""; public string Description { get; set; } = ""; public string AuthorId { get; set; } = ""; public string AuthorName { get; set; } = ""; public string ImageUrl { get; set; } = ""; public string ThumbnailImageUrl { get; set; } = ""; public string ReleaseStatus { get; set; } = ""; public string Version { get; set; } = ""; public string Platforms { get; set; } = ""; public string Tags { get; set; } = ""; public string SourceUrl { get; set; } = ""; public string Notes { get; set; } = ""; public string RawJson { get; set; } = ""; public string Source { get; set; } = ""; public string RemoteCreatedAt { get; set; } = ""; public string RemoteUpdatedAt { get; set; } = ""; public string RemoteFavoriteId { get; set; } = ""; }
@@ -4040,9 +4396,10 @@ internal sealed class BackupRestoreInput { public string Path { get; set; } = ""
 internal sealed class MoveAvatarInput { public string AvatarId { get; set; } = ""; public string GroupId { get; set; } = ""; }
 internal sealed class ReorderInput { public string Id { get; set; } = ""; public string GroupId { get; set; } = ""; public int Position { get; set; } = 1; }
 internal sealed record SyncedAvatarOrderInput(string GroupId, List<string> AvatarIds);
+internal sealed record SyncedAvatarOrderProgress(string GroupId, string Stage, string Message, int Completed, int Total);
 internal sealed record SyncedAvatarOrderApplyResult(LibraryData Library, int Removed, int Added, string Tag, string BackupPath);
 internal sealed record CleanLibraryExport(List<GroupFileSummary> Groups);
-internal sealed record GroupFileSummary(string Id, string Name, string Description, List<AvatarInput> Avatars);
+internal sealed record GroupFileSummary(string Id, string Name, string Description, string Icon, List<AvatarInput> Avatars);
 internal sealed record BackgroundResult(string DataUrl, string Folder, string MediaType = "", string MimeType = "", string FileName = "");
 internal sealed record AppLogEntry(DateTimeOffset Timestamp, string Level, string Area, string Message, string Detail = "");
 internal sealed record AppLogList(string Folder, List<AppLogEntry> Entries);
@@ -4069,6 +4426,6 @@ internal sealed record VrChatFavoriteRef(string AvatarId, string RemoteFavoriteI
 internal sealed record VrChatFavoriteRecompileResult(string Tag, int Removed, int Added);
 internal sealed record VrChatFavoriteImport(List<VrChatRemoteGroup> Groups, List<VrChatGroupedAvatar> Avatars, List<VrChatGroupedAvatar> DeletedAvatars);
 internal sealed record DeletedAvatarMoveSummary(string Name, string Status);
-internal sealed record VrChatSyncResult(LibraryData Library, int GroupsSynced, int AvatarsSynced, int MovedToDeleted, List<string> DeletedAvatarNames, List<DeletedAvatarMoveSummary> DeletedAvatarResults);
+internal sealed record VrChatSyncResult(LibraryData Library, int GroupsSynced, int AvatarsSynced, int MovedToDeleted, List<string> DeletedAvatarNames, List<DeletedAvatarMoveSummary> DeletedAvatarResults, int UpdatedAvatars, List<string> UpdatedAvatarNames, int UploadedAvatars, int FavoriteGroupLimit);
 internal sealed record PersistedCookieSession(List<PersistedCookie> Cookies);
 internal sealed record PersistedCookie(string Name, string Value);

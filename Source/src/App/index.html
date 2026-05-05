@@ -163,7 +163,7 @@
   </div>
 
   <dialog id="groupDialog"><form method="dialog" class="dialog-form">
-    <header><h3 id="groupDialogTitle">Group</h3><button type="button" class="icon-button" data-close="groupDialog">x</button></header>
+    <header><h3 id="groupDialogTitle">Group</h3><div class="group-dialog-header-actions"><div id="groupIconWrap" class="group-icon-editor"><span id="groupIconPreview" class="custom-group-icon" hidden></span><button id="changeGroupIconBtn" type="button">Change Icon</button><button id="removeGroupIconBtn" type="button">Remove Icon</button><input id="groupIconInput" type="hidden"></div><button type="button" class="icon-button" data-close="groupDialog">x</button></div></header>
     <label>Name<input id="groupNameInput" required maxlength="80"></label>
     <label>Description<textarea id="groupDescriptionInput" rows="3"></textarea></label>
     <menu><button type="button" data-close="groupDialog">Cancel</button><button id="saveGroupBtn" class="primary">Save</button></menu>

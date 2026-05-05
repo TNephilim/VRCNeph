@@ -29,8 +29,11 @@ const state = {
   syncedAvatarEdit: { groupId: "", avatarIds: [], backupPath: "", applying: false },
   pendingDatabaseAvatar: null,
   pendingMoveAvatarId: "",
+  pendingMoveAvatarIds: [],
   pendingAvatarGroupAction: "",
   pendingAvatarSort: null,
+  selectedAvatarIds: new Set(),
+  selectionAnchorAvatarId: "",
   pendingCopyGroupId: "",
   avatarDialogGroupId: null,
   avatarDialogSource: "",
@@ -38,10 +41,12 @@ const state = {
   dragSort: null,
   dragPoint: null,
   dragScrollFrame: null,
+  vrchatBackgroundSyncTimer: null,
   positionEdit: null,
   vrchatStartupSyncDone: false,
   vrchatSyncBusy: false,
   vrchatSyncLoggedIn: false,
+  vrchatAvatarFavoriteGroupLimit: 1,
   settingsSaveTimer: null,
   settingsDraft: null,
   pendingBackupRestore: null,
@@ -118,6 +123,7 @@ const escapeAttr = (value) => escapeHtml(value).replace(/`/g, "&#096;");
 async function loadLibrary() {
   state.library = await api("list");
   if (!state.activeGroupId || !state.library.groups.some((g) => g.id === state.activeGroupId)) state.activeGroupId = state.library.groups[0]?.id ?? null;
+  setDefaultAvatarSortForActiveGroup();
   render();
 }
 async function loadSession() {
@@ -128,6 +134,7 @@ async function loadSession() {
 }
 async function logoutVrChat() {
   state.syncedAvatarEdit = { groupId: "", avatarIds: [], backupPath: "", applying: false };
+  updateVrChatBackgroundSyncTimer(false);
   state.vrchat = await api("vrchatLogout");
   state.library = await api("list");
   state.activeGroupId = state.library.groups[0]?.id ?? null;
@@ -186,7 +193,15 @@ function groupAvatars(groupId) { return state.library.avatars.filter((a) => a.gr
 function isSyncedGroup(groupId) { return String(groupId || "").toLowerCase().startsWith("vrc_"); }
 function isDeletedGroup(groupId) { return String(groupId || "").toLowerCase() === "deleted_avatars"; }
 function isRecentGroup(groupId) { return String(groupId || "").toLowerCase() === "recent_avatars"; }
-function isPinnedSystemGroup(groupId) { return isRecentGroup(groupId) || isDeletedGroup(groupId); }
+function isUploadedGroup(groupId) { return String(groupId || "").toLowerCase() === "uploaded_avatars"; }
+function isUpdatedGroup(groupId) { return String(groupId || "").toLowerCase() === "updated_avatars"; }
+function isVrcPlusGroup(groupId) {
+  const match = /^vrc_avatars(\d+)$/i.exec(String(groupId || ""));
+  return Boolean(match && Number(match[1]) > 1);
+}
+function hasVrcPlusFavoriteGroups() { return Number(state.vrchatAvatarFavoriteGroupLimit || 1) > 1; }
+function canAccessSyncedGroup(groupId) { return !isVrcPlusGroup(groupId) || hasVrcPlusFavoriteGroups(); }
+function isPinnedSystemGroup(groupId) { return isRecentGroup(groupId) || isDeletedGroup(groupId) || isUploadedGroup(groupId) || isUpdatedGroup(groupId); }
 function isDefaultReorderLockedGroup(groupId) { return isSyncedGroup(groupId) || isPinnedSystemGroup(groupId); }
 function canManuallyAddToGroup(groupId) { return !isPinnedSystemGroup(groupId); }
 function canCopyGroupIntoGroup(groupId) { return !isSyncedGroup(groupId) && !isPinnedSystemGroup(groupId); }
@@ -199,7 +214,7 @@ function isGroupReorderLocked(group) {
 function isDefaultLocalGroup(group) { return String(group?.description || "").toLowerCase() === "default local avatar favorites." || String(group?.name || "").toLowerCase() === "favorites"; }
 function isCustomLocalGroup(group) { return group && !isSyncedGroup(group.id) && !isPinnedSystemGroup(group.id) && !isDefaultLocalGroup(group); }
 function isSyncedAvatarEditActive(groupId = state.activeGroupId) { return Boolean(groupId && state.syncedAvatarEdit.groupId === groupId); }
-function canEditSyncedAvatarOrder(group = activeGroup()) { return Boolean(group && isSyncedGroup(group.id) && !isPinnedSystemGroup(group.id)); }
+function canEditSyncedAvatarOrder(group = activeGroup()) { return Boolean(group && isSyncedGroup(group.id) && !isPinnedSystemGroup(group.id) && canAccessSyncedGroup(group.id)); }
 function canReorderAvatarsInGroup(groupId = state.activeGroupId) { return !isPinnedSystemGroup(groupId) && (!isSyncedGroup(groupId) || isSyncedAvatarEditActive(groupId)); }
 function isSyncedAvatarEditDrag() { return state.dragSort?.type === "avatar" && isSyncedAvatarEditActive(state.dragSort.groupId); }
 function exitSyncedAvatarEditMode(message = "") {
@@ -210,21 +225,40 @@ function exitSyncedAvatarEditMode(message = "") {
   return true;
 }
 function groupMatchesFilter(group) {
-  if (state.groupFilter === "synced") return isSyncedGroup(group.id) || isRecentGroup(group.id) || isDeletedGroup(group.id);
+  if (isSyncedGroup(group.id) && !canAccessSyncedGroup(group.id)) return false;
+  if (state.groupFilter === "synced") return isSyncedGroup(group.id) || isUploadedGroup(group.id) || isUpdatedGroup(group.id) || isRecentGroup(group.id) || isDeletedGroup(group.id);
   if (state.groupFilter === "local") return isDefaultLocalGroup(group) || isCustomLocalGroup(group);
   return true;
 }
 function filteredGroups() { return orderedGroups().filter(groupMatchesFilter); }
 function ensureActiveGroupExists() {
-  if (state.library.groups.some((group) => group.id === state.activeGroupId)) return;
-  state.activeGroupId = orderedGroups()[0]?.id ?? null;
+  if (orderedGroups().some((group) => group.id === state.activeGroupId && groupMatchesFilter(group))) return;
+  state.activeGroupId = orderedGroups().find(groupMatchesFilter)?.id ?? null;
   state.avatarPage = 0;
 }
-function groupIconHtml(groupId) {
+function groupIconHtml(group) {
+  const groupId = typeof group === "string" ? group : group?.id;
+  const icon = String(group?.icon || "").trim();
+  if (!isSyncedGroup(groupId) && !isPinnedSystemGroup(groupId) && icon) {
+    return icon.startsWith("data:image/")
+      ? `<span class="custom-group-icon image" title="Group icon"><img src="${escapeAttr(icon)}" alt=""></span>`
+      : `<span class="custom-group-icon" title="Group icon">${escapeHtml(icon)}</span>`;
+  }
+  if (isUpdatedGroup(groupId)) return `<span class="updated-icon" title="Updated avatars" aria-hidden="true"></span>`;
+  if (isUploadedGroup(groupId)) return `<span class="uploaded-icon" title="Uploaded avatars" aria-hidden="true"></span>`;
   if (isSyncedGroup(groupId)) return `<span class="sync-icon" title="Synced from VRChat">&#8635;</span>`;
   if (isRecentGroup(groupId)) return `<span class="recent-icon" title="Recent avatars" aria-hidden="true"></span>`;
   if (isDeletedGroup(groupId)) return `<span class="trash-icon" title="Deleted avatars" aria-hidden="true"></span>`;
   return "";
+}
+function setGroupIconPreview(icon = "") {
+  const preview = $("groupIconPreview");
+  const value = String(icon || "").trim();
+  preview.hidden = !value;
+  $("removeGroupIconBtn").disabled = !value;
+  preview.innerHTML = value.startsWith("data:image/")
+    ? `<img src="${escapeAttr(value)}" alt="">`
+    : escapeHtml(value);
 }
 function orderedGroups() { return [...state.library.groups].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? ""))); }
 function reorderableGroups() { return orderedGroups().filter((group) => !isGroupReorderLocked(group)); }
@@ -239,6 +273,11 @@ function orderedGroupAvatars(groupId = state.activeGroupId) {
     return [...ordered, ...missing];
   }
   return avatars.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")));
+}
+function avatarUpdatedSortTime(avatar) {
+  const value = avatar?.remoteUpdatedAt || avatar?.updatedAt || avatar?.remoteCreatedAt || avatar?.createdAt || "";
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : 0;
 }
 function listPosition(items, id) { return Math.max(1, items.findIndex((x) => x.id === id) + 1); }
 function movePositionFromDrop(items, draggedId, targetId, after) {
@@ -325,8 +364,10 @@ function renderGroups() {
     item.dataset.canReorder = canReorder ? "true" : "false";
     item.draggable = canReorder;
     const reorderTitle = canReorder ? "Drag to reorder" : reorderLocked ? "Pinned group" : "Group order is managed in All view";
-    item.innerHTML = `<button class="group-position" type="button" title="${reorderTitle}" ${canReorder ? "" : "disabled"}>#${listPosition(allGroups, group.id)}</button><button class="group-select" type="button"><span class="group-title">${escapeHtml(group.name)}</span><span class="group-count">${groupAvatars(group.id).length}</span></button>`;
-    item.querySelector(".group-title").innerHTML = `${groupIconHtml(group.id)}${escapeHtml(group.name)}`;
+    const count = groupAvatars(group.id).length;
+    const countLabel = isSyncedGroup(group.id) ? `${count}/${SYNCED_GROUP_AVATAR_LIMIT}` : String(count);
+    item.innerHTML = `<button class="group-position" type="button" title="${reorderTitle}" ${canReorder ? "" : "disabled"}>#${listPosition(allGroups, group.id)}</button><button class="group-select" type="button"><span class="group-title">${escapeHtml(group.name)}</span><span class="group-count">${escapeHtml(countLabel)}</span></button>`;
+    item.querySelector(".group-title").innerHTML = `${groupIconHtml(group)}${escapeHtml(group.name)}`;
     if (canReorder) {
       item.addEventListener("dragstart", (event) => {
         const rect = item.getBoundingClientRect();
@@ -372,10 +413,10 @@ function renderGroups() {
           toast("Recent and Deleted groups are managed automatically.");
           return;
         }
-        const draggedId = state.dragSort.id;
+        const draggedIds = state.dragSort.ids?.length ? [...state.dragSort.ids] : [state.dragSort.id];
         clearDragSortIndicators();
         state.dragSort = null;
-        await moveOrCopyAvatarToGroup(draggedId, group.id);
+        await moveOrCopyAvatarsToGroup(draggedIds, group.id, { focusTarget: false });
         return;
       }
       if (state.dragSort?.id === group.id) {
@@ -395,15 +436,26 @@ function renderGroups() {
     item.querySelector(".group-select").addEventListener("click", () => {
       const groupChanged = state.activeGroupId !== group.id;
       if (groupChanged) exitSyncedAvatarEditMode("Edit mode turned off.");
+      if (groupChanged) clearAvatarSelection();
       state.activeGroupId = group.id;
+      if (groupChanged) setDefaultAvatarSortForActiveGroup();
       state.avatarPage = 0;
       if (state.activePage !== "favorites") state.activePage = "favorites";
       render();
     });
     item.addEventListener("contextmenu", (event) => {
       event.preventDefault();
+      const pending = state.pendingAvatarSort;
+      const pendingMulti = (pending?.ids?.length || 0) > 1;
+      const canPlacePending = Boolean(pending && (pending.groupId === group.id ? canReorderAvatarsInGroup(group.id) : !isSyncedGroup(group.id) && canManuallyAddToGroup(group.id) && !isPinnedSystemGroup(pending.groupId)));
+      const canCopyPending = Boolean(pending && pending.groupId !== group.id && !isSyncedGroup(group.id) && canManuallyAddToGroup(group.id));
       const actions = [
+        ...(canPlacePending ? [{ label: pendingMulti ? "Place All Here" : "Place Here", action: () => placePendingAvatarInGroup(group.id, false, { focusTarget: false }) }] : []),
+        ...(canCopyPending ? [{ label: pendingMulti ? "Copy All Here" : "Copy Here", action: () => placePendingAvatarInGroup(group.id, true, { focusTarget: false }) }] : []),
+        ...(canPlacePending || canCopyPending ? [{ label: "Cancel Sorting", action: cancelAvatarContextSort }] : []),
         { label: "Edit Group", disabled: pinned || synced, action: () => openGroupDialog(group) },
+        { label: "Change Group Icon", disabled: pinned || synced, action: () => changeGroupIcon(group) },
+        { label: "Remove Group Icon", disabled: pinned || synced || !String(group.icon || "").trim(), action: () => removeGroupIcon(group) },
         { label: "Copy Group", disabled: pinned, action: () => openCopyGroupDialog(group) },
         { label: "Delete Group", className: "danger", disabled: pinned || synced, action: () => deleteGroup(group) }
       ];
@@ -417,6 +469,7 @@ function renderToolbar() {
   const pinned = isPinnedSystemGroup(group?.id);
   const synced = isSyncedGroup(group?.id);
   const systemGroup = isPinnedSystemGroup(group?.id);
+  const managedReadOnlyGroup = isUploadedGroup(group?.id) || isUpdatedGroup(group?.id);
   const syncedEditVisible = canEditSyncedAvatarOrder(group);
   const syncedEditActive = isSyncedAvatarEditActive(group?.id);
   $("activeGroupName").textContent = group?.name ?? "Favorites";
@@ -436,7 +489,7 @@ function renderToolbar() {
   $("editGroupBtn").disabled = synced;
   $("copyGroupBtn").disabled = false;
   $("deleteGroupBtn").disabled = synced || state.library.groups.length <= 1;
-  $("unfavoriteAllBtn").hidden = !group;
+  $("unfavoriteAllBtn").hidden = !group || managedReadOnlyGroup;
   $("unfavoriteAllBtn").textContent = isRecentGroup(group?.id) ? "Clear Recents" : isDeletedGroup(group?.id) ? "Clear Deleted" : "Unfavorite All";
   $("unfavoriteAllBtn").disabled = state.vrchatSyncBusy || state.syncedAvatarEdit.applying || !groupAvatars(group?.id).length || (synced && !state.vrchat?.isLoggedIn);
   $("checkDeletedFavoritesBtn").hidden = !isDeletedGroup(group?.id);
@@ -444,8 +497,31 @@ function renderToolbar() {
   $("checkDeletedFavoritesBtn").disabled = !state.vrchat?.isLoggedIn || state.vrchatSyncBusy;
   $("addAvatarBtn").disabled = false;
   $("saveCurrentAvatarBtn").disabled = pinned;
+  normalizeAvatarSortForActiveGroup();
   updateSortButton();
   updateSortButton("databaseSortSelect", "databaseSortMenuBtn");
+}
+function activeGroupAllowsManualSort() {
+  const group = activeGroup();
+  return Boolean(group && !isSyncedGroup(group.id) && !isPinnedSystemGroup(group.id));
+}
+function defaultAvatarSortForGroup(group = activeGroup()) {
+  return group && !isSyncedGroup(group.id) && !isPinnedSystemGroup(group.id) ? "manual" : "createdDesc";
+}
+function setDefaultAvatarSortForActiveGroup() {
+  if (isSyncedAvatarEditActive(activeGroup()?.id)) $("sortSelect").value = "manual";
+  else $("sortSelect").value = defaultAvatarSortForGroup();
+  updateSortButton();
+}
+function normalizeAvatarSortForActiveGroup() {
+  if ($("sortSelect").value === "manual" && !activeGroupAllowsManualSort() && !isSyncedAvatarEditActive(activeGroup()?.id)) {
+    $("sortSelect").value = defaultAvatarSortForGroup();
+  }
+}
+function visibleSortOptions(selectId = "sortSelect") {
+  const options = [...$(selectId).options];
+  if (selectId !== "sortSelect" || activeGroupAllowsManualSort() || isSyncedAvatarEditActive(activeGroup()?.id)) return options;
+  return options.filter((option) => option.value !== "manual");
 }
 function renderAvatars() {
   const active = activeGroup();
@@ -466,13 +542,14 @@ function renderAvatars() {
       if (sort === "nameAsc") return (a.name || "").localeCompare(b.name || "");
       if (sort === "authorAsc") return (a.authorName || "").localeCompare(b.authorName || "");
       if (sort === "createdDesc") return new Date(b.createdAt) - new Date(a.createdAt);
-      return new Date(b.updatedAt) - new Date(a.updatedAt);
+      return avatarUpdatedSortTime(b) - avatarUpdatedSortTime(a);
     });
   const usePages = true;
   state.avatarFilteredCount = avatars.length;
   if (usePages) state.avatarPage = Math.min(avatarMaxPage() - 1, Math.max(0, state.avatarPage));
   else state.avatarPage = 0;
   const visibleAvatars = avatars.slice(state.avatarPage * AVATAR_PAGE_SIZE, (state.avatarPage + 1) * AVATAR_PAGE_SIZE);
+  pruneAvatarSelection(orderedAvatars);
   $("emptyState").hidden = avatars.length !== 0;
   renderAvatarPagination(usePages);
   const grid = $("avatarGrid");
@@ -480,13 +557,26 @@ function renderAvatars() {
   for (const avatar of visibleAvatars) {
     const card = document.createElement("article");
     card.className = `avatar-card ${canReorderCurrentGroup ? "avatar-reorder-enabled" : "avatar-reorder-locked"} ${syncedEditActive ? "synced-edit-card" : ""}`;
+    card.classList.toggle("selected", state.selectedAvatarIds.has(avatar.id));
     card.dataset.avatarId = avatar.id;
     card.draggable = canReorderCurrentGroup || syncedReorderBlocked || canDragAvatarsToGroup;
     const image = avatar.thumbnailImageUrl || avatar.imageUrl;
     const reorderTitle = canReorderCurrentGroup ? "Drag to reorder" : canDragAvatarsToGroup ? "Drag to copy to another group" : "Enable edit mode to reorder synced avatars";
     const release = releaseStatusBadge(avatar.releaseStatus);
     card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="badges">${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${platformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}</div></div></button><div class="avatar-card-footer"><button class="avatar-position" type="button" title="${reorderTitle}" ${canReorderCurrentGroup ? "" : "disabled"}>#${listPosition(orderedAvatars, avatar.id)}</button><button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
-    card.querySelector("button").addEventListener("click", () => openAvatarDialog(avatar));
+    card.querySelector("button").addEventListener("click", (event) => {
+      if (event.ctrlKey || event.metaKey || event.shiftKey) {
+        event.preventDefault();
+        handleAvatarSelectionClick(event, avatar, visibleAvatars);
+        return;
+      }
+      if (state.selectedAvatarIds.size) {
+        state.selectedAvatarIds.clear();
+        state.selectionAnchorAvatarId = "";
+        renderAvatars();
+      }
+      openAvatarDialog(avatar);
+    });
     if (canReorderCurrentGroup) card.querySelector(".avatar-position").addEventListener("click", () => openPositionDialog("avatar", avatar));
     card.querySelector(".avatar-card-equip").addEventListener("click", (event) => { event.stopPropagation(); equipAvatar(avatar.avatarId || avatar.id); });
     const startAvatarDrag = (event) => {
@@ -495,7 +585,8 @@ function renderAvatars() {
         return;
       }
       const rect = card.getBoundingClientRect();
-      state.dragSort = { type: "avatar", id: avatar.id, groupId: avatar.groupId, dragWidth: rect.width, dragHeight: rect.height, blockedSynced: syncedReorderBlocked, copyOnly: canDragAvatarsToGroup };
+      const selectedIds = selectedAvatarIdsForAvatar(avatar);
+      state.dragSort = { type: "avatar", id: avatar.id, ids: selectedIds, groupId: avatar.groupId, dragWidth: rect.width, dragHeight: rect.height, blockedSynced: syncedReorderBlocked, copyOnly: canDragAvatarsToGroup };
       if (!syncedReorderBlocked && !canDragAvatarsToGroup) {
         $("sortSelect").value = "manual";
         updateSortButton();
@@ -505,6 +596,9 @@ function renderAvatars() {
       setEmptyDragPreview(event);
       createFloatingAvatarDragPreview(card.querySelector(".thumb"), event);
       card.classList.add("dragging");
+      for (const selectedId of selectedIds) {
+        if (selectedId !== avatar.id) grid.querySelector(`[data-avatar-id="${CSS.escape(selectedId)}"]`)?.classList.add("dragging");
+      }
       startDragAutoScroll(event);
     };
     if (canReorderCurrentGroup || syncedReorderBlocked || canDragAvatarsToGroup) {
@@ -552,26 +646,106 @@ function renderAvatars() {
 function showAvatarContextMenu(event, avatar, canReorderCurrentGroup) {
   const pending = state.pendingAvatarSort;
   const systemSourceGroup = isPinnedSystemGroup(avatar.groupId);
-  const canPlacePending = Boolean(pending && pending.id !== avatar.id && pending.groupId === avatar.groupId && canReorderCurrentGroup);
+  const readOnlySourceGroup = isUploadedGroup(avatar.groupId) || isUpdatedGroup(avatar.groupId);
+  const selectedIds = selectedAvatarIdsForAvatar(avatar);
+  const multiSelected = selectedIds.length > 1 && state.selectedAvatarIds.has(avatar.id);
+  const pendingIds = pending?.ids?.length ? pending.ids : pending?.id ? [pending.id] : [];
+  const pendingMulti = pendingIds.length > 1;
+  const pendingSameGroup = Boolean(pending && pending.groupId === avatar.groupId);
+  const canPlacePending = Boolean(pending && !pendingIds.includes(avatar.id) && canReorderCurrentGroup && (pendingSameGroup || (!isSyncedGroup(avatar.groupId) && !isPinnedSystemGroup(pending.groupId) && canManuallyAddToGroup(avatar.groupId))));
   const sortAction = () => startAvatarContextSort(avatar);
+  const sortLabel = multiSelected ? "Sort All Avatars" : "Sort Avatar";
+  const moveLabel = multiSelected ? "Move All to Group" : "Move to Group";
+  const copyLabel = multiSelected ? "Copy All to Group" : "Copy to Group";
   const actions = [
     ...(canPlacePending ? [
-      { label: "Move Before", action: () => placeContextSortedAvatar(avatar, "before") },
-      { label: "Move After", action: () => placeContextSortedAvatar(avatar, "after") },
-      { label: "Swap Places", action: () => placeContextSortedAvatar(avatar, "swap") },
-      { label: "Sort Avatar", className: "separated", disabled: !canReorderCurrentGroup, action: sortAction }
+      { label: pendingMulti ? "Move All Before" : "Move Before", action: () => placeContextSortedAvatar(avatar, "before") },
+      { label: pendingMulti ? "Move All After" : "Move After", action: () => placeContextSortedAvatar(avatar, "after") },
+      ...(!pendingSameGroup ? [
+        { label: pendingMulti ? "Copy All Before" : "Copy Before", action: () => placeContextSortedAvatar(avatar, "copy-before") },
+        { label: pendingMulti ? "Copy All After" : "Copy After", action: () => placeContextSortedAvatar(avatar, "copy-after") }
+      ] : []),
+      ...(pendingSameGroup && !pendingMulti ? [{ label: "Swap Places", action: () => placeContextSortedAvatar(avatar, "swap") }] : []),
+      { label: "Cancel Sorting", action: cancelAvatarContextSort },
+      { label: sortLabel, className: "separated", disabled: !canReorderCurrentGroup, action: sortAction }
     ] : [
-      { label: "Sort Avatar", disabled: !canReorderCurrentGroup, action: sortAction }
+      { label: sortLabel, disabled: !canReorderCurrentGroup, action: sortAction }
     ]),
-    { label: "Move to Group", disabled: systemSourceGroup, action: () => openAvatarGroupActionDialog(avatar, "move") },
-    { label: "Copy to Group", action: () => openAvatarGroupActionDialog(avatar, "copy") },
-    { label: "Delete Avatar", className: "danger", action: () => deleteAvatarById(avatar.id, avatar.name) }
+    { label: moveLabel, disabled: systemSourceGroup, action: () => openAvatarGroupActionDialog(avatar, "move") },
+    { label: copyLabel, action: () => openAvatarGroupActionDialog(avatar, "copy") },
+    ...(multiSelected ? [{ label: "Cancel Selection", action: () => { clearAvatarSelection(); renderAvatars(); } }] : []),
+    { label: multiSelected ? "Delete All" : "Delete Avatar", className: "danger", disabled: readOnlySourceGroup, action: () => multiSelected ? deleteSelectedAvatars(selectedIds) : deleteAvatarById(avatar.id, avatar.name) }
   ];
   showContextMenu(event.clientX, event.clientY, actions);
 }
+function pruneAvatarSelection(avatars) {
+  if (!state.selectedAvatarIds.size) return;
+  const valid = new Set(avatars.map((avatar) => avatar.id));
+  for (const id of [...state.selectedAvatarIds]) if (!valid.has(id)) state.selectedAvatarIds.delete(id);
+  if (state.selectionAnchorAvatarId && !valid.has(state.selectionAnchorAvatarId)) state.selectionAnchorAvatarId = "";
+}
+function handleAvatarSelectionClick(event, avatar, visibleAvatars) {
+  if (event.shiftKey && state.selectionAnchorAvatarId) {
+    const ids = visibleAvatars.map((item) => item.id);
+    const start = ids.indexOf(state.selectionAnchorAvatarId);
+    const end = ids.indexOf(avatar.id);
+    if (start >= 0 && end >= 0) {
+      state.selectedAvatarIds.clear();
+      for (const id of ids.slice(Math.min(start, end), Math.max(start, end) + 1)) state.selectedAvatarIds.add(id);
+      renderAvatars();
+      return;
+    }
+  }
+  if (state.selectedAvatarIds.has(avatar.id)) state.selectedAvatarIds.delete(avatar.id);
+  else state.selectedAvatarIds.add(avatar.id);
+  state.selectionAnchorAvatarId = avatar.id;
+  renderAvatars();
+}
+function selectedAvatarIdsForAvatar(avatar) {
+  if (!state.selectedAvatarIds.has(avatar.id)) return [avatar.id];
+  const sameGroup = groupAvatars(avatar.groupId).map((item) => item.id);
+  const selected = sameGroup.filter((id) => state.selectedAvatarIds.has(id));
+  return selected.length ? selected : [avatar.id];
+}
+function clearAvatarSelection() {
+  state.selectedAvatarIds.clear();
+  state.selectionAnchorAvatarId = "";
+}
 function startAvatarContextSort(avatar) {
-  state.pendingAvatarSort = { id: avatar.id, groupId: avatar.groupId, name: avatar.name || avatar.avatarId || avatar.id };
+  const ids = selectedAvatarIdsForAvatar(avatar);
+  const multi = ids.length > 1 && state.selectedAvatarIds.has(avatar.id);
+  state.pendingAvatarSort = { id: avatar.id, ids, groupId: avatar.groupId, name: multi ? `${ids.length} selected avatars` : avatar.name || avatar.avatarId || avatar.id };
   toast(`Choose another avatar to place "${state.pendingAvatarSort.name}".`);
+}
+function cancelAvatarContextSort() {
+  state.pendingAvatarSort = null;
+  hideContextMenu();
+}
+function showAvatarGridContextMenu(event) {
+  if (event.target.closest(".avatar-card")) return;
+  const pending = state.pendingAvatarSort;
+  const group = activeGroup();
+  if (!pending || !group) return;
+  const sameGroup = pending.groupId === group.id;
+  const canPlace = sameGroup
+    ? canReorderAvatarsInGroup(group.id)
+    : !isSyncedGroup(group.id) && canManuallyAddToGroup(group.id) && !isPinnedSystemGroup(pending.groupId);
+  const canCopy = !sameGroup && !isSyncedGroup(group.id) && canManuallyAddToGroup(group.id);
+  if (!canPlace && !canCopy) return;
+  const pendingMulti = (pending.ids?.length || 0) > 1;
+  event.preventDefault();
+  const actions = [
+    ...(canPlace ? [{ label: pendingMulti ? "Place All Here" : "Place Here", action: () => placePendingAvatarInGroup(group.id, false) }] : []),
+    ...(canCopy ? [{ label: pendingMulti ? "Copy All Here" : "Copy Here", action: () => placePendingAvatarInGroup(group.id, true) }] : []),
+    { label: "Cancel Sorting", action: cancelAvatarContextSort }
+  ];
+  showContextMenu(event.clientX, event.clientY, actions);
+}
+function handleAvatarGridClick(event) {
+  if (event.target.closest(".avatar-card") || event.target.closest(".context-menu")) return;
+  if (!state.selectedAvatarIds.size) return;
+  clearAvatarSelection();
+  renderAvatars();
 }
 function showSystemGroupSortBlocked(groupId) {
   const name = isRecentGroup(groupId) ? "Recent" : isDeletedGroup(groupId) ? "Deleted" : "this";
@@ -594,11 +768,45 @@ function showSyncedEditModeRequired() {
     hideCancel: true
   }).finally(() => { showSyncedEditModeRequired.open = false; });
 }
+function showVrcPlusRequired() {
+  if (showVrcPlusRequired.open) return;
+  showVrcPlusRequired.open = true;
+  confirmAction({
+    title: "VRC+ Required",
+    message: "You need VRC+ to edit these avatar favorite groups.",
+    confirmLabel: "OK",
+    confirmClass: "primary",
+    hideCancel: true
+  }).finally(() => { showVrcPlusRequired.open = false; });
+}
 async function placeContextSortedAvatar(targetAvatar, placement) {
   const pending = state.pendingAvatarSort;
   state.pendingAvatarSort = null;
-  if (!pending || pending.id === targetAvatar.id || pending.groupId !== targetAvatar.groupId) return;
+  if (!pending || pending.id === targetAvatar.id) return;
+  const pendingIds = pending.ids?.length ? pending.ids : [pending.id];
+  if (pending.groupId !== targetAvatar.groupId) {
+    if (placement === "swap") return;
+    await moveAvatarsRelativeToTarget(pendingIds, targetAvatar, placement.replace("copy-", ""), placement.startsWith("copy-"));
+    return;
+  }
+  if (pendingIds.length > 1) {
+    if (placement === "swap") return;
+    await reorderAvatarsRelativeToTarget(pendingIds, targetAvatar.id, targetAvatar.groupId, placement);
+    return;
+  }
   await placeDroppedItem({ type: "avatar", id: pending.id, targetId: targetAvatar.id, groupId: targetAvatar.groupId }, placement);
+}
+async function placePendingAvatarInGroup(groupId, copy, options = {}) {
+  const pending = state.pendingAvatarSort;
+  state.pendingAvatarSort = null;
+  if (!pending?.id) return;
+  const ids = pending.ids?.length ? pending.ids : [pending.id];
+  if (ids.length > 1) {
+    if (copy) await copyAvatarsToGroup(ids, groupId, options);
+    else await moveAvatarsToGroup(ids, groupId, { confirm: false, ...options });
+    return;
+  }
+  await placeAvatarInGroupEnd(pending.id, groupId, copy, options);
 }
 function avatarMaxPage() { return Math.max(1, Math.ceil((state.avatarFilteredCount || 0) / AVATAR_PAGE_SIZE)); }
 function renderAvatarPagination(usePages = true) {
@@ -662,8 +870,43 @@ function openGroupDialog(group = null) {
   state.editingGroupId = group?.id ?? null;
   $("groupDialogTitle").textContent = group ? "Edit Group" : "Add Group";
   $("groupNameInput").value = group?.name ?? "";
+  $("groupIconInput").value = group?.icon ?? "";
+  $("groupIconWrap").hidden = !group || isPinnedSystemGroup(group.id) || isSyncedGroup(group.id);
+  setGroupIconPreview(group?.icon ?? "");
   $("groupDescriptionInput").value = group?.description ?? "";
   $("groupDialog").showModal();
+}
+async function pickGroupIcon() {
+  const result = await api("pickGroupIcon");
+  return result?.canceled ? "" : String(result?.icon || "");
+}
+async function changeGroupIcon(group = null) {
+  const target = group || (state.editingGroupId ? state.library.groups.find((item) => item.id === state.editingGroupId) : null);
+  if (!target || isPinnedSystemGroup(target.id) || isSyncedGroup(target.id)) return;
+  try {
+    const icon = await pickGroupIcon();
+    if (!icon) return;
+    if ($("groupDialog").open && state.editingGroupId === target.id) {
+      $("groupIconInput").value = icon;
+      setGroupIconPreview(icon);
+      return;
+    }
+    state.library = await api("updateGroup", { id: target.id, name: target.name, description: target.description || "", icon });
+    render();
+  } catch (e) { toast(e.message); }
+}
+async function removeGroupIcon(group = null) {
+  const target = group || (state.editingGroupId ? state.library.groups.find((item) => item.id === state.editingGroupId) : null);
+  if (!target || isPinnedSystemGroup(target.id) || isSyncedGroup(target.id)) return;
+  try {
+    if ($("groupDialog").open && state.editingGroupId === target.id) {
+      $("groupIconInput").value = "";
+      setGroupIconPreview("");
+      return;
+    }
+    state.library = await api("updateGroup", { id: target.id, name: target.name, description: target.description || "", icon: "" });
+    render();
+  } catch (e) { toast(e.message); }
 }
 function fillSelectWithGroups(select, selectedId, { includeGroup = canManuallyAddToGroup } = {}) {
   const groups = state.library.groups.filter((group) => includeGroup(group.id));
@@ -675,16 +918,20 @@ function fillCopyGroupTargets(sourceGroupId = "") {
   fillSelectWithGroups($("copyGroupTargetInput"), state.activeGroupId, { includeGroup: (groupId) => groupId !== sourceGroupId && canCopyGroupIntoGroup(groupId) });
 }
 function openAvatarGroupActionDialog(avatar, action) {
+  const ids = selectedAvatarIdsForAvatar(avatar);
   state.pendingMoveAvatarId = avatar.id;
+  state.pendingMoveAvatarIds = ids;
   state.pendingAvatarGroupAction = action;
-  $("saveAvatarGroupDialog").querySelector("h3").textContent = action === "copy" ? "Copy Avatar" : "Move Avatar";
-  $("confirmSaveAvatarGroupBtn").textContent = action === "copy" ? "Copy Avatar" : "Move Avatar";
-  $("saveAvatarGroupName").textContent = `Choose a group for "${avatar.name || avatar.avatarId || "this avatar"}".`;
+  const plural = ids.length > 1;
+  $("saveAvatarGroupDialog").querySelector("h3").textContent = action === "copy" ? (plural ? "Copy Avatars" : "Copy Avatar") : (plural ? "Move Avatars" : "Move Avatar");
+  $("confirmSaveAvatarGroupBtn").textContent = action === "copy" ? (plural ? "Copy Avatars" : "Copy Avatar") : (plural ? "Move Avatars" : "Move Avatar");
+  $("saveAvatarGroupName").textContent = plural ? `Choose a group for ${ids.length} selected avatars.` : `Choose a group for "${avatar.name || avatar.avatarId || "this avatar"}".`;
   fillSelectWithGroups($("saveAvatarGroupInput"), avatar.groupId ?? state.activeGroupId);
   $("saveAvatarGroupDialog").showModal();
 }
 function resetAvatarGroupDialogMode() {
   state.pendingMoveAvatarId = "";
+  state.pendingMoveAvatarIds = [];
   state.pendingAvatarGroupAction = "";
   $("saveAvatarGroupDialog").querySelector("h3").textContent = "Save Avatar";
   $("confirmSaveAvatarGroupBtn").textContent = "Save Avatar";
@@ -697,7 +944,7 @@ function openAvatarDialog(avatar = null) {
   $("avatarDialogTitle").textContent = avatar ? (isExisting ? "Avatar Details" : "Avatar Details") : "Add Avatar";
   setAvatarForm(avatar ?? {});
   applyAvatarDetailReadOnlyMode(isAdd ? "add" : "view");
-  $("deleteAvatarBtn").hidden = !isExisting;
+  $("deleteAvatarBtn").hidden = !isExisting || isUpdatedGroup(avatar?.groupId) || isUploadedGroup(avatar?.groupId);
   $("avatarDetailsPanel").hidden = false;
   document.body.classList.add("details-open");
   requestAnimationFrame(applyGridSize);
@@ -1233,7 +1480,7 @@ function renderAvatarDatabaseResults() {
     const card = document.createElement("article");
     card.className = "avatar-card database-avatar-card";
     card.dataset.avatarId = avatar.avatarId || avatar.id;
-    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name || avatar.avatarId)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="badges">${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${databasePlatformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}${avatarSourceBadgeHtml(avatar.source)}</div></div></button><div class="avatar-card-footer"><button class="avatar-card-save primary" type="button" title="Save avatar">Save</button><button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
+    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name || avatar.avatarId)}</div><div class="meta-line">${escapeHtml(avatar.authorName || "Unknown author")}</div><div class="badges">${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${databasePlatformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}</div></div></button><div class="avatar-card-footer"><button class="avatar-card-save primary" type="button" title="Save avatar">Save</button><button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
     card.querySelector("button").addEventListener("click", () => openAvatarDialog({ ...avatar, groupId: state.activeGroupId }));
     card.querySelector(".avatar-card-save").addEventListener("click", (event) => { event.stopPropagation(); openAddDatabaseAvatarDialog(avatar); });
     card.querySelector(".avatar-card-equip").addEventListener("click", (event) => { event.stopPropagation(); equipAvatar(avatar.avatarId || avatar.id); });
@@ -1306,13 +1553,18 @@ function syncDatabaseJumpFromNumber() {
 
 function showContextMenu(x, y, actions) {
   const menu = $("contextMenu");
-  menu.innerHTML = actions.map((a, i) => `<button type="button" data-index="${i}" class="${escapeAttr(a.className || "")}" ${a.disabled ? "disabled" : ""}>${escapeHtml(a.label)}</button>`).join("");
+  menu.style.width = "";
+  const menuActions = actions.some((action) => /^cancel\b/i.test(action.label || ""))
+    ? actions
+    : [...actions, { label: "Cancel", action: hideContextMenu }];
+  menu.innerHTML = menuActions.map((a, i) => `<button type="button" data-index="${i}" class="${escapeAttr(a.className || "")}" ${a.disabled ? "disabled" : ""}>${escapeHtml(a.label)}</button>`).join("");
   menu.onclick = (event) => event.stopPropagation();
   menu.hidden = false;
+  menu.style.width = `${Math.ceil(Math.min(menu.scrollWidth, Math.min(260, window.innerWidth - 16)))}px`;
   menu.style.left = `${Math.min(x, window.innerWidth - menu.offsetWidth - 8)}px`;
   menu.style.top = `${Math.min(y, window.innerHeight - menu.offsetHeight - 8)}px`;
   menu.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
-    const action = actions[Number(b.dataset.index)];
+    const action = menuActions[Number(b.dataset.index)];
     if (!action || action.disabled) return;
     hideContextMenu();
     action.action();
@@ -1322,10 +1574,28 @@ function hideContextMenu() { $("contextMenu").hidden = true; hideSortMenu(); hid
 function renderSortMenu(selectId = "sortSelect", menuId = "sortMenu", buttonId = "sortMenuBtn", onChange = resetAvatarPageAndRender) {
   const select = $(selectId);
   const menu = $(menuId);
-  menu.innerHTML = [...select.options].map((o) => `<button type="button" data-value="${escapeAttr(o.value)}" aria-checked="${o.selected}">${escapeHtml(o.textContent)}</button>`).join("");
+  if (selectId === "sortSelect") normalizeAvatarSortForActiveGroup();
+  menu.innerHTML = visibleSortOptions(selectId).map((o) => `<button type="button" data-value="${escapeAttr(o.value)}" aria-checked="${o.selected}">${escapeHtml(o.textContent)}</button>`).join("");
   menu.querySelectorAll("button").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); select.value = b.dataset.value; hideSortMenu(menuId, buttonId); updateSortButton(selectId, buttonId); onChange(); }));
 }
 function updateSortButton(selectId = "sortSelect", buttonId = "sortMenuBtn") { const s = $(selectId); $(buttonId).textContent = s.options[s.selectedIndex]?.textContent ?? "Sort"; }
+function cycleSortOption(event, selectId = "sortSelect", buttonId = "sortMenuBtn", onChange = resetAvatarPageAndRender) {
+  const select = $(selectId);
+  if (!select || select.disabled || $(buttonId)?.disabled || select.options.length < 2) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const direction = event.deltaY > 0 ? 1 : -1;
+  if (selectId === "sortSelect") normalizeAvatarSortForActiveGroup();
+  const options = visibleSortOptions(selectId);
+  const currentIndex = Math.max(0, options.findIndex((option) => option.value === select.value));
+  select.value = options[(currentIndex + direction + options.length) % options.length].value;
+  hideSortMenu();
+  hideSortMenu("databaseSortMenu", "databaseSortMenuBtn");
+  hideSortMenu("groupFilterMenu", "groupFilterMenuBtn");
+  hideSortMenu("avatarDatabaseProviderMenu", "avatarDatabaseProviderMenuBtn");
+  updateSortButton(selectId, buttonId);
+  onChange();
+}
 function hideSortMenu(menuId = "sortMenu", buttonId = "sortMenuBtn") {
   $(menuId).hidden = true;
   $(buttonId).setAttribute("aria-expanded", "false");
@@ -1651,6 +1921,12 @@ async function commitDraggedGroupDrop() {
 async function commitDraggedAvatarDrop() {
   const drag = state.dragSort;
   if (drag?.type !== "avatar") return;
+  if ((drag.ids?.length || 0) > 1) {
+    state.dragSort = null;
+    clearDragSortIndicators();
+    toast("Multiple selected avatars can be dragged to another group.");
+    return;
+  }
   if (drag.copyOnly) {
     state.dragSort = null;
     clearDragSortIndicators();
@@ -1684,6 +1960,11 @@ async function setGroupReorderLock(id, reorderLocked) {
 }
 async function setSyncedAvatarEditMode(enabled) {
   const group = activeGroup();
+  if (group && isVrcPlusGroup(group.id) && !hasVrcPlusFavoriteGroups()) {
+    showVrcPlusRequired();
+    renderToolbar();
+    return;
+  }
   if (!group || !canEditSyncedAvatarOrder(group)) return;
   if (!enabled) {
     await cancelSyncedAvatarEdit();
@@ -1699,19 +1980,17 @@ async function setSyncedAvatarEditMode(enabled) {
   }
   if (isSyncedAvatarEditActive(group.id)) return;
   try {
-    const backup = await api("backupGroup", { id: group.id });
     $("searchInput").value = "";
     state.avatarPage = 0;
     state.syncedAvatarEdit = {
       groupId: group.id,
       avatarIds: orderedGroupAvatars(group.id).map((avatar) => avatar.id),
-      backupPath: backup?.path || "",
+      backupPath: "",
       applying: false
     };
     $("sortSelect").value = "manual";
     updateSortButton();
     render();
-    toast(state.syncedAvatarEdit.backupPath ? `Backup saved to ${state.syncedAvatarEdit.backupPath}` : "Backup saved.");
   } catch (e) {
     state.syncedAvatarEdit = { groupId: "", avatarIds: [], backupPath: "", applying: false };
     renderToolbar();
@@ -1726,6 +2005,7 @@ async function cancelSyncedAvatarEdit() {
   }
   state.syncedAvatarEdit = { groupId: "", avatarIds: [], backupPath: "", applying: false };
   clearDragSortIndicators();
+  setDefaultAvatarSortForActiveGroup();
   render();
 }
 async function applySyncedAvatarEdit() {
@@ -1734,25 +2014,49 @@ async function applySyncedAvatarEdit() {
   const savedOrder = currentSyncedEditAvatarOrder();
   const confirmed = await confirmAction({
     title: "Save Synced Order",
-    message: `This will back up "${group.name}", clear every VRChat favorite in that group, then refavorite them in reverse save order so VRChat displays the saved left-to-right, row-by-row order. VRCNeph will wait for VRChat rate limits, so this can take some time before the order shows in game.`,
+    message: `This saves the new order to "${group.name}". It can take a bit to appear in game.`,
     confirmLabel: "Save",
     confirmClass: "primary"
   });
   if (!confirmed) return;
   state.syncedAvatarEdit.applying = true;
   renderToolbar();
+  const stopProgress = startSyncedAvatarApplyProgress(group.id);
   try {
-    $("activeGroupDescription").textContent = "Saving synced order to VRChat. This can take a while...";
+    $("activeGroupDescription").textContent = "Starting synced order save...";
     const result = await api("applySyncedAvatarOrder", { groupId: group.id, avatarIds: savedOrder }, 1800000);
     state.library = result.library;
     state.syncedAvatarEdit = { groupId: "", avatarIds: [], backupPath: "", applying: false };
+    setDefaultAvatarSortForActiveGroup();
+    stopProgress();
     render();
     toast(`Saved ${result.added || 0} avatars to ${group.name}. Backup: ${result.backupPath || "created"}`);
   } catch (e) {
+    stopProgress();
     state.syncedAvatarEdit.applying = false;
     renderToolbar();
     toast(e.message);
   }
+}
+function startSyncedAvatarApplyProgress(groupId) {
+  let stopped = false;
+  const renderProgress = (progress) => {
+    if (stopped || !progress || progress.groupId !== groupId) return;
+    const total = Number(progress.total) || 0;
+    const completed = Math.min(total, Math.max(0, Number(progress.completed) || 0));
+    const count = total > 0 ? ` ${completed}/${total}` : "";
+    $("activeGroupDescription").textContent = `${progress.message || "Saving synced order..."}${count}`;
+  };
+  const poll = async () => {
+    try { renderProgress(await api("syncedAvatarOrderProgress", {}, 45000)); }
+    catch { }
+  };
+  poll();
+  const timer = setInterval(poll, 900);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
 }
 function currentSyncedEditAvatarOrder() {
   const cards = [...$("avatarGrid").querySelectorAll(".avatar-card")]
@@ -1787,6 +2091,34 @@ async function reorderAvatar(id, groupId, position) {
     $("sortSelect").value = "manual";
     updateSortButton();
     state.library = await api("reorderAvatar", { id, groupId, position });
+    renderAvatars();
+  } catch (e) { toast(e.message); }
+}
+async function reorderAvatarsRelativeToTarget(ids, targetId, groupId, placement) {
+  const ordered = orderedGroupAvatars(groupId);
+  const movingSet = new Set(ids);
+  if (movingSet.has(targetId)) return;
+  const moving = ordered.filter((avatar) => movingSet.has(avatar.id)).map((avatar) => avatar.id);
+  const remaining = ordered.filter((avatar) => !movingSet.has(avatar.id)).map((avatar) => avatar.id);
+  const targetIndex = remaining.indexOf(targetId);
+  if (!moving.length || targetIndex < 0) return;
+  const insertIndex = targetIndex + (placement === "after" ? 1 : 0);
+  if (isSyncedAvatarEditActive(groupId)) {
+    const next = [...remaining];
+    next.splice(insertIndex, 0, ...moving);
+    state.syncedAvatarEdit.avatarIds = next;
+    $("sortSelect").value = "manual";
+    updateSortButton();
+    renderAvatars();
+    renderToolbar();
+    return;
+  }
+  try {
+    $("sortSelect").value = "manual";
+    updateSortButton();
+    for (let i = 0; i < moving.length; i++) {
+      state.library = await api("reorderAvatar", { id: moving[i], groupId, position: insertIndex + i + 1 });
+    }
     renderAvatars();
   } catch (e) { toast(e.message); }
 }
@@ -1853,7 +2185,7 @@ async function swapAvatarPositions(id, targetId, groupId) {
     renderAvatars();
   } catch (e) { toast(e.message); }
 }
-async function moveAvatarToGroup(id, groupId, { confirm = true } = {}) {
+async function moveAvatarToGroup(id, groupId, { confirm = true, focusTarget = true } = {}) {
   const avatar = state.library.avatars.find((x) => x.id === id);
   const group = state.library.groups.find((x) => x.id === groupId);
   if (!avatar || !group || avatar.groupId === groupId) return;
@@ -1872,19 +2204,170 @@ async function moveAvatarToGroup(id, groupId, { confirm = true } = {}) {
     updateSortButton();
     render();
     toast("Avatar moved.");
-  } catch (e) { toast(e.message); }
+  } catch (e) { handleAvatarAddError(e); }
+}
+async function moveAvatarRelativeToTarget(id, targetAvatar, placement, copy = false) {
+  return moveAvatarsRelativeToTarget([id], targetAvatar, placement, copy);
+}
+async function moveAvatarsRelativeToTarget(ids, targetAvatar, placement, copy = false) {
+  const sourceAvatars = ids.map((id) => state.library.avatars.find((x) => x.id === id)).filter(Boolean);
+  if (sourceAvatars.length > 1) return moveOrCopyAvatarsRelativeToTarget(sourceAvatars, targetAvatar, placement, copy);
+  const id = ids[0];
+  const sourceAvatar = state.library.avatars.find((x) => x.id === id);
+  const targetGroupId = targetAvatar?.groupId;
+  const targetGroup = state.library.groups.find((x) => x.id === targetGroupId);
+  if (!sourceAvatar || !targetAvatar || !targetGroup || sourceAvatar.groupId === targetGroupId) return;
+  if (!copy && isPinnedSystemGroup(sourceAvatar.groupId)) { toast("Recent and Deleted avatars can only be copied to another group."); return; }
+  if (!canManuallyAddToGroup(targetGroupId)) { toast("Recent and Deleted groups are managed automatically."); return; }
+  if (isSyncedGroup(targetGroupId)) { toast("Move before, move after, copy before, and copy after are only available for local groups."); return; }
+  if (avatarAlreadyInGroup(sourceAvatar, targetGroupId, id)) return showAvatarAlreadyInGroup(sourceAvatar, targetGroup);
+  const targetPosition = listPosition(orderedGroupAvatars(targetGroupId), targetAvatar.id);
+  if (targetPosition <= 0) return;
+  try {
+    if (copy) {
+      state.library = await api("copyAvatar", { avatarId: id, groupId: targetGroupId });
+    } else {
+      await pushSyncedAvatarMove(sourceAvatar.avatarId || sourceAvatar.id, sourceAvatar.groupId, targetGroupId);
+      state.library = await api("moveAvatar", { avatarId: id, groupId: targetGroupId });
+    }
+    const placedAvatar = state.library.avatars
+      .filter((candidate) => candidate.groupId === targetGroupId && (copy ? candidate.id !== id && (candidate.avatarId || candidate.id) === (sourceAvatar.avatarId || sourceAvatar.id) : candidate.id === id))
+      .sort((a, b) => (b.order ?? 0) - (a.order ?? 0))[0];
+    if (!placedAvatar) return;
+    const position = placement === "after" ? targetPosition + 1 : targetPosition;
+    state.library = await api("reorderAvatar", { id: placedAvatar.id, groupId: targetGroupId, position });
+    state.activeGroupId = targetGroupId;
+    state.avatarPage = Math.floor((Math.max(1, position) - 1) / AVATAR_PAGE_SIZE);
+    $("sortSelect").value = "manual";
+    updateSortButton();
+    render();
+    toast(copy ? "Avatar copied." : "Avatar moved.");
+  } catch (e) { handleAvatarAddError(e); }
+}
+async function moveOrCopyAvatarsRelativeToTarget(sourceAvatars, targetAvatar, placement, copy = false) {
+  const targetGroupId = targetAvatar?.groupId;
+  const targetGroup = state.library.groups.find((x) => x.id === targetGroupId);
+  if (!sourceAvatars.length || !targetAvatar || !targetGroup) return;
+  if (!copy && sourceAvatars.some((avatar) => isPinnedSystemGroup(avatar.groupId))) { toast("Recent and Deleted avatars can only be copied to another group."); return; }
+  if (!canManuallyAddToGroup(targetGroupId)) { toast("Recent and Deleted groups are managed automatically."); return; }
+  if (isSyncedGroup(targetGroupId)) { toast("Move before, move after, copy before, and copy after are only available for local groups."); return; }
+  const movable = sourceAvatars.filter((avatar) => avatar.groupId !== targetGroupId && !avatarAlreadyInGroup(avatar, targetGroupId, avatar.id));
+  if (!movable.length) { showAvatarAlreadyInGroup(sourceAvatars[0], targetGroup); return; }
+  const targetPosition = listPosition(orderedGroupAvatars(targetGroupId), targetAvatar.id);
+  if (targetPosition <= 0) return;
+  const placedIds = [];
+  try {
+    for (const avatar of movable) {
+      if (copy) {
+        const beforeIds = new Set(state.library.avatars.map((item) => item.id));
+        state.library = await api("copyAvatar", { avatarId: avatar.id, groupId: targetGroupId });
+        const copied = state.library.avatars.find((item) => !beforeIds.has(item.id) && item.groupId === targetGroupId);
+        if (copied) placedIds.push(copied.id);
+      } else {
+        await pushSyncedAvatarMove(avatar.avatarId || avatar.id, avatar.groupId, targetGroupId);
+        state.library = await api("moveAvatar", { avatarId: avatar.id, groupId: targetGroupId });
+        placedIds.push(avatar.id);
+      }
+    }
+    const insertPosition = placement === "after" ? targetPosition + 1 : targetPosition;
+    for (let i = 0; i < placedIds.length; i++) {
+      state.library = await api("reorderAvatar", { id: placedIds[i], groupId: targetGroupId, position: insertPosition + i });
+    }
+    state.activeGroupId = targetGroupId;
+    state.avatarPage = Math.floor((Math.max(1, insertPosition) - 1) / AVATAR_PAGE_SIZE);
+    clearAvatarSelection();
+    $("sortSelect").value = "manual";
+    updateSortButton();
+    render();
+    toast(copy ? `${placedIds.length} avatars copied.` : `${placedIds.length} avatars moved.`);
+  } catch (e) { handleAvatarAddError(e); }
+}
+async function placeAvatarInGroupEnd(id, groupId, copy = false, { focusTarget = true } = {}) {
+  const sourceAvatar = state.library.avatars.find((x) => x.id === id);
+  const targetGroup = state.library.groups.find((x) => x.id === groupId);
+  if (!sourceAvatar || !targetGroup) return;
+  if (!copy && sourceAvatar.groupId === groupId) {
+    const position = orderedGroupAvatars(groupId).length;
+    if (position > 0) await reorderAvatar(id, groupId, position);
+    return;
+  }
+  if (!copy && isPinnedSystemGroup(sourceAvatar.groupId)) { toast("Recent and Deleted avatars can only be copied to another group."); return; }
+  if (!canManuallyAddToGroup(groupId)) { toast("Recent and Deleted groups are managed automatically."); return; }
+  if (isSyncedGroup(groupId)) { toast("Place here and copy here are only available for local groups."); return; }
+  if (sourceAvatar.groupId !== groupId && avatarAlreadyInGroup(sourceAvatar, groupId, id)) return showAvatarAlreadyInGroup(sourceAvatar, targetGroup);
+  try {
+    if (copy) {
+      state.library = await api("copyAvatar", { avatarId: id, groupId });
+    } else {
+      await pushSyncedAvatarMove(sourceAvatar.avatarId || sourceAvatar.id, sourceAvatar.groupId, groupId);
+      state.library = await api("moveAvatar", { avatarId: id, groupId });
+    }
+    if (focusTarget) state.activeGroupId = groupId;
+    state.avatarPage = Math.max(0, Math.floor((orderedGroupAvatars(groupId).length - 1) / AVATAR_PAGE_SIZE));
+    $("sortSelect").value = "manual";
+    updateSortButton();
+    render();
+    toast(copy ? "Avatar copied." : "Avatar moved.");
+  } catch (e) { handleAvatarAddError(e); }
+}
+async function moveAvatarsToGroup(ids, groupId, { confirm = true, focusTarget = true } = {}) {
+  const avatars = ids.map((id) => state.library.avatars.find((x) => x.id === id)).filter(Boolean).filter((avatar) => avatar.groupId !== groupId);
+  const group = state.library.groups.find((x) => x.id === groupId);
+  if (!avatars.length || !group) return;
+  if (avatars.some((avatar) => isPinnedSystemGroup(avatar.groupId))) { toast("Recent and Deleted avatars can only be copied to another group."); return; }
+  if (!canManuallyAddToGroup(groupId)) { toast("Recent and Deleted groups are managed automatically."); return; }
+  const movable = avatars.filter((avatar) => !avatarAlreadyInGroup(avatar, groupId, avatar.id));
+  if (!movable.length) { showAvatarAlreadyInGroup(avatars[0], group); return; }
+  if (!syncedGroupHasCapacityForAvatars(groupId, movable.map((avatar) => avatar.avatarId || avatar.id))) return;
+  if (confirm && !await confirmAction({ title: "Move Avatars", message: `Move ${movable.length} selected avatars to "${group.name}"?`, confirmLabel: "Move", confirmClass: "primary" })) return;
+  let moved = 0;
+  for (const avatar of movable) {
+    try {
+      await pushSyncedAvatarMove(avatar.avatarId || avatar.id, avatar.groupId, groupId);
+      state.library = await api("moveAvatar", { avatarId: avatar.id, groupId });
+      moved++;
+    } catch (e) { handleAvatarAddError(e); break; }
+  }
+  if (focusTarget) {
+    state.activeGroupId = groupId;
+    state.avatarPage = 0;
+  }
+  clearAvatarSelection();
+  $("sortSelect").value = "manual";
+  updateSortButton();
+  render();
+  if (moved) toast(`${moved} avatars moved.`);
 }
 async function moveOrCopyAvatarToGroup(id, groupId) {
+  return moveOrCopyAvatarsToGroup([id], groupId);
+}
+async function moveOrCopyAvatarsToGroup(ids, groupId, { focusTarget = true } = {}) {
+  const uniqueIds = [...new Set(ids.filter(Boolean))];
+  if (uniqueIds.length <= 1) return moveOrCopySingleAvatarToGroup(uniqueIds[0], groupId, { focusTarget });
+  const avatars = uniqueIds.map((id) => state.library.avatars.find((x) => x.id === id)).filter(Boolean);
+  const group = state.library.groups.find((x) => x.id === groupId);
+  if (!avatars.length || !group) return;
+  if (!canManuallyAddToGroup(groupId)) { toast("Recent and Deleted groups are managed automatically."); return; }
+  const copyOnly = avatars.some((avatar) => isPinnedSystemGroup(avatar.groupId));
+  const movable = avatars.filter((avatar) => avatar.groupId !== groupId && !avatarAlreadyInGroup(avatar, groupId, avatar.id));
+  if (!movable.length) { showAvatarAlreadyInGroup(avatars[0], group); return; }
+  if (!syncedGroupHasCapacityForAvatars(groupId, movable.map((avatar) => avatar.avatarId || avatar.id))) return;
+  const choice = await chooseMoveOrCopyAvatar({ name: `${movable.length} selected avatars` }, group, { copyOnly });
+  if (choice === "copy") await copyAvatarsToGroup(movable.map((avatar) => avatar.id), groupId, { focusTarget });
+  else if (choice === "move") await moveAvatarsToGroup(movable.map((avatar) => avatar.id), groupId, { confirm: false, focusTarget });
+}
+async function moveOrCopySingleAvatarToGroup(id, groupId, { focusTarget = true } = {}) {
   const avatar = state.library.avatars.find((x) => x.id === id);
   const group = state.library.groups.find((x) => x.id === groupId);
   if (!avatar || !group || avatar.groupId === groupId) return;
   if (!canManuallyAddToGroup(groupId)) { toast("Recent and Deleted groups are managed automatically."); return; }
   if (avatarAlreadyInGroup(avatar, groupId, id)) return showAvatarAlreadyInGroup(avatar, group);
+  if (!syncedGroupHasCapacity(groupId, avatar.avatarId || avatar.id)) return;
   const choice = await chooseMoveOrCopyAvatar(avatar, group, { copyOnly: isPinnedSystemGroup(avatar.groupId) });
-  if (choice === "copy") await copyAvatarToGroup(id, groupId);
-  else if (choice === "move") await moveAvatarToGroup(id, groupId, { confirm: false });
+  if (choice === "copy") await copyAvatarToGroup(id, groupId, { focusTarget });
+  else if (choice === "move") await moveAvatarToGroup(id, groupId, { confirm: false, focusTarget });
 }
-async function copyAvatarToGroup(id, groupId) {
+async function copyAvatarToGroup(id, groupId, { focusTarget = true } = {}) {
   const avatar = state.library.avatars.find((x) => x.id === id);
   const group = state.library.groups.find((x) => x.id === groupId);
   if (!avatar || !group || avatar.groupId === groupId) return;
@@ -1894,7 +2377,7 @@ async function copyAvatarToGroup(id, groupId) {
   try {
     await pushSyncedAvatarAdd(avatar.avatarId || avatar.id, groupId);
     state.library = await api("copyAvatar", { avatarId: id, groupId });
-    state.activeGroupId = groupId;
+    if (focusTarget) state.activeGroupId = groupId;
     state.avatarPage = 0;
     $("sortSelect").value = "manual";
     updateSortButton();
@@ -1961,17 +2444,73 @@ function syncedGroupHasCapacity(groupId, avatarId = "", existingLocalId = "", no
   const normalizedAvatarId = String(avatarId || "").toLowerCase();
   if (normalizedAvatarId && avatars.some((avatar) => String(avatar.avatarId || avatar.id || "").toLowerCase() === normalizedAvatarId)) return true;
   if (avatars.length < SYNCED_GROUP_AVATAR_LIMIT) return true;
-  if (notify) toast(`Synced VRChat groups are limited to ${SYNCED_GROUP_AVATAR_LIMIT} avatars.`);
+  if (notify) showSyncedGroupFullPopup();
   return false;
+}
+function syncedGroupHasCapacityForAvatars(groupId, avatarIds = [], existingLocalIds = [], notify = true) {
+  if (!isSyncedGroup(groupId)) return true;
+  const avatars = groupAvatars(groupId);
+  const existingIds = new Set(existingLocalIds.filter(Boolean));
+  const current = new Set(avatars.map((avatar) => String(avatar.avatarId || avatar.id || "").toLowerCase()));
+  let needed = 0;
+  for (const avatarId of avatarIds) {
+    const normalized = String(avatarId || "").toLowerCase();
+    if (!normalized || current.has(normalized)) continue;
+    needed++;
+    current.add(normalized);
+  }
+  const existingSelectedInGroup = avatars.filter((avatar) => existingIds.has(avatar.id)).length;
+  if (avatars.length - existingSelectedInGroup + needed <= SYNCED_GROUP_AVATAR_LIMIT) return true;
+  if (notify) showSyncedGroupFullPopup();
+  return false;
+}
+function showSyncedGroupFullPopup() {
+  if (showSyncedGroupFullPopup.open) return;
+  showSyncedGroupFullPopup.open = true;
+  confirmAction({
+    title: "List Full",
+    message: `Synced VRChat groups can only contain ${SYNCED_GROUP_AVATAR_LIMIT} avatars.`,
+    confirmLabel: "OK",
+    confirmClass: "primary",
+    hideCancel: true
+  }).finally(() => { showSyncedGroupFullPopup.open = false; });
+}
+function handleAvatarAddError(error) {
+  const message = String(error?.message || error || "");
+  if (/synced vrchat (favorite )?groups can only contain/i.test(message)) {
+    showSyncedGroupFullPopup();
+    return;
+  }
+  toast(message);
 }
 async function pushSyncedAvatarAdd(avatarId, groupId) {
   if (!isSyncedGroup(groupId) || !state.vrchat?.isLoggedIn || !avatarId) return;
-  if (!syncedGroupHasCapacity(groupId, avatarId, "", false)) throw new Error(`Synced VRChat groups are limited to ${SYNCED_GROUP_AVATAR_LIMIT} avatars.`);
+  if (!syncedGroupHasCapacity(groupId, avatarId, "", true)) throw new Error(`Synced VRChat groups can only contain ${SYNCED_GROUP_AVATAR_LIMIT} avatars.`);
   await api("vrchatFavoriteAdd", { avatarId, groupId });
 }
 async function pushSyncedAvatarRemove(avatarId, groupId) {
   if (!isSyncedGroup(groupId) || !state.vrchat?.isLoggedIn || !avatarId) return;
   await api("vrchatFavoriteRemove", { avatarId, groupId });
+}
+function syncedAvatarRemovalPayload(avatar) {
+  if (!avatar || !isSyncedGroup(avatar.groupId)) return null;
+  const avatarId = avatar.avatarId || avatar.id;
+  return avatarId ? { avatarId, groupId: avatar.groupId, name: avatar.name || avatarId } : null;
+}
+function removeSyncedAvatarsInBackground(removals) {
+  const queue = removals.filter(Boolean);
+  if (!queue.length) return;
+  void (async () => {
+    let failed = 0;
+    for (const removal of queue) {
+      try {
+        await pushSyncedAvatarRemove(removal.avatarId, removal.groupId);
+      } catch {
+        failed++;
+      }
+    }
+    if (failed) toast(failed === 1 ? "VRChat unfavorite failed. Sync may add it back." : `${failed} VRChat unfavorites failed. Sync may add them back.`);
+  })();
 }
 async function pushSyncedAvatarMove(avatarId, oldGroupId, newGroupId) {
   if (isSyncedGroup(newGroupId)) await pushSyncedAvatarAdd(avatarId, newGroupId);
@@ -2007,10 +2546,12 @@ async function syncVrChatFavoritesSilent() {
     const previousActiveId = state.activeGroupId;
     const result = await api("vrchatSyncFavorites");
     state.library = result.library;
+    state.vrchatAvatarFavoriteGroupLimit = Number(result.favoriteGroupLimit || result.groupsSynced || 1);
     if (result.movedToDeleted > 0) {
-      const names = (result.deletedAvatarNames || []).filter(Boolean);
-      const preview = names.slice(0, 3).join(", ");
-      toast(result.movedToDeleted === 1 ? `"${preview || "An avatar"}" was moved to Deleted Avatars.` : `${result.movedToDeleted} unavailable avatars were moved to Deleted Avatars${preview ? `: ${preview}${names.length > 3 ? ", ..." : ""}` : "."}`);
+      showDeletedScanResult(result, { showEmpty: false });
+    }
+    if (result.updatedAvatars > 0) {
+      showUpdatedAvatarsResult(result);
     }
     state.vrchat = await api("vrchatSession");
     await refreshCurrentAvatarSummarySilent();
@@ -2030,11 +2571,24 @@ async function syncVrChatFavoritesSilent() {
 function updateVrChatSyncTimer() {
   if (!state.vrchat?.isLoggedIn) {
     state.vrchatStartupSyncDone = false;
+    updateVrChatBackgroundSyncTimer(false);
     return;
   }
+  updateVrChatBackgroundSyncTimer(true);
   if (state.vrchatStartupSyncDone) return;
   state.vrchatStartupSyncDone = true;
   syncVrChatFavoritesSilent();
+}
+function updateVrChatBackgroundSyncTimer(enabled = Boolean(state.vrchat?.isLoggedIn)) {
+  if (state.vrchatBackgroundSyncTimer) {
+    clearInterval(state.vrchatBackgroundSyncTimer);
+    state.vrchatBackgroundSyncTimer = null;
+  }
+  if (!enabled) return;
+  state.vrchatBackgroundSyncTimer = setInterval(() => {
+    if (!state.vrchat?.isLoggedIn || state.activePage !== "favorites") return;
+    syncVrChatFavoritesSilent();
+  }, 10 * 60 * 1000);
 }
 function openPositionDialog(type, item) {
   if (type === "group" && isGroupReorderLocked(item)) return;
@@ -2085,13 +2639,14 @@ async function checkDeletedFavoritesManual() {
   try {
     const result = await api("vrchatSyncFavorites");
     state.library = result.library;
+    state.vrchatAvatarFavoriteGroupLimit = Number(result.favoriteGroupLimit || result.groupsSynced || 1);
     state.vrchat = await api("vrchatSession");
     if (state.library.groups.some((group) => group.id === "deleted_avatars")) state.activeGroupId = "deleted_avatars";
     else if (state.library.groups.some((group) => group.id === selectedGroupId)) state.activeGroupId = selectedGroupId;
     else state.activeGroupId = state.library.groups[0]?.id ?? null;
     state.vrchatSyncBusy = false;
     render();
-    showDeletedScanResult(result);
+    showDeletedScanResult(result, { showEmpty: true });
   } catch (e) {
     toast(e.message);
     state.vrchatSyncBusy = false;
@@ -2100,9 +2655,10 @@ async function checkDeletedFavoritesManual() {
     renderToolbar();
   }
 }
-function showDeletedScanResult(result) {
+function showDeletedScanResult(result, { showEmpty = true } = {}) {
   const entries = (result.deletedAvatarResults || []).filter((entry) => entry?.name);
   if (!entries.length) {
+    if (!showEmpty) return;
     confirmAction({
       title: "Check Complete",
       message: "No deleted or privated avatars were found.",
@@ -2121,6 +2677,21 @@ function showDeletedScanResult(result) {
   confirmAction({
     title: "Moved to Deleted Avatars",
     message: lines.join("\n"),
+    confirmLabel: "OK",
+    confirmClass: "primary",
+    hideCancel: true
+  });
+}
+function showUpdatedAvatarsResult(result) {
+  const names = (result.updatedAvatarNames || []).filter(Boolean);
+  const visible = names.slice(0, 12);
+  const extra = Math.max(0, names.length - visible.length);
+  const message = visible.length
+    ? `Updated: ${visible.join(", ")}${extra ? `, and ${extra} more` : ""}`
+    : `${result.updatedAvatars || "Some"} avatars were updated.`;
+  confirmAction({
+    title: "Updated Avatars",
+    message,
     confirmLabel: "OK",
     confirmClass: "primary",
     hideCancel: true
@@ -2199,7 +2770,7 @@ async function loadSettingsBackups() {
     const result = await api("backupList");
     const files = result.files || [];
     list.innerHTML = files.length
-      ? files.map((file) => `<div class="settings-list-item"><div><strong>${escapeHtml(file.name)}</strong><span>${escapeHtml(file.reason || "Backup")} - ${escapeHtml(new Date(file.lastModified).toLocaleString())}</span></div><small>${escapeHtml(formatFileSize(file.size))}</small><button type="button" class="restore-action" data-backup-path="${escapeAttr(file.path)}" data-backup-name="${escapeAttr(file.name)}">Restore</button></div>`).join("")
+      ? files.map((file) => `<div class="settings-list-item"><div><strong>${escapeHtml(file.displayName || file.name)}</strong><span>${escapeHtml(file.reason || "Backup")} - ${escapeHtml(new Date(file.lastModified).toLocaleString())}</span></div><small>${escapeHtml(formatFileSize(file.size))}</small><button type="button" class="restore-action" data-backup-path="${escapeAttr(file.path)}" data-backup-name="${escapeAttr(file.displayName || file.name)}">Restore</button></div>`).join("")
       : `<div class="settings-empty"><h4>No backups</h4><p>Backups will appear here after group edits, synced order saves, or cleanup moves.</p></div>`;
     list.querySelectorAll("[data-backup-path]").forEach((button) => button.addEventListener("click", () => openBackupRestoreDialog(button.dataset.backupPath, button.dataset.backupName)));
   } catch (e) {
@@ -2235,7 +2806,24 @@ async function copySettingsLogs() {
     if (!text) { toast("No logs to copy."); return; }
     if (await copyTextToClipboard(text)) toast("Logs copied.");
     else toast("Could not copy logs.");
-  } catch (e) { toast(e.message); }
+  } catch (e) { handleAvatarAddError(e); }
+}
+async function copyAvatarsToGroup(ids, groupId, { focusTarget = true } = {}) {
+  const avatars = ids.map((id) => state.library.avatars.find((x) => x.id === id)).filter(Boolean);
+  const candidates = avatars.filter((avatar) => avatar.groupId !== groupId && !avatarAlreadyInGroup(avatar, groupId, avatar.id));
+  if (!syncedGroupHasCapacityForAvatars(groupId, candidates.map((avatar) => avatar.avatarId || avatar.id))) return;
+  let copied = 0;
+  for (const avatar of candidates) {
+    try {
+      await pushSyncedAvatarAdd(avatar.avatarId || avatar.id, groupId);
+      state.library = await api("copyAvatar", { avatarId: avatar.id, groupId });
+      copied++;
+    } catch (e) { handleAvatarAddError(e); break; }
+  }
+  if (focusTarget) state.activeGroupId = groupId;
+  clearAvatarSelection();
+  render();
+  if (copied) toast(`${copied} avatars copied.`);
 }
 async function clearSettingsLogs() {
   if (!await confirmAction({ title: "Clear Logs", message: "Clear all app logs?", confirmLabel: "Clear", confirmClass: "danger" })) return;
@@ -2243,7 +2831,7 @@ async function clearSettingsLogs() {
     await api("logsClear");
     await loadSettingsLogs();
     toast("Logs cleared.");
-  } catch (e) { toast(e.message); }
+  } catch (e) { handleAvatarAddError(e); }
 }
 async function openLogsFolder() {
   try {
@@ -2321,7 +2909,7 @@ async function copyGroup(group) {
     $("copyGroupDialog").close();
     render();
     toast("Group copied.");
-  } catch (e) { toast(e.message); }
+  } catch (e) { handleAvatarAddError(e); }
 }
 async function copyGroupToExisting() {
   const source = state.library.groups.find((group) => group.id === state.pendingCopyGroupId);
@@ -2350,9 +2938,24 @@ async function deleteAvatarById(id, name) {
   const avatar = state.library.avatars.find((x) => x.id === id);
   if (!await confirmAction({ title: "Delete Avatar", message: `Are you sure you want to delete "${name || id}"?` })) return;
   try {
-    if (avatar) await pushSyncedAvatarRemove(avatar.avatarId || avatar.id, avatar.groupId);
+    const syncedRemoval = syncedAvatarRemovalPayload(avatar);
     state.library = await api("deleteAvatar", { id });
     render();
+    removeSyncedAvatarsInBackground([syncedRemoval]);
+  } catch (e) { toast(e.message); }
+}
+async function deleteSelectedAvatars(ids) {
+  const avatars = ids.map((id) => state.library.avatars.find((x) => x.id === id)).filter(Boolean);
+  if (!avatars.length) return;
+  if (!await confirmAction({ title: "Delete Selected Avatars", message: `Delete ${avatars.length} selected avatars?`, confirmLabel: "Delete", confirmClass: "danger" })) return;
+  try {
+    const syncedRemovals = avatars.map(syncedAvatarRemovalPayload);
+    for (const avatar of avatars) {
+      state.library = await api("deleteAvatar", { id: avatar.id });
+    }
+    clearAvatarSelection();
+    render();
+    removeSyncedAvatarsInBackground(syncedRemovals);
   } catch (e) { toast(e.message); }
 }
 async function equipAvatar(id) {
@@ -2473,6 +3076,7 @@ document.querySelectorAll("dialog").forEach((dialog) => {
 });
 $("addGroupBtn").addEventListener("click", () => openGroupDialog());
 $("groupFilterMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "groupFilterSelect", "groupFilterMenu", "groupFilterMenuBtn", () => { state.groupFilter = $("groupFilterSelect").value; render(); }));
+$("groupFilterMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "groupFilterSelect", "groupFilterMenuBtn", () => { state.groupFilter = $("groupFilterSelect").value; render(); }), { passive: false });
 $("editGroupBtn").addEventListener("click", () => openGroupDialog(activeGroup()));
 $("copyGroupBtn").addEventListener("click", () => openCopyGroupDialog(activeGroup()));
 $("deleteGroupBtn").addEventListener("click", () => deleteGroup(activeGroup()));
@@ -2483,7 +3087,9 @@ $("favoritesTabBtn").addEventListener("click", () => showPage("favorites"));
 $("databaseTabBtn").addEventListener("click", () => showPage("database"));
 $("searchInput").addEventListener("input", resetAvatarPageAndRender);
 $("sortMenuBtn").addEventListener("click", toggleSortMenu);
+$("sortMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event), { passive: false });
 $("databaseSortMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "databaseSortSelect", "databaseSortMenu", "databaseSortMenuBtn", () => { state.avatarDatabasePage = 0; renderAvatarDatabaseResults(); }));
+$("databaseSortMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "databaseSortSelect", "databaseSortMenuBtn", () => { state.avatarDatabasePage = 0; renderAvatarDatabaseResults(); }), { passive: false });
 document.addEventListener("click", hideContextMenu);
 document.addEventListener("dragover", autoScrollDrag);
 document.addEventListener("wheel", wheelScrollDuringDrag, { passive: false, capture: true });
@@ -2497,6 +3103,8 @@ document.addEventListener("keydown", (event) => {
 });
 $("avatarGrid").addEventListener("dragover", handleAvatarGridDragOver);
 $("avatarGrid").addEventListener("drop", handleAvatarGridDrop);
+$("avatarGrid").addEventListener("contextmenu", showAvatarGridContextMenu);
+$("avatarGrid").addEventListener("click", handleAvatarGridClick);
 $("groupList").addEventListener("dragover", handleGroupListDragOver);
 $("groupList").addEventListener("drop", handleGroupListDrop);
 $("gridSizeInput").addEventListener("input", () => { state.settings.gridSize = Number($("gridSizeInput").value); applyGridSize(); queueSaveSettings(); });
@@ -2541,6 +3149,8 @@ $("openLogsFolderBtn").addEventListener("click", openLogsFolder);
 $("clearLogsBtn").addEventListener("click", clearSettingsLogs);
 $("openBackupsFolderBtn").addEventListener("click", openBackupsFolder);
 $("openBackgroundFolderBtn").addEventListener("click", openBackgroundFolder);
+$("changeGroupIconBtn").addEventListener("click", () => changeGroupIcon());
+$("removeGroupIconBtn").addEventListener("click", () => removeGroupIcon());
 ["thumbnailInput", "imageInput"].forEach((id) => $(id).addEventListener("input", updateAvatarPreview));
 ["tagsInput"].forEach((id) => $(id).addEventListener("input", updateAvatarDetailBadges));
 $("avatarDetailThumbnailButton").addEventListener("click", () => { const image = $("imageInput").value.trim() || $("thumbnailInput").value.trim(); if (!image) return; $("imagePreviewFull").src = image; $("imagePreviewDialog").showModal(); });
@@ -2553,7 +3163,7 @@ $("copyAvatarIdBtn").addEventListener("click", async () => {
   try {
     if (await copyTextToClipboard(avatarId)) toast("Avatar ID copied.");
     else toast("Could not copy avatar ID.");
-  } catch (e) { toast(e.message); }
+  } catch (e) { handleAvatarAddError(e); }
 });
 $("fetchAvatarBtn").addEventListener("click", async (event) => { event.preventDefault(); try { setAvatarForm({ ...(await api("fetchAvatar", { id: $("avatarIdInput").value })), groupId: state.avatarDialogGroupId }); } catch (e) { toast(e.message); } });
 $("saveAvatarBtn").addEventListener("click", (event) => { event.preventDefault(); resetAvatarGroupDialogMode(); $("saveAvatarGroupName").textContent = `Choose a group for "${$("avatarNameInput").value.trim() || $("avatarIdInput").value.trim() || "this avatar"}".`; fillSelectWithGroups($("saveAvatarGroupInput"), state.avatarDialogGroupId ?? state.activeGroupId); $("confirmSaveAvatarGroupBtn").disabled = !$("saveAvatarGroupInput").value; $("saveAvatarGroupDialog").showModal(); });
@@ -2567,12 +3177,12 @@ $("confirmSaveAvatarGroupBtn").addEventListener("click", async (event) => {
     if (!groupId) { toast("Choose a group."); return; }
     if (!canManuallyAddToGroup(groupId)) { toast("Recent and Deleted groups are managed automatically."); return; }
     if (state.pendingMoveAvatarId) {
-      const avatarId = state.pendingMoveAvatarId;
+      const avatarIds = state.pendingMoveAvatarIds?.length ? [...state.pendingMoveAvatarIds] : [state.pendingMoveAvatarId];
       const action = state.pendingAvatarGroupAction || "move";
       resetAvatarGroupDialogMode();
       $("saveAvatarGroupDialog").close();
-      if (action === "copy") await copyAvatarToGroup(avatarId, groupId);
-      else await moveAvatarToGroup(avatarId, groupId);
+      if (action === "copy") await copyAvatarsToGroup(avatarIds, groupId);
+      else await moveAvatarsToGroup(avatarIds, groupId);
       return;
     }
     const avatarId = $("avatarIdInput").value.trim();
@@ -2587,9 +3197,9 @@ $("confirmSaveAvatarGroupBtn").addEventListener("click", async (event) => {
     $("saveAvatarGroupDialog").close();
     closeAvatarDetails();
     render();
-  } catch (e) { toast(e.message); }
+  } catch (e) { handleAvatarAddError(e); }
 });
-$("saveGroupBtn").addEventListener("click", async (event) => { event.preventDefault(); try { state.library = await api(state.editingGroupId ? "updateGroup" : "createGroup", { id: state.editingGroupId ?? "", name: $("groupNameInput").value, description: $("groupDescriptionInput").value }); $("groupDialog").close(); render(); } catch (e) { toast(e.message); } });
+$("saveGroupBtn").addEventListener("click", async (event) => { event.preventDefault(); try { state.library = await api(state.editingGroupId ? "updateGroup" : "createGroup", { id: state.editingGroupId ?? "", name: $("groupNameInput").value, icon: $("groupIconInput").value, description: $("groupDescriptionInput").value }); $("groupDialog").close(); render(); } catch (e) { toast(e.message); } });
 $("copyGroupFullBtn").addEventListener("click", () => copyGroup(state.library.groups.find((group) => group.id === state.pendingCopyGroupId)));
 $("copyGroupToExistingBtn").addEventListener("click", copyGroupToExisting);
 $("avatarDatabaseSearchInput").addEventListener("input", () => { state.avatarDatabaseAuthorId = ""; });
@@ -2672,7 +3282,7 @@ $("confirmAddDatabaseAvatarBtn").addEventListener("click", async (event) => {
     $("addDatabaseAvatarDialog").close();
     render();
     toast(`Added "${avatar.name || avatar.avatarId}".`);
-  } catch (e) { toast(e.message); }
+  } catch (e) { handleAvatarAddError(e); }
 });
 $("loginBtn").addEventListener("click", () => showInlineLogin(true));
 $("cancelInlineLoginBtn").addEventListener("click", () => showInlineLogin(false));
