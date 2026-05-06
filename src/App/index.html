@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VRCNeph</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="backgroundLayer" class="background-layer" aria-hidden="true"></div>
+  <button id="hideUiBtn" class="hide-ui-toggle icon-button" type="button" title="Hide UI" aria-label="Hide UI" aria-pressed="false"><span class="eye-icon" aria-hidden="true"></span></button>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div><h1>VRCNeph</h1></div>
+        <div class="brand-actions">
+          <button id="openGameBtn" type="button">Open Game</button>
+          <button id="customizationBtn" type="button">Settings</button>
+        </div>
+      </div>
+      <section class="account-panel">
+        <button id="accountStatus" class="account-status" type="button">Not signed in</button>
+        <button id="currentAvatarCard" class="current-avatar-card" type="button" hidden>
+          <span class="current-avatar-thumb"><img id="currentAvatarImage" alt=""></span>
+          <span class="current-avatar-copy"><span>Current avatar</span><strong id="currentAvatarName">Unknown avatar</strong><small id="currentAvatarId"></small></span>
+        </button>
+        <div class="account-actions"><button id="loginBtn">VRChat Login</button><button id="logoutBtn" hidden>Logout</button></div>
+        <div id="inlineLoginPanel" class="inline-login" hidden>
+          <label>Username or email<input id="inlineLoginUsernameInput" autocomplete="username"></label>
+          <label>Password<input id="inlineLoginPasswordInput" type="password" autocomplete="current-password"></label>
+          <div id="loginStatus" class="login-status"></div>
+          <div class="account-actions"><button id="cancelInlineLoginBtn" type="button">Cancel</button><button id="runInlineLoginBtn" type="button" class="primary">Login</button></div>
+        </div>
+        <div id="inlineTwoFactorPanel" class="inline-login" hidden>
+          <label>Method
+            <div class="sort-control two-factor-method-control">
+              <button id="inlineTwoFactorMethodBtn" type="button">TOTP</button>
+              <div id="inlineTwoFactorMethodMenu" class="sort-menu" hidden></div>
+              <select id="inlineTwoFactorMethodInput" hidden></select>
+            </div>
+          </label>
+          <label>Code<input id="inlineTwoFactorCodeInput" inputmode="numeric" autocomplete="one-time-code"></label>
+          <div id="twoFactorStatus" class="login-status"></div>
+          <div class="account-actions"><button id="cancelInlineTwoFactorBtn" type="button">Cancel</button><button id="runInlineTwoFactorBtn" type="button" class="primary">Verify</button></div>
+        </div>
+        <button id="saveCurrentAvatarBtn" hidden>Save Current Avatar</button>
+      </section>
+      <div class="groups-header">
+        <h2>Groups</h2>
+        <div class="groups-header-actions">
+          <div class="sort-control group-filter-sort">
+            <button id="groupFilterMenuBtn" type="button">All</button>
+            <div id="groupFilterMenu" class="sort-menu" hidden></div>
+            <select id="groupFilterSelect" hidden>
+              <option value="all">All</option>
+              <option value="synced">Synced</option>
+              <option value="local">Local</option>
+            </select>
+          </div>
+          <button id="addGroupBtn" class="icon-button" title="Add group">+</button>
+        </div>
+      </div>
+      <div id="groupList" class="group-list"></div>
+      <div class="sidebar-actions"><button id="importBtn">Import</button><button id="exportBtn">Export</button></div>
+    </aside>
+    <main class="workspace">
+      <nav class="page-tabs" aria-label="Pages">
+        <button id="favoritesTabBtn" class="active" type="button">Avatar Favorites</button>
+        <button id="databaseTabBtn" type="button">Database Search</button>
+      </nav>
+      <section id="favoritesPage" class="workspace-page">
+        <header class="toolbar">
+          <div class="toolbar-title"><h2 id="activeGroupName">Favorites</h2><p id="activeGroupDescription"></p><span id="rouletteCountdownFav" class="roulette-countdown toolbar-countdown" hidden></span></div>
+          <div class="toolbar-actions">
+            <input id="searchInput" type="search" placeholder="Search avatars">
+            <div class="sort-control">
+              <button id="sortMenuBtn" type="button">Recently updated</button>
+              <div id="sortMenu" class="sort-menu" hidden></div>
+              <select id="sortSelect" hidden>
+                <option value="updatedDesc">Recently updated</option>
+                <option value="manual">Custom order</option>
+                <option value="createdDesc">Recently added</option>
+                <option value="nameAsc">Name A-Z</option>
+                <option value="authorAsc">Author A-Z</option>
+              </select>
+            </div>
+            <label id="syncedAvatarEditToggleWrap" class="edit-mode-toggle" hidden><span>Edit mode</span><input id="syncedAvatarEditToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span></label>
+            <button id="applySyncedAvatarOrderBtn" class="primary" type="button" hidden>Save</button>
+            <button id="cancelSyncedAvatarOrderBtn" type="button" hidden>Cancel</button>
+            <button id="editGroupBtn">Edit Group</button>
+            <button id="copyGroupBtn">Copy Group</button>
+            <button id="deleteGroupBtn" class="danger">Delete Group</button>
+            <button id="unfavoriteAllBtn" type="button" class="danger">Unfavorite All</button>
+            <button id="checkDeletedFavoritesBtn" type="button" hidden>Check for Deleted/Private</button>
+            <button id="addAvatarBtn" class="primary">Add Avatar</button>
+            <button id="favRouletteBtn" type="button" title="Favorite avatar roulette">Fav Roulette</button>
+            <span class="flex-break"></span>
+            <label class="range-control">Columns<input id="gridSizeInput" type="range" min="3" max="10" value="10"><output id="gridSizeValue">10</output></label>
+          </div>
+        </header>
+        <section id="avatarGrid" class="avatar-grid"></section>
+        <section id="emptyState" class="empty-state" hidden><h3>No avatars in this group</h3><p>Add or save an avatar to show it here.</p></section>
+        <footer id="avatarPagination" class="database-pagination" hidden><button id="avatarPrevPageBtn" type="button">Previous</button><button id="avatarPageStatus" class="page-jump-button" type="button"></button><button id="avatarNextPageBtn" type="button">Next</button></footer>
+      </section>
+      <section id="databasePage" class="workspace-page" hidden>
+        <header class="toolbar">
+          <div class="toolbar-title"><h2>Database Search</h2><p id="avatarDatabaseStatus">Search AVTRZIP, Prismic PAS, and VRCX DB.</p><span id="rouletteCountdownDb" class="roulette-countdown toolbar-countdown" hidden></span></div>
+          <div class="toolbar-actions database-toolbar-actions">
+            <input id="avatarDatabaseSearchInput" type="search" placeholder="Search all databases">
+            <button id="searchAvatarDatabaseBtn" type="button" class="primary">Search</button>
+            <button id="clearAvatarDatabaseBtn" type="button">Clear</button>
+            <div class="sort-control database-provider-control">
+              <button id="avatarDatabaseProviderMenuBtn" type="button">All Databases</button>
+              <div id="avatarDatabaseProviderMenu" class="sort-menu" hidden></div>
+              <select id="avatarDatabaseProviderSelect" class="database-provider-select" title="Database source" aria-label="Database source" hidden>
+                <option value="all" selected>All Databases</option>
+                <option value="avtrzip">AVTRZIP</option>
+                <option value="pas">Prismic PAS</option>
+                <option value="vrcx">VRCX DB</option>
+              </select>
+            </div>
+            <div class="sort-control">
+              <button id="databaseSortMenuBtn" type="button">Relevance</button>
+              <div id="databaseSortMenu" class="sort-menu" hidden></div>
+              <select id="databaseSortSelect" hidden>
+                <option value="relevance">Relevance</option>
+                <option value="updatedDesc">Recently updated</option>
+                <option value="createdDesc">Recently added</option>
+                <option value="nameAsc">Name A-Z</option>
+                <option value="authorAsc">Author A-Z</option>
+              </select>
+            </div>
+            <div class="database-field-dropdown">
+              <button id="databaseFieldMenuBtn" type="button">Search By</button>
+              <div id="databaseFieldMenu" class="database-field-menu" hidden aria-label="Database search fields">
+                <label class="field-toggle"><input id="databaseSearchAvatarToggle" type="checkbox" checked>Avatar</label>
+                <label class="field-toggle"><input id="databaseSearchAuthorToggle" type="checkbox" checked>Author</label>
+                <label class="field-toggle"><input id="databaseSearchDescriptionToggle" type="checkbox" checked>Description</label>
+                <label class="field-toggle"><input id="databaseSearchTagsToggle" type="checkbox" checked>Tags</label>
+                <label class="field-toggle"><input id="databasePlatformPcToggle" type="checkbox">PC</label>
+                <label class="field-toggle"><input id="databasePlatformAndroidToggle" type="checkbox">Android</label>
+                <label class="field-toggle"><input id="databasePlatformIosToggle" type="checkbox">iOS</label>
+              </div>
+            </div>
+            <button id="randomAvatarDatabaseBtn" type="button" title="Random page">Random</button>
+            <button id="equipRandomAvatarBtn" type="button" class="primary">Equip Random</button>
+            <button id="avatarRouletteBtn" type="button" title="Avatar roulette">Roulette</button>
+            <span class="flex-break"></span>
+            <label class="range-control">Columns<input id="databaseGridSizeInput" type="range" min="3" max="10" value="10"><output id="databaseGridSizeValue">10</output></label>
+          </div>
+        </header>
+        <section id="avatarDatabaseResults" class="avatar-grid"></section>
+        <section id="avatarDatabaseEmptyState" class="empty-state" hidden><h3>No database results</h3><p>Search at least three characters to show matches.</p></section>
+        <footer id="avatarDatabasePagination" class="database-pagination" hidden><button id="databasePrevPageBtn" type="button">Previous</button><button id="databasePageStatus" class="page-jump-button" type="button"></button><button id="databaseNextPageBtn" type="button">Next</button></footer>
+      </section>
+      <aside id="avatarDetailsPanel" class="avatar-details-panel" hidden>
+        <form id="avatarDetailsForm" class="dialog-form wide">
+          <header><h3 id="avatarDialogTitle">Avatar</h3><button id="closeAvatarDetailsBtn" type="button" class="icon-button">x</button></header>
+          <div class="lookup-row"><label>Avatar ID<input id="avatarIdInput" placeholder="avtr_..."></label><button id="copyAvatarIdBtn" type="button">Copy ID</button><button id="fetchAvatarBtn">Fetch</button></div>
+          <div class="avatar-detail-preview">
+            <button id="avatarDetailThumbnailButton" class="avatar-detail-thumb" type="button" disabled><img id="avatarDetailThumbnail" alt="" hidden><span id="avatarDetailThumbnailEmpty">No thumbnail</span></button>
+            <div class="avatar-detail-side"><div id="avatarDetailName" class="avatar-detail-name"></div><button id="avatarDetailAuthorBtn" class="avatar-detail-author" type="button" hidden></button><div id="avatarDetailBadges" class="avatar-detail-badges"></div><button id="avatarDetailUpdated" class="avatar-detail-updated" type="button"></button></div>
+          </div>
+          <div class="form-grid">
+            <input id="avatarNameInput" type="hidden"><input id="authorNameInput" type="hidden"><input id="authorIdInput" type="hidden">
+            <label>Thumbnail URL<input id="thumbnailInput"></label><label>Image URL<input id="imageInput"></label>
+            <input id="releaseStatusInput" type="hidden"><input id="versionInput" type="hidden"><input id="platformsInput" type="hidden">
+            <label>Tags<input id="tagsInput"></label><label>Source URL<input id="sourceUrlInput"></label>
+            <label class="detail-wide detail-description">Description<textarea id="descriptionInput" rows="3"></textarea></label><label class="detail-wide detail-notes">Notes<textarea id="notesInput" rows="3"></textarea></label><label class="detail-wide detail-raw">Raw JSON<textarea id="rawJsonInput" rows="5" spellcheck="false"></textarea></label>
+          </div>
+          <menu><button id="deleteAvatarBtn" class="danger">Delete</button><button id="equipAvatarBtn" type="button" class="primary">Equip Avatar</button><button id="saveAvatarBtn" class="primary">Save Avatar</button></menu>
+        </form>
+      </aside>
+    </main>
+  </div>
+
+  <dialog id="groupDialog"><form method="dialog" class="dialog-form">
+    <header><h3 id="groupDialogTitle">Group</h3><div class="group-dialog-header-actions"><div id="groupIconWrap" class="group-icon-editor"><span id="groupIconPreview" class="custom-group-icon" hidden></span><button id="editGroupIconBtn" type="button">Edit Group Icon</button><input id="groupIconInput" type="hidden"></div><button id="editGroupBackgroundBtn" type="button">Edit Background</button><button type="button" class="icon-button" data-close="groupDialog">x</button></div></header>
+    <label>Name<input id="groupNameInput" required maxlength="80"></label>
+    <label>Description<textarea id="groupDescriptionInput" rows="3"></textarea></label>
+    <menu><button type="button" data-close="groupDialog">Cancel</button><button id="saveGroupBtn" class="primary">Save</button></menu>
+  </form></dialog>
+
+  <dialog id="copyGroupDialog"><form method="dialog" class="dialog-form">
+    <header><h3>Copy Group</h3><button type="button" class="icon-button" data-close="copyGroupDialog">x</button></header>
+    <p id="copyGroupMessage" class="dialog-note"></p>
+    <label id="copyGroupTargetWrap" hidden>Target group<select id="copyGroupTargetInput"></select></label>
+    <menu><button type="button" data-close="copyGroupDialog">Cancel</button><button id="copyGroupFullBtn" type="button">Copy Full Group</button><button id="copyGroupToExistingBtn" type="button" class="primary">Copy to Existing</button></menu>
+  </form></dialog>
+
+  <dialog id="addDatabaseAvatarDialog"><form method="dialog" class="dialog-form">
+    <header><h3>Add to Group</h3><button type="button" class="icon-button" data-close="addDatabaseAvatarDialog">x</button></header>
+    <p id="addDatabaseAvatarName" class="dialog-note"></p><label>Group<select id="databaseAvatarGroupInput"></select></label>
+    <menu><button type="button" data-close="addDatabaseAvatarDialog">Cancel</button><button id="confirmAddDatabaseAvatarBtn" class="primary">Add Avatar</button></menu>
+  </form></dialog>
+
+  <dialog id="saveAvatarGroupDialog"><form method="dialog" class="dialog-form">
+    <header><h3>Save Avatar</h3><button type="button" class="icon-button" data-close="saveAvatarGroupDialog">x</button></header>
+    <p id="saveAvatarGroupName" class="dialog-note"></p><label>Group<select id="saveAvatarGroupInput"></select></label>
+    <menu><button type="button" data-close="saveAvatarGroupDialog">Cancel</button><button id="confirmSaveAvatarGroupBtn" class="primary">Save Avatar</button></menu>
+  </form></dialog>
+
+  <dialog id="databaseJumpDialog"><form method="dialog" class="dialog-form">
+    <header><h3>Jump to Page</h3><button type="button" class="icon-button" data-close="databaseJumpDialog">x</button></header>
+    <div class="page-slider-row"><button id="databaseJumpPrevBtn" type="button" class="icon-button" title="Previous page">&lt;</button><input id="databaseJumpPageInput" type="range" min="1" step="1" value="1"><button id="databaseJumpNextBtn" type="button" class="icon-button" title="Next page">&gt;</button></div>
+    <label id="databaseJumpPageValue" class="page-slider-value">Page <input id="databaseJumpPageNumber" type="number" min="1" step="1" value="1"> of <span id="databaseJumpPageMax">1</span></label>
+    <menu><button type="button" data-close="databaseJumpDialog">Cancel</button><button id="confirmDatabaseJumpBtn" class="primary">Go</button></menu>
+  </form></dialog>
+
+  <dialog id="positionDialog"><form method="dialog" class="dialog-form">
+    <header><h3 id="positionDialogTitle">Change Position</h3><button type="button" class="icon-button" data-close="positionDialog">x</button></header>
+    <p id="positionDialogName" class="dialog-note"></p>
+    <div class="page-slider-row"><button id="positionPrevBtn" type="button" class="icon-button" title="Previous position">&lt;</button><input id="positionInput" type="range" min="1" step="1" value="1"><button id="positionNextBtn" type="button" class="icon-button" title="Next position">&gt;</button></div>
+    <label id="positionValue" class="page-slider-value">Position <input id="positionNumber" type="number" min="1" step="1" value="1"> of <span id="positionMax">1</span></label>
+    <menu><button type="button" data-close="positionDialog">Cancel</button><button id="confirmPositionBtn" class="primary">Move</button></menu>
+  </form></dialog>
+  <dialog id="avatarRouletteDialog"><form method="dialog" class="dialog-form">
+    <header><h3>Avatar Roulette</h3><button type="button" class="icon-button" data-close="avatarRouletteDialog">x</button></header>
+    <p id="avatarRouletteStatus" class="dialog-note">Equip a random favorite avatar on a timer.</p>
+    <div class="form-grid">
+      <label>Minutes<input id="avatarRouletteMinutesInput" type="number" min="0" step="1" value="1"></label>
+      <label>Seconds<input id="avatarRouletteSecondsInput" type="number" min="0" max="59" step="1" value="0"></label>
+    </div>
+    <menu><button id="stopAvatarRouletteBtn" type="button" class="danger">Stop</button><button type="button" data-close="avatarRouletteDialog">Cancel</button><button id="startAvatarRouletteBtn" type="button" class="primary">Start</button></menu>
+  </form></dialog>
+
+  <dialog id="customizationDialog" class="settings-dialog"><form method="dialog" class="dialog-form">
+    <header><h3>Settings</h3><button type="button" class="icon-button" data-close="customizationDialog">x</button></header>
+    <div class="settings-tabs" role="tablist">
+      <button id="settingsCustomizationTab" type="button" class="active">Customization</button>
+      <button id="settingsLogsTab" type="button">Logs</button>
+      <button id="settingsBackupsTab" type="button">Backups</button>
+    </div>
+    <section id="settingsCustomizationPanel" class="settings-panel">
+      <div class="settings-panel-actions"><button id="openBackgroundFolderBtn" type="button">Edit Global Background</button><button id="resetThemeBtn" type="button">Reset Theme</button><select id="bgEffectSelect" hidden><option value="">None</option><option value="aurora">Aurora</option><option value="aurorasnow">Aurora 2</option><option value="blizzard">Blizzard</option><option value="embers">Embers</option><option value="fog">Fog</option><option value="pulse">Gradient pulse</option><option value="lowpoly">Low-poly</option><option value="matrix">Matrix rain</option><option value="nebula">Nebula</option><option value="particles">Particles</option><option value="flow">Perlin flow</option><option value="rain">Rain</option><option value="snow">Snowfall</option><option value="stars">Starfield</option><option value="thunderstorm">Thunderstorm</option><option value="noise">White noise</option><option value="noise2">White noise 2</option></select></div>
+      <div class="color-row"><label class="theme-control">Background Color<input id="themeColorInput" type="color" value="#303735"></label><label class="sync-toggle-label">Sync colors<input id="panelColorSyncToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span></label></div>
+      <label>Background opacity</label>
+      <div class="page-slider-row"><button id="backgroundOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="backgroundOpacityInput" type="range" min="0" max="100" value="20"><button id="backgroundOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button></div>
+      <label id="backgroundOpacityValue" class="page-slider-value">Opacity <input id="backgroundOpacityNumber" type="number" min="0" max="100" step="1" value="20">%</label>
+      <label id="panelColorLabel" class="theme-control">Panel Color<input id="panelColorInput" type="color" value="#303735"><span id="panelColorOverlay" class="color-overlay" hidden></span></label>
+      <label>Panel opacity</label>
+      <div class="page-slider-row"><button id="panelOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="panelOpacityInput" type="range" min="0" max="100" value="35"><button id="panelOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button></div>
+      <label id="panelOpacityValue" class="page-slider-value">Opacity <input id="panelOpacityNumber" type="number" min="0" max="100" step="1" value="35">%</label>
+    </section>
+    <section id="settingsLogsPanel" class="settings-panel" hidden>
+      <div class="settings-panel-actions"><div class="sort-control settings-log-filter-control"><button id="settingsLogFilterMenuBtn" type="button">All Logs</button><div id="settingsLogFilterMenu" class="sort-menu" hidden></div><select id="settingsLogFilterSelect" hidden><option value="all">All Logs</option><option value="area:App">App</option><option value="area:VRChat">VRChat</option><option value="area:Groups">Groups</option><option value="area:Avatars">Avatars</option><option value="area:Backups">Backups</option><option value="area:Import">Import</option><option value="area:Export">Export</option><option value="area:Settings">Settings</option><option value="area:Database">Database</option><option value="area:Updater">Updater</option><option value="level:Warning">Warnings</option><option value="level:Error">Errors</option></select></div><button id="refreshLogsBtn" type="button">Refresh</button><button id="copyLogsBtn" type="button">Copy Logs</button><button id="openLogsFolderBtn" type="button">Open Logs Folder</button><button id="clearLogsBtn" type="button" class="danger">Clear Logs</button></div>
+      <div id="settingsLogsList" class="settings-list logs-list"></div>
+    </section>
+    <section id="settingsBackupsPanel" class="settings-panel" hidden>
+      <div class="settings-panel-actions"><button id="openBackupsFolderBtn" type="button">Open Backups Folder</button></div>
+      <div id="settingsBackupsList" class="settings-list"></div>
+    </section>
+    <menu><button id="checkUpdateBtn" type="button">Check Updates</button><button id="cancelSettingsBtn" type="button">Cancel</button><button id="applySettingsBtn" type="button" class="primary">Apply</button></menu>
+  </form></dialog>
+  <dialog id="backupRestoreDialog"><form method="dialog" class="dialog-form">
+    <header><h3>Restore Backup</h3><button type="button" class="icon-button" data-close="backupRestoreDialog">x</button></header>
+    <p id="backupRestoreMessage" class="dialog-note"></p>
+    <menu><button type="button" data-close="backupRestoreDialog">Cancel</button><button id="restoreBackupNewBtn" type="button">Restore as New Group</button><button id="restoreBackupReplaceBtn" type="button" class="primary">Replace Original</button></menu>
+  </form></dialog>
+  <dialog id="backgroundActionDialog"><form method="dialog" class="dialog-form">
+    <header><h3 id="backgroundActionTitle">Edit Background</h3><button type="button" class="icon-button" data-close="backgroundActionDialog">x</button></header>
+    <div class="dialog-section background-effect-section">
+      <span>Background Effect</span>
+      <div class="sort-control dialog-effect-control"><button id="backgroundEffectMenuBtn" type="button">Use Global</button><div id="backgroundEffectMenu" class="sort-menu" hidden></div><select id="backgroundEffectSelect" hidden></select></div>
+    </div>
+    <menu><button id="importBackgroundsBtn" type="button" class="primary">Import Backgrounds</button><button id="openBackgroundFolderActionBtn" type="button">Open Background Folder</button><button id="clearBackgroundsBtn" type="button" class="danger">Clear Backgrounds</button><button type="button" data-close="backgroundActionDialog">Cancel</button></menu>
+  </form></dialog>
+  <dialog id="groupIconActionDialog"><form method="dialog" class="dialog-form">
+    <header><h3>Edit Group Icon</h3><button type="button" class="icon-button" data-close="groupIconActionDialog">x</button></header>
+    <menu><button id="changeGroupIconActionBtn" type="button" class="primary">Change Icon</button><button id="removeGroupIconActionBtn" type="button" class="danger">Remove Icon</button><button type="button" data-close="groupIconActionDialog">Cancel</button></menu>
+  </form></dialog>
+
+  <dialog id="imagePreviewDialog" class="image-preview-dialog"><button type="button" class="icon-button image-preview-close" data-close="imagePreviewDialog">x</button><img id="imagePreviewFull" alt=""></dialog>
+  <dialog id="captchaDialog" class="captcha-dialog"><form method="dialog" class="dialog-form"><header><h3>AVTRZIP Verification</h3><button id="closeCaptchaDialogBtn" type="button" class="icon-button">x</button></header><iframe id="captchaFrame" title="AVTRZIP verification"></iframe><menu><button id="captchaDoneBtn" type="button" class="primary">Done</button></menu></form></dialog>
+  <dialog id="confirmDeleteDialog" class="confirm-dialog"><form method="dialog" class="dialog-form"><header><h3 id="confirmDialogTitle">Delete</h3><button type="button" class="icon-button" data-close="confirmDeleteDialog">x</button></header><p id="confirmDeleteMessage" class="confirm-message"></p><menu><button id="cancelConfirmBtn" type="button">Cancel</button><button id="runConfirmBtn" type="button" class="danger">Delete</button></menu></form></dialog>
+  <dialog id="avatarUpdateHistoryDialog" class="confirm-dialog"><form method="dialog" class="dialog-form"><header><h3>Update History</h3><button type="button" class="icon-button" data-close="avatarUpdateHistoryDialog">x</button></header><div id="avatarUpdateHistoryList" class="update-history-list"></div><menu><button type="button" data-close="avatarUpdateHistoryDialog" class="primary">OK</button></menu></form></dialog>
+  <dialog id="importDialog" class="wide-dialog"><form method="dialog" class="dialog-form wide"><header><h3>Import Library</h3><button type="button" class="icon-button" data-close="importDialog">x</button></header><label id="importDropZone" class="import-drop-zone">JSON<textarea id="importJsonInput" rows="12" spellcheck="false"></textarea></label><menu><button type="button" data-close="importDialog">Cancel</button><button id="runImportBtn" class="primary">Import</button></menu></form></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <div id="zoomIndicator" class="zoom-indicator" role="status" aria-live="polite" hidden>100%</div>
+  <div id="contextMenu" class="context-menu" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>
