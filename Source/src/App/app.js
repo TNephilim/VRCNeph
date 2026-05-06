@@ -1,4 +1,4 @@
-const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", backgroundOpacity: 20, panelOpacity: 35, schemaVersion: 6 };
+const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", schemaVersion: 6 };
 const AVATAR_PAGE_SIZE = 50;
 const SYNCED_GROUP_AVATAR_LIMIT = 50;
 const state = {
@@ -19,6 +19,8 @@ const state = {
   avatarDatabaseAuthorId: "",
   avatarDatabaseProvider: "all",
   avatarDatabaseTotal: null,
+  avatarDatabaseProgressTotal: 0,
+  avatarDatabaseCountKey: "",
   avatarDatabaseCounting: false,
   avatarDatabaseLoading: false,
   avatarDatabaseSearched: false,
@@ -30,7 +32,10 @@ const state = {
   pendingDatabaseAvatar: null,
   pendingDatabaseDragAvatar: null,
   avatarRouletteTimer: null,
+  avatarRouletteCountdownTimer: null,
   avatarRouletteRunning: false,
+  avatarRouletteMode: 'favorites',
+  avatarRoulettePendingMode: 'favorites',
   pendingMoveAvatarId: "",
   pendingMoveAvatarIds: [],
   pendingAvatarGroupAction: "",
@@ -45,6 +50,7 @@ const state = {
   dragPoint: null,
   dragScrollFrame: null,
   vrchatBackgroundSyncTimer: null,
+  vrchatAvatarPollTimer: null,
   positionEdit: null,
   vrchatStartupSyncDone: false,
   vrchatSyncBusy: false,
@@ -172,11 +178,14 @@ async function loadSettings() {
   try {
     const saved = await api("settingsGet");
     state.settings = {
-      gridSize: Number.isFinite(saved.gridSize) ? Math.min(10, Math.max(5, Number(saved.gridSize))) : DEFAULT_SETTINGS.gridSize,
-      databaseGridSize: Number.isFinite(saved.databaseGridSize) ? Math.min(10, Math.max(5, Number(saved.databaseGridSize))) : Number.isFinite(saved.gridSize) ? Math.min(10, Math.max(5, Number(saved.gridSize))) : DEFAULT_SETTINGS.databaseGridSize,
+      gridSize: Number.isFinite(saved.gridSize) ? Math.min(10, Math.max(3, Number(saved.gridSize))) : DEFAULT_SETTINGS.gridSize,
+      databaseGridSize: Number.isFinite(saved.databaseGridSize) ? Math.min(10, Math.max(3, Number(saved.databaseGridSize))) : Number.isFinite(saved.gridSize) ? Math.min(10, Math.max(3, Number(saved.gridSize))) : DEFAULT_SETTINGS.databaseGridSize,
       themeColor: /^#[0-9a-f]{6}$/i.test(saved.themeColor || "") ? saved.themeColor : DEFAULT_SETTINGS.themeColor,
+      panelColor: /^#[0-9a-f]{6}$/i.test(saved.panelColor || "") ? saved.panelColor : /^#[0-9a-f]{6}$/i.test(saved.themeColor || "") ? saved.themeColor : DEFAULT_SETTINGS.panelColor,
+      panelColorSynced: saved.panelColorSynced !== false,
       backgroundOpacity: Number.isFinite(saved.backgroundOpacity) ? Math.min(100, Math.max(0, Number(saved.backgroundOpacity))) : DEFAULT_SETTINGS.backgroundOpacity,
       panelOpacity: Number.isFinite(saved.panelOpacity) ? Math.min(100, Math.max(0, Number(saved.panelOpacity))) : DEFAULT_SETTINGS.panelOpacity,
+      backgroundEffect: String(saved.backgroundEffect || ""),
       schemaVersion: DEFAULT_SETTINGS.schemaVersion
     };
   } catch { state.settings = { ...DEFAULT_SETTINGS }; }
@@ -329,8 +338,9 @@ function renderAccount() {
   const card = $("currentAvatarCard");
   if (loggedIn && user?.currentAvatarId) {
     card.hidden = false;
-    $("currentAvatarImage").src = user.currentAvatarThumbnailImageUrl || user.currentAvatarImageUrl || "";
-    $("currentAvatarImage").hidden = !$("currentAvatarImage").src;
+    const thumb = state.currentAvatarSummary.thumbnailImageUrl || user.currentAvatarThumbnailImageUrl || state.currentAvatarSummary.imageUrl || user.currentAvatarImageUrl || "";
+    $("currentAvatarImage").src = thumb;
+    $("currentAvatarImage").hidden = !thumb;
     $("currentAvatarName").textContent = state.currentAvatarSummary.id === user.currentAvatarId && state.currentAvatarSummary.name ? state.currentAvatarSummary.name : user.currentAvatarId;
     $("currentAvatarId").textContent = "";
   } else {
@@ -503,6 +513,7 @@ function renderToolbar() {
   $("copyGroupBtn").hidden = systemGroup;
   $("deleteGroupBtn").hidden = systemGroup || synced;
   $("addAvatarBtn").hidden = systemGroup;
+  $("favRouletteBtn").hidden = isRecentGroup(group?.id) || isDeletedGroup(group?.id);
   $("editGroupBtn").disabled = synced;
   $("copyGroupBtn").disabled = false;
   $("deleteGroupBtn").disabled = synced || state.library.groups.length <= 1;
@@ -514,6 +525,7 @@ function renderToolbar() {
   $("checkDeletedFavoritesBtn").disabled = !state.vrchat?.isLoggedIn || state.vrchatSyncBusy;
   $("addAvatarBtn").disabled = false;
   $("saveCurrentAvatarBtn").disabled = pinned;
+  updateRouletteButtons();
   normalizeAvatarSortForActiveGroup();
   updateSortButton();
   updateSortButton("databaseSortSelect", "databaseSortMenuBtn");
@@ -1128,6 +1140,8 @@ function clearAvatarDatabaseSearch() {
   state.avatarDatabaseQuery = "";
   state.avatarDatabaseAuthorId = "";
   state.avatarDatabaseTotal = null;
+  state.avatarDatabaseProgressTotal = 0;
+  state.avatarDatabaseCountKey = "";
   state.avatarDatabaseCounting = false;
   state.avatarDatabaseLoading = false;
   state.avatarDatabaseSearched = false;
@@ -1147,7 +1161,7 @@ function avatarDatabaseProviderLabel(provider = avatarDatabaseProvider()) {
   return provider === "avtrzip" ? "AVTRZIP" : provider === "pas" ? "Prismic PAS" : "VRCX DB";
 }
 function avatarDatabaseProviderDescription(provider = avatarDatabaseProvider()) {
-  if (provider === "all") return "Search AVTRZIP, Prismic PAS, and VRCX DB.";
+  if (provider === "all") return "Search all databases. Broad search terms take longer; single databases are quicker.";
   return provider === "avtrzip" ? "Search the remote AVTRZIP avatar database." : provider === "pas" ? "Search the Prismic AvatarSearch PAS database." : "Search the remote VRCX-compatible avatar database.";
 }
 function updateAvatarDatabaseCopy() {
@@ -1161,7 +1175,7 @@ function updateAvatarDatabaseCopy() {
     : provider === "pas"
       ? "Enter a search, then press Search or Enter to search Prismic PAS."
     : provider === "all"
-      ? "Enter a search, then press Search or Enter to search every database."
+      ? "All-database searches take longer. Pick one database for quicker results."
     : "Start typing at least three characters to search VRCX-compatible avatars.";
 }
 async function maybeShowVrcxDatabaseNotice() {
@@ -1188,6 +1202,8 @@ function resetAvatarDatabaseResults() {
   state.avatarDatabaseHasMore = false;
   state.avatarDatabaseQuery = "";
   state.avatarDatabaseTotal = null;
+  state.avatarDatabaseProgressTotal = 0;
+  state.avatarDatabaseCountKey = "";
   state.avatarDatabaseCounting = false;
   state.avatarDatabaseLoading = false;
   state.avatarDatabaseSearched = false;
@@ -1294,6 +1310,8 @@ async function runAvatarDatabaseSearch(page = 0) {
     state.avatarDatabaseQuery = "";
     state.avatarDatabaseAuthorId = "";
     state.avatarDatabaseTotal = null;
+    state.avatarDatabaseProgressTotal = 0;
+    state.avatarDatabaseCountKey = "";
     state.avatarDatabaseCounting = false;
     state.avatarDatabaseLoading = false;
     state.avatarDatabaseSearched = false;
@@ -1310,6 +1328,8 @@ async function runAvatarDatabaseSearch(page = 0) {
     state.avatarDatabaseQuery = "";
     state.avatarDatabaseAuthorId = "";
     state.avatarDatabaseTotal = null;
+    state.avatarDatabaseProgressTotal = 0;
+    state.avatarDatabaseCountKey = "";
     state.avatarDatabaseCounting = false;
     state.avatarDatabaseLoading = false;
     state.avatarDatabaseSearched = false;
@@ -1325,6 +1345,8 @@ async function runAvatarDatabaseSearch(page = 0) {
     state.avatarDatabaseHasMore = false;
     state.avatarDatabaseQuery = query;
     state.avatarDatabaseTotal = null;
+    state.avatarDatabaseProgressTotal = 0;
+    state.avatarDatabaseCountKey = "";
     state.avatarDatabaseCounting = false;
     state.avatarDatabaseLoading = false;
     state.avatarDatabaseSearched = false;
@@ -1336,12 +1358,16 @@ async function runAvatarDatabaseSearch(page = 0) {
   }
   $("databasePrevPageBtn").disabled = true;
   $("databaseNextPageBtn").disabled = true;
+  if (page === 0) {
+    state.avatarDatabaseProgressTotal = 0;
+    state.avatarDatabaseCountKey = "";
+  }
   state.avatarDatabaseLoading = true;
   renderAvatarDatabaseResults();
   $("avatarDatabaseStatus").textContent = page > 0
     ? `Loading ${providerLabel} page ${page + 1}...`
     : state.avatarDatabaseProvider === "all"
-      ? "Searching all databases..."
+      ? "Searching all databases. This will take longer; single database searches are quicker."
       : `Searching ${providerLabel}...`;
   await new Promise((resolve) => setTimeout(resolve, state.avatarDatabaseProvider === "all" ? 50 : 0));
   try {
@@ -1354,7 +1380,10 @@ async function runAvatarDatabaseSearch(page = 0) {
     state.avatarDatabaseMode = "search";
     state.avatarDatabaseRandomPages = [];
     state.avatarDatabaseTotal = Number(result.total) > 0 ? Number(result.total) : page === 0 ? null : state.avatarDatabaseTotal;
-    state.avatarDatabaseCounting = page === 0 && state.avatarDatabaseResults.length > 0 && state.avatarDatabaseTotal == null;
+    state.avatarDatabaseCounting = state.avatarDatabaseResults.length > 0
+      && state.avatarDatabaseTotal == null
+      && state.avatarDatabaseProvider === "all"
+      && (page === 0 || Boolean(state.avatarDatabaseCountKey));
     state.avatarDatabaseLoading = false;
     state.avatarDatabaseSearched = true;
     renderAvatarDatabaseResults();
@@ -1423,27 +1452,48 @@ async function equipRandomDatabaseAvatar({ quiet = false } = {}) {
     if (!quiet) $("equipRandomAvatarBtn").disabled = false;
   }
 }
-function openAvatarRouletteDialog() {
-  $("avatarRouletteStatus").textContent = state.avatarRouletteRunning ? "Avatar roulette is running." : "Equip a random favorite avatar on a timer.";
+function openAvatarRouletteDialog(mode = 'favorites') {
+  state.avatarRoulettePendingMode = mode;
+  const label = mode === 'database' ? 'random database' : 'random favorite';
+  const runningLabel = state.avatarRouletteMode === 'database' ? 'Database roulette' : 'Favorite roulette';
+  $("avatarRouletteStatus").textContent = state.avatarRouletteRunning
+    ? `${runningLabel} is running. Press Restart to switch to ${label} avatars.`
+    : `Equip a ${label} avatar on a timer.`;
   $("stopAvatarRouletteBtn").disabled = !state.avatarRouletteRunning;
   $("startAvatarRouletteBtn").textContent = state.avatarRouletteRunning ? "Restart" : "Start";
   $("avatarRouletteDialog").showModal();
 }
 function avatarRouletteIntervalMs() {
-  const value = Math.max(5, Math.floor(Number($("avatarRouletteIntervalInput").value)) || 60);
-  $("avatarRouletteIntervalInput").value = String(value);
-  return value * ($("avatarRouletteUnitInput").value === "minutes" ? 60000 : 1000);
+  const minutes = Math.max(0, Math.floor(Number($("avatarRouletteMinutesInput").value)) || 0);
+  const seconds = Math.max(0, Math.min(59, Math.floor(Number($("avatarRouletteSecondsInput").value)) || 0));
+  $("avatarRouletteMinutesInput").value = String(minutes);
+  $("avatarRouletteSecondsInput").value = String(seconds);
+  const total = (minutes * 60000) + (seconds * 1000);
+  return Math.max(5000, total || 60000);
 }
 function stopAvatarRoulette({ notify = true } = {}) {
   if (state.avatarRouletteTimer) clearInterval(state.avatarRouletteTimer);
   state.avatarRouletteTimer = null;
+  if (state.avatarRouletteCountdownTimer) clearInterval(state.avatarRouletteCountdownTimer);
+  state.avatarRouletteCountdownTimer = null;
   state.avatarRouletteRunning = false;
+  $("rouletteCountdownDb").hidden = true;
+  $("rouletteCountdownFav").hidden = true;
   if ($("avatarRouletteDialog").open) {
     $("avatarRouletteStatus").textContent = "Avatar roulette stopped.";
     $("stopAvatarRouletteBtn").disabled = true;
     $("startAvatarRouletteBtn").textContent = "Start";
   }
+  updateRouletteButtons();
   if (notify) toast("Avatar roulette stopped.");
+}
+function updateRouletteButtons() {
+  const databaseRunning = state.avatarRouletteRunning && state.avatarRouletteMode === 'database';
+  const favoritesRunning = state.avatarRouletteRunning && state.avatarRouletteMode === 'favorites';
+  $("avatarRouletteBtn").classList.toggle("roulette-running", databaseRunning);
+  $("avatarRouletteBtn").setAttribute("aria-pressed", databaseRunning ? "true" : "false");
+  $("favRouletteBtn").classList.toggle("roulette-running", favoritesRunning);
+  $("favRouletteBtn").setAttribute("aria-pressed", favoritesRunning ? "true" : "false");
 }
 function randomFavoriteAvatar() {
   const blockedGroups = new Set(["recent_avatars", "deleted_avatars", "updated_avatars", "uploaded_avatars"]);
@@ -1461,10 +1511,20 @@ function randomFavoriteAvatar() {
 }
 async function runAvatarRouletteTick() {
   try {
-    const avatar = randomFavoriteAvatar();
-    if (!avatar) throw new Error("No favorite avatars available for roulette.");
+    let avatar;
+    if (state.avatarRouletteMode === 'database') {
+      avatar = await fetchRandomDatabaseAvatar();
+    } else {
+      avatar = randomFavoriteAvatar();
+    }
+    if (!avatar) throw new Error("No avatars available for roulette.");
     await equipAvatar(avatar.avatarId || avatar.id, avatar);
-    $("avatarDatabaseStatus").textContent = `Roulette equipped: ${avatar.name || avatar.avatarId || avatar.id}.`;
+    const label = state.avatarRouletteMode === 'database' ? 'Database roulette' : 'Roulette';
+    if (state.avatarRouletteMode === 'database') {
+      $("avatarDatabaseStatus").textContent = `${label} equipped: ${avatar.name || avatar.avatarId || avatar.id}.`;
+    } else {
+      $("activeGroupDescription").textContent = `${label} equipped: ${avatar.name || avatar.avatarId || avatar.id}.`;
+    }
     if ($("avatarRouletteDialog").open) $("avatarRouletteStatus").textContent = `Last equipped: ${avatar.name || avatar.avatarId || avatar.id}.`;
   } catch (e) {
     stopAvatarRoulette({ notify: false });
@@ -1472,17 +1532,63 @@ async function runAvatarRouletteTick() {
     toast(message);
     if ($("avatarRouletteDialog").open) $("avatarRouletteStatus").textContent = message;
   }
+  resetRouletteCountdown();
 }
-function startAvatarRoulette() {
-  stopAvatarRoulette({ notify: false });
+function resetRouletteCountdown() {
   const interval = avatarRouletteIntervalMs();
+  const seconds = Math.round(interval / 1000);
+  updateRouletteCountdownText(seconds);
+  clearInterval(state.avatarRouletteCountdownTimer);
+  state.avatarRouletteCountdownTimer = setInterval(() => {
+    const el = countdownRouletteElement();
+    if (!el || el.hidden) return;
+    const text = el.textContent || "";
+    const match = text.match(/(\d+)/);
+    if (!match) return;
+    const next = Math.max(0, parseInt(match[1], 10) - 1);
+    updateRouletteCountdownText(next);
+  }, 1000);
+}
+
+function countdownRouletteElement() {
+  if (state.avatarRouletteMode === 'database') return $("rouletteCountdownDb");
+  return $("rouletteCountdownFav");
+}
+
+function updateRouletteCountdownText(seconds) {
+  const el = countdownRouletteElement();
+  if (!el) return;
+  if (seconds > 0) {
+    el.textContent = `Next: ${seconds}s`;
+    el.hidden = false;
+  } else {
+    el.hidden = true;
+  }
+}
+
+function startAvatarRoulette() {
+  const nextMode = state.avatarRoulettePendingMode || state.avatarRouletteMode;
+  stopAvatarRoulette({ notify: false });
+  state.avatarRouletteMode = nextMode;
+  const interval = avatarRouletteIntervalMs();
+  if (interval < 30000) {
+    toast("Warning: Fast intervals may not sync properly since VRChat takes time to process equips.");
+  }
   state.avatarRouletteRunning = true;
   state.avatarRouletteTimer = setInterval(runAvatarRouletteTick, interval);
   $("avatarRouletteStatus").textContent = "Avatar roulette started.";
   $("stopAvatarRouletteBtn").disabled = false;
   $("startAvatarRouletteBtn").textContent = "Restart";
   $("avatarRouletteDialog").close();
+  updateRouletteButtons();
   toast("Avatar roulette started.");
+  const label = state.avatarRouletteMode === 'database' ? 'Database roulette' : 'Roulette';
+  if (state.avatarRouletteMode === 'database') {
+    $("avatarDatabaseStatus").textContent = `${label} started.`;
+  } else {
+    $("activeGroupDescription").textContent = `${label} started.`;
+  }
+  resetRouletteCountdown();
   void runAvatarRouletteTick();
 }
 function updateAvatarDatabaseStatus() {
@@ -1491,9 +1597,13 @@ function updateAvatarDatabaseStatus() {
   if (!count) { $("avatarDatabaseStatus").textContent = `No ${providerLabel} avatars found.`; return; }
   if (state.avatarDatabaseTotal == null) {
     if (state.avatarDatabaseProvider === "all") {
-      $("avatarDatabaseStatus").textContent = state.avatarDatabaseCounting
-        ? "Counting total all databases avatars..."
+      const discovered = Math.max(state.avatarDatabaseProgressTotal || 0, state.avatarDatabasePage * 50 + count);
+      state.avatarDatabaseProgressTotal = Math.max(state.avatarDatabaseProgressTotal || 0, discovered);
+      const rounded = Math.max(50, Math.floor(discovered / 50) * 50);
+      $("avatarDatabaseStatus").textContent = state.avatarDatabaseCounting || state.avatarDatabaseCountKey
+        ? `${rounded}+ unique avatars found. Still counting total...`
         : `${state.avatarDatabasePage * 50 + count} all databases avatars shown.`;
+      refreshDatabaseJumpIfOpen();
       return;
     }
     const estimate = state.avatarDatabaseHasMore ? `${Math.max((state.avatarDatabasePage + 2) * 50, count)}+` : String(state.avatarDatabasePage * 50 + count);
@@ -1503,18 +1613,43 @@ function updateAvatarDatabaseStatus() {
   $("avatarDatabaseStatus").textContent = `${state.avatarDatabaseTotal} total ${providerLabel} avatars found.`;
 }
 async function countAvatarDatabaseTotal(query, token, payload) {
+  const countPayload = payload ?? databaseSearchPayload(query, 0);
+  const countKey = JSON.stringify(countPayload);
+  state.avatarDatabaseCountKey = countKey;
+  let progressTimer = null;
+  const pollProgress = async () => {
+    if (state.avatarDatabaseCountKey !== countKey || state.avatarDatabaseQuery !== query || avatarDatabaseProvider() !== "all") return;
+    try {
+      const progress = await api("avatarDatabaseCountProgress", countPayload, 30000);
+      if (state.avatarDatabaseCountKey !== countKey || state.avatarDatabaseQuery !== query || avatarDatabaseProvider() !== "all") return;
+      const discovered = Number(progress.discovered) || 0;
+      if (discovered > state.avatarDatabaseProgressTotal) {
+        state.avatarDatabaseProgressTotal = discovered;
+        updateAvatarDatabaseStatus();
+      }
+    } catch {
+    }
+  };
+  if (avatarDatabaseProvider() === "all") {
+    state.avatarDatabaseProgressTotal = Math.max(state.avatarDatabaseProgressTotal || 0, state.avatarDatabaseResults.length);
+    progressTimer = setInterval(pollProgress, 900);
+    void pollProgress();
+  }
   try {
-    const result = await api("avatarDatabaseCount", payload ?? databaseSearchPayload(query, 0));
-    if (token !== state.avatarDatabaseSearchToken || state.avatarDatabaseQuery !== query) return;
+    const result = await api("avatarDatabaseCount", countPayload);
+    if (state.avatarDatabaseCountKey !== countKey || state.avatarDatabaseQuery !== query) return;
     state.avatarDatabaseTotal = Number(result.total) || state.avatarDatabaseResults.length;
+    state.avatarDatabaseProgressTotal = state.avatarDatabaseTotal;
     state.avatarDatabaseCounting = false;
     updateAvatarDatabaseStatus();
     renderAvatarDatabaseResults();
   } catch (e) {
-    if (token === state.avatarDatabaseSearchToken && state.avatarDatabaseQuery === query) {
+    if (state.avatarDatabaseCountKey === countKey && state.avatarDatabaseQuery === query) {
       state.avatarDatabaseCounting = false;
       updateAvatarDatabaseStatus();
     }
+  } finally {
+    if (progressTimer) clearInterval(progressTimer);
   }
 }
 function handleAvatarDatabaseError(error, token) {
@@ -1534,11 +1669,6 @@ function avtrZipCaptchaUrl(message) {
 function openAvtrZipCaptcha(url) {
   $("captchaFrame").src = url;
   $("captchaDialog").showModal();
-}
-function queueAvatarDatabaseSearch({ clearAuthorId = true } = {}) {
-  if (clearAuthorId) state.avatarDatabaseAuthorId = "";
-  clearTimeout(state.avatarDatabaseSearchTimer);
-  state.avatarDatabaseSearchTimer = setTimeout(() => runAvatarDatabaseSearch(0), 900);
 }
 function currentAvatarDatabasePageResults() {
   if (state.avatarDatabaseMode !== "random") return state.avatarDatabaseResults;
@@ -1705,7 +1835,13 @@ function databaseMaxPage(target = state.pageJumpTarget) {
   if (target === "avatars") return avatarMaxPage();
   if (state.avatarDatabaseMode === "random") return Math.max(1, state.avatarDatabaseRandomPages.length);
   if (state.avatarDatabaseTotal != null) return Math.max(1, Math.ceil(state.avatarDatabaseTotal / 50));
-  return Math.max(1, state.avatarDatabasePage + (state.avatarDatabaseHasMore ? 2 : 1));
+  const progressPages = state.avatarDatabaseProvider === "all"
+    ? Math.floor(Math.max(0, Number(state.avatarDatabaseProgressTotal) || 0) / 50)
+    : 0;
+  return Math.max(1, progressPages, state.avatarDatabasePage + (state.avatarDatabaseHasMore ? 2 : 1));
+}
+function refreshDatabaseJumpIfOpen() {
+  if ($("databaseJumpDialog")?.open && state.pageJumpTarget === "database") updateDatabaseJumpSlider();
 }
 function updateDatabaseJumpSlider() {
   const maxPage = databaseMaxPage();
@@ -1713,7 +1849,7 @@ function updateDatabaseJumpSlider() {
   $("databaseJumpPageInput").value = String(page);
   $("databaseJumpPageNumber").value = $("databaseJumpPageInput").value;
   $("databaseJumpPageNumber").max = String(maxPage);
-  $("databaseJumpPageMax").textContent = String(maxPage);
+  $("databaseJumpPageMax").textContent = state.pageJumpTarget === "database" && state.avatarDatabaseTotal == null && state.avatarDatabaseCounting ? `${maxPage}+` : String(maxPage);
   $("databaseJumpPrevBtn").disabled = page <= 1;
   $("databaseJumpNextBtn").disabled = page >= maxPage;
 }
@@ -1747,7 +1883,7 @@ function showContextMenu(x, y, actions) {
     action.action();
   }));
 }
-function hideContextMenu() { $("contextMenu").hidden = true; hideSortMenu(); hideSortMenu("databaseSortMenu", "databaseSortMenuBtn"); hideSortMenu("groupFilterMenu", "groupFilterMenuBtn"); hideSortMenu("avatarDatabaseProviderMenu", "avatarDatabaseProviderMenuBtn"); hideSortMenu("settingsLogFilterMenu", "settingsLogFilterMenuBtn"); hideDatabaseFieldMenu(); }
+function hideContextMenu() { $("contextMenu").hidden = true; hideSortMenu(); hideSortMenu("databaseSortMenu", "databaseSortMenuBtn"); hideSortMenu("groupFilterMenu", "groupFilterMenuBtn"); hideSortMenu("avatarDatabaseProviderMenu", "avatarDatabaseProviderMenuBtn"); hideSortMenu("settingsLogFilterMenu", "settingsLogFilterMenuBtn"); hideSortMenu("bgEffectMenu", "bgEffectMenuBtn"); hideDatabaseFieldMenu(); }
 function hideDatabaseFieldMenu() {
   $("databaseFieldMenu").hidden = true;
   $("databaseFieldMenuBtn").setAttribute("aria-expanded", "false");
@@ -1790,6 +1926,7 @@ function cycleSortOption(event, selectId = "sortSelect", buttonId = "sortMenuBtn
   hideSortMenu("groupFilterMenu", "groupFilterMenuBtn");
   hideSortMenu("avatarDatabaseProviderMenu", "avatarDatabaseProviderMenuBtn");
   hideSortMenu("settingsLogFilterMenu", "settingsLogFilterMenuBtn");
+  hideSortMenu("bgEffectMenu", "bgEffectMenuBtn");
   hideDatabaseFieldMenu();
   updateSortButton(selectId, buttonId);
   onChange();
@@ -1834,21 +1971,6 @@ function setEmptyDragPreview(event) {
   preview.style.pointerEvents = "none";
   document.body.appendChild(preview);
   event.dataTransfer.setDragImage(preview, 0, 0);
-  requestAnimationFrame(() => preview.remove());
-}
-function setAvatarDragPreview(event, element) {
-  if (!event.dataTransfer || !element) return;
-  const rect = element.getBoundingClientRect();
-  const preview = element.cloneNode(true);
-  preview.classList.add("drag-preview");
-  preview.style.width = `${rect.width}px`;
-  preview.style.height = `${rect.height}px`;
-  preview.style.position = "fixed";
-  preview.style.left = "-10000px";
-  preview.style.top = "-10000px";
-  preview.style.pointerEvents = "none";
-  document.body.appendChild(preview);
-  event.dataTransfer.setDragImage(preview, rect.width / 2, rect.height + 16);
   requestAnimationFrame(() => preview.remove());
 }
 function createFloatingAvatarDragPreview(element, point) {
@@ -2410,9 +2532,6 @@ async function moveAvatarToGroup(id, groupId, { confirm = true, focusTarget = tr
     toast("Avatar moved.");
   } catch (e) { handleAvatarAddError(e); }
 }
-async function moveAvatarRelativeToTarget(id, targetAvatar, placement, copy = false) {
-  return moveAvatarsRelativeToTarget([id], targetAvatar, placement, copy);
-}
 async function moveAvatarsRelativeToTarget(ids, targetAvatar, placement, copy = false) {
   const sourceAvatars = ids.map((id) => state.library.avatars.find((x) => x.id === id)).filter(Boolean);
   if (sourceAvatars.length > 1) return moveOrCopyAvatarsRelativeToTarget(sourceAvatars, targetAvatar, placement, copy);
@@ -2541,9 +2660,6 @@ async function moveAvatarsToGroup(ids, groupId, { confirm = true, focusTarget = 
   updateSortButton();
   render();
   if (moved) toast(`${moved} avatars moved.`);
-}
-async function moveOrCopyAvatarToGroup(id, groupId) {
-  return moveOrCopyAvatarsToGroup([id], groupId);
 }
 async function moveOrCopyAvatarsToGroup(ids, groupId, { focusTarget = true } = {}) {
   const uniqueIds = [...new Set(ids.filter(Boolean))];
@@ -2736,10 +2852,15 @@ async function refreshCurrentAvatarSummarySilent() {
   if (!state.vrchat?.isLoggedIn || !currentAvatarId || state.currentAvatarSummary.id === currentAvatarId) return;
   try {
     const avatar = await api("vrchatCurrentAvatar", { groupId: state.activeGroupId });
-    state.currentAvatarSummary = { id: currentAvatarId, name: avatar?.name || currentAvatarId };
+    state.currentAvatarSummary = { id: currentAvatarId, name: avatar?.name || currentAvatarId, imageUrl: avatar?.imageUrl || '', thumbnailImageUrl: avatar?.thumbnailImageUrl || avatar?.imageUrl || '' };
+    if (state.vrchat.user) {
+      if (avatar?.imageUrl) state.vrchat.user.currentAvatarImageUrl = avatar.imageUrl;
+      if (avatar?.thumbnailImageUrl || avatar?.imageUrl) state.vrchat.user.currentAvatarThumbnailImageUrl = avatar.thumbnailImageUrl || avatar.imageUrl;
+      state.vrchat.user.currentAvatarId = currentAvatarId;
+    }
     renderAccount();
   } catch {
-    state.currentAvatarSummary = { id: currentAvatarId, name: currentAvatarId };
+    state.currentAvatarSummary = { id: currentAvatarId, name: currentAvatarId, imageUrl: '', thumbnailImageUrl: '' };
     renderAccount();
   }
 }
@@ -2788,7 +2909,27 @@ function updateVrChatBackgroundSyncTimer(enabled = Boolean(state.vrchat?.isLogge
     clearInterval(state.vrchatBackgroundSyncTimer);
     state.vrchatBackgroundSyncTimer = null;
   }
+  if (state.vrchatAvatarPollTimer) {
+    clearInterval(state.vrchatAvatarPollTimer);
+    state.vrchatAvatarPollTimer = null;
+  }
   if (!enabled) return;
+  const pollCurrentAvatar = () => {
+    if (!state.vrchat?.isLoggedIn) return;
+    api("vrchatCurrentAvatar", {}, 30000).then((avatar) => {
+      const id = avatar?.avatarId || avatar?.id || "";
+      if (!id || id === state.currentAvatarSummary.id) return;
+      state.currentAvatarSummary = { id, name: avatar?.name || id, imageUrl: avatar?.imageUrl || '', thumbnailImageUrl: avatar?.thumbnailImageUrl || avatar?.imageUrl || '' };
+      if (state.vrchat.user) {
+        state.vrchat.user.currentAvatarId = id;
+        if (avatar?.imageUrl) state.vrchat.user.currentAvatarImageUrl = avatar.imageUrl;
+        if (avatar?.thumbnailImageUrl || avatar?.imageUrl) state.vrchat.user.currentAvatarThumbnailImageUrl = avatar.thumbnailImageUrl || avatar.imageUrl;
+      }
+      renderAccount();
+    }).catch(() => {});
+  };
+  pollCurrentAvatar();
+  state.vrchatAvatarPollTimer = setInterval(pollCurrentAvatar, 30 * 1000);
   state.vrchatBackgroundSyncTimer = setInterval(() => {
     if (!state.vrchat?.isLoggedIn || state.activePage !== "favorites") return;
     syncVrChatFavoritesSilent();
@@ -2949,6 +3090,8 @@ function syncPanelOpacityFromNumber() {
 }
 function openSettingsDialog() {
   state.settingsDraft = { original: { ...state.settings }, applied: false };
+  $("bgEffectSelect").value = state.settings.backgroundEffect;
+  updateSortButton("bgEffectSelect", "bgEffectMenuBtn");
   $("customizationDialog").showModal();
   setSettingsTab("customization");
 }
@@ -3187,7 +3330,7 @@ async function equipAvatar(id, avatarMeta = null) {
     }
     state.lastLoggedCurrentAvatarId = id;
     const avatar = avatarMeta || state.library.avatars.find((x) => (x.avatarId || x.id) === id);
-    state.currentAvatarSummary = { id, name: avatar?.name || id };
+    state.currentAvatarSummary = { id, name: avatar?.name || id, imageUrl: avatar?.imageUrl || '', thumbnailImageUrl: avatar?.thumbnailImageUrl || avatar?.imageUrl || '' };
     if (state.vrchat?.user) {
       state.vrchat.user.currentAvatarId = id;
       state.vrchat.user.currentAvatarImageUrl = avatar?.imageUrl || state.vrchat.user.currentAvatarImageUrl || "";
@@ -3215,9 +3358,9 @@ function confirmAction({ title, message, confirmLabel = "Delete", confirmClass =
   });
 }
 
-function applySettings() { applyGridSize(); applyThemeColor(state.settings.themeColor); applyBackgroundOpacity(); applyPanelOpacity(); }
+function applySettings() { applyGridSize(); applyColors(); applyBackgroundOpacity(); applyPanelOpacity(); startBgEffect(state.settings.backgroundEffect); }
 function applyGridSize() {
-  const columns = Math.min(10, Math.max(5, Number(state.activePage === "database" ? state.settings.databaseGridSize : state.settings.gridSize) || DEFAULT_SETTINGS.gridSize));
+  const columns = Math.min(10, Math.max(3, Number(state.activePage === "database" ? state.settings.databaseGridSize : state.settings.gridSize) || DEFAULT_SETTINGS.gridSize));
   const activeGrid = state.activePage === "database" ? $("avatarDatabaseResults") : $("avatarGrid");
   const fallbackGrid = $("avatarGrid")?.clientWidth ? $("avatarGrid") : $("avatarDatabaseResults");
   const gridWidth = Math.max(360, ((activeGrid?.clientWidth || fallbackGrid?.clientWidth || 0) - 48));
@@ -3254,36 +3397,699 @@ function applyPanelOpacity() {
 function renderBackground(bg) {
   const layer = $("backgroundLayer");
   if (!layer) return;
+  const canvas = $("bgEffectCanvas");
   layer.replaceChildren();
-  if (!bg?.dataUrl) return;
-  const isVideo = String(bg.mediaType || "").toLowerCase() === "video";
-  const media = document.createElement(isVideo ? "video" : "img");
-  if (isVideo) {
-    media.autoplay = true;
-    media.loop = true;
-    media.muted = true;
-    media.playsInline = true;
+  if (bg?.dataUrl) {
+    stopBgEffect();
+    const isVideo = String(bg.mediaType || "").toLowerCase() === "video";
+    const media = document.createElement(isVideo ? "video" : "img");
+    if (isVideo) {
+      media.autoplay = true;
+      media.loop = true;
+      media.muted = true;
+      media.playsInline = true;
+    } else {
+      media.alt = "";
+    }
+    media.src = bg.dataUrl;
+    layer.append(media);
   } else {
-    media.alt = "";
+    if (canvas) layer.append(canvas);
+    if (state.settings.backgroundEffect) startBgEffect(state.settings.backgroundEffect);
   }
-  media.src = bg.dataUrl;
-  layer.append(media);
 }
-function applyThemeColor(hex) {
-  const rgb = hexToRgb(hex) ?? hexToRgb(DEFAULT_SETTINGS.themeColor);
-  const panel = mix({ r: 18, g: 22, b: 20 }, rgb, .16);
-  const panel2 = mix({ r: 18, g: 22, b: 20 }, rgb, .28);
-  document.documentElement.style.setProperty("--accent", rgbToHex(rgb));
-  document.documentElement.style.setProperty("--accent-rgb", `${Math.round(rgb.r)}, ${Math.round(rgb.g)}, ${Math.round(rgb.b)}`);
-  document.documentElement.style.setProperty("--accent-ink", luminance(rgb) > .55 ? "#08110c" : "#f6fff8");
-  document.documentElement.style.setProperty("--bg", rgbToHex(mix({ r: 0, g: 0, b: 0 }, rgb, .13)));
+let _bgCanvas = null, _bgFrame = null, _bgActive = "";
+function startBgEffect(effect) {
+  stopBgEffect();
+  if (!effect) return;
+  if (!_bgCanvas) {
+    _bgCanvas = document.createElement("canvas");
+    _bgCanvas.id = "bgEffectCanvas";
+    _bgCanvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;";
+    $("backgroundLayer").append(_bgCanvas);
+  }
+  _bgCanvas.width = window.innerWidth;
+  _bgCanvas.height = window.innerHeight;
+  _bgCanvas.hidden = false;
+  _bgActive = effect;
+  const ctx = _bgCanvas.getContext("2d");
+  let frame = 0;
+  function draw() {
+    if (_bgActive !== effect) return;
+    frame++;
+    _bgDraw(ctx, effect, frame, _bgCanvas.width, _bgCanvas.height);
+    _bgFrame = requestAnimationFrame(draw);
+  }
+  draw();
+}
+function stopBgEffect() {
+  if (_bgFrame) cancelAnimationFrame(_bgFrame);
+  _bgFrame = null; _bgActive = "";
+  if (_bgCanvas) _bgCanvas.hidden = true;
+}
+function _bgDraw(ctx, effect, frame, w, h) {
+  switch (effect) {
+    case "noise": return _bgNoise(ctx, w, h);
+    case "noise2": return _bgNoise2(ctx, w, h);
+    case "particles": return _bgParticles(ctx, w, h);
+    case "aurora": return _bgAurora(ctx, frame, w, h);
+    case "aurorasnow": return _bgAuroraSnow(ctx, frame, w, h);
+    case "stars": return _bgStars(ctx, w, h);
+    case "flow": return _bgFlow(ctx, frame, w, h);
+    case "matrix": return _bgMatrix(ctx, w, h);
+    case "snow": return _bgSnow(ctx, w, h);
+    case "blizzard": return _bgBlizzard(ctx, frame, w, h);
+    case "fog": return _bgFog(ctx, frame, w, h);
+    case "embers": return _bgEmbers(ctx, w, h);
+    case "nebula": return _bgNebula(ctx, frame, w, h);
+    case "pulse": return _bgPulse(ctx, frame, w, h);
+    case "waves": return _bgWaves(ctx, frame, w, h);
+    case "lowpoly": return _bgLowpoly(ctx, frame, w, h);
+    case "rain": return _bgRain(ctx, w, h);
+    case "thunderstorm": return _bgThunderstorm(ctx, frame, w, h);
+  }
+}
+let _bgState = {};
+function _bgNoise(ctx, w, h) {
+  const d = ctx.createImageData(w, h), px = d.data;
+  for (let i = 0; i < px.length; i += 4) { const v = Math.random() * 200 + 30; px[i]=v; px[i+1]=v; px[i+2]=v; px[i+3]=255; }
+  ctx.putImageData(d, 0, 0);
+}
+function _bgNoise2(ctx, w, h) {
+  const d = ctx.createImageData(w, h), px = d.data;
+  for (let i = 0; i < px.length; i += 4) { const v = Math.random() * 40 + 2; px[i]=v; px[i+1]=v; px[i+2]=v; px[i+3]=255; }
+  ctx.putImageData(d, 0, 0);
+}
+function _bgParticles(ctx, w, h) {
+  if (!_bgState.particles || _bgState.pw !== w || _bgState.ph !== h) {
+    _bgState.particles = []; _bgState.pw = w; _bgState.ph = h;
+    for (let i = 0; i < 50; i++) _bgState.particles.push({ x: Math.random()*w, y: Math.random()*h, r: Math.random()*2.5+1, s: Math.random()*0.35+0.12, o: Math.random()*0.3+0.04 });
+  }
+  ctx.clearRect(0, 0, w, h);
+  for (const p of _bgState.particles) {
+    p.y -= p.s; if (p.y < -10) { p.y = h + 10; p.x = Math.random() * w; }
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.28); ctx.fillStyle = `rgba(200,215,230,${p.o})`; ctx.fill();
+  }
+}
+function _bgAurora(ctx, frame, w, h) {
+  ctx.clearRect(0, 0, w, h);
+  const t = frame * 0.01;
+  for (let band = 0; band < 4; band++) {
+    const baseY = h * (0.2 + band * 0.12);
+    const hue = 155 + band * 50;
+    for (let x = 0; x < w; x += 4) {
+      const y = baseY + Math.sin(x * 0.005 + t * 0.8 + band) * 45 + Math.sin(x * 0.012 + t * 0.5 + band * 2) * 30;
+      const thickness = 80 + Math.sin(x * 0.003 + t + band) * 24;
+      const alpha = 0.16 + Math.sin(x * 0.007 + t * 0.6) * 0.06;
+      const g = ctx.createLinearGradient(x, y - thickness, x, y + thickness);
+      g.addColorStop(0, `hsla(${hue}, 70%, 35%, 0)`);
+      g.addColorStop(0.2, `hsla(${hue+20}, 65%, 40%, ${alpha})`);
+      g.addColorStop(0.5, `hsla(${hue}, 80%, 50%, ${alpha*1.3})`);
+      g.addColorStop(0.8, `hsla(${hue-10}, 65%, 35%, ${alpha*0.6})`);
+      g.addColorStop(1, `hsla(${hue-20}, 50%, 25%, 0)`);
+      ctx.fillStyle = g; ctx.fillRect(x, y - thickness, 4, thickness * 2);
+    }
+  }
+}
+function _bgAuroraSnow(ctx, frame, w, h) {
+  _bgAurora(ctx, frame, w, h);
+  if (!_bgState.snow || _bgState.snw !== w || _bgState.snh !== h) {
+    _bgState.snow = []; _bgState.snw = w; _bgState.snh = h;
+    for (let i = 0; i < 120; i++) _bgState.snow.push({ x: Math.random()*w, y: Math.random()*h, r: Math.random()*2.5+0.5, s: Math.random()*1.5+0.5, wb: Math.random()*0.5 });
+  }
+  for (const s of _bgState.snow) {
+    s.y += s.s; s.x += Math.sin(s.y * 0.005) * s.wb;
+    if (s.y > h + 5) { s.y = -5; s.x = Math.random() * w; }
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.28);
+    ctx.fillStyle = "rgba(230,240,250,0.45)"; ctx.fill();
+  }
+}
+function _bgStars(ctx, w, h) {
+  if (!_bgState.stars || _bgState.sw !== w || _bgState.sh !== h) {
+    _bgState.stars = []; _bgState.sw = w; _bgState.sh = h;
+    const palette = [
+      [180, 200, 255], [200, 220, 255], [220, 235, 255],
+      [255, 245, 235], [255, 235, 220], [255, 220, 195],
+      [255, 200, 180], [255, 180, 160], [255, 230, 200],
+      [210, 220, 255], [235, 225, 255], [255, 255, 250],
+    ];
+    for (let l = 0; l < 3; l++) {
+      const count = [180, 120, 60][l];
+      for (let i = 0; i < count; i++) {
+        _bgState.stars.push({
+          x: Math.random()*w, y: Math.random()*h,
+          r: [0.4,0.6,0.9][l] + Math.random()*0.3,
+          s: [0.01,0.015,0.02][l] + Math.random()*0.01,
+          o: 0.3 + Math.random()*0.55,
+          tw: Math.random()*6.28,
+          ts: 0.01 + Math.random()*0.03,
+          c: palette[Math.floor(Math.random() * palette.length)],
+        });
+      }
+    }
+  }
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, w, h);
+  for (const s of _bgState.stars) {
+    s.y -= s.s; if (s.y < -5) { s.y = h + 5; s.x = Math.random() * w; }
+    const twinkle = 0.7 + Math.sin(s.y * 0.03 + s.tw) * 0.3;
+    const o = Math.min(1, s.o * twinkle);
+    const [cr, cg, cb] = s.c;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.28);
+    ctx.fillStyle = `rgba(${cr},${cg},${cb},${o})`; ctx.fill();
+    if (s.r > 0.6) {
+      const g = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r*2.5);
+      g.addColorStop(0, `rgba(${cr},${cg},${cb},${o*0.3})`);
+      g.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = g; ctx.fillRect(s.x-s.r*2.5, s.y-s.r*2.5, s.r*5, s.r*5);
+    }
+  }
+}
+function _bgNebula(ctx, frame, w, h) {
+  ctx.clearRect(0, 0, w, h);
+  const t = frame * 0.003;
+  // deep space base — subtle dark glow across the whole canvas
+  const bg = ctx.createRadialGradient(w/2, h/2, 0, w/2, h/2, Math.max(w,h)*0.7);
+  bg.addColorStop(0, "rgba(0,0,0,0.25)");
+  bg.addColorStop(0.5, "rgba(0,0,0,0.14)");
+  bg.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+  // primary cloud masses — large majestic blobs
+  const clouds = [
+    { cx: 0.35, cy: 0.4, r: 0.55, h: 275, s: 80, l: 38, a: 0.15 },
+    { cx: 0.65, cy: 0.55, r: 0.5, h: 320, s: 75, l: 34, a: 0.13 },
+    { cx: 0.5, cy: 0.35, r: 0.6, h: 255, s: 78, l: 40, a: 0.12 },
+    { cx: 0.3, cy: 0.6, r: 0.45, h: 290, s: 70, l: 32, a: 0.12 },
+    { cx: 0.7, cy: 0.3, r: 0.5, h: 310, s: 75, l: 36, a: 0.11 },
+    { cx: 0.2, cy: 0.25, r: 0.35, h: 195, s: 70, l: 38, a: 0.10 },
+    { cx: 0.8, cy: 0.7, r: 0.4, h: 340, s: 80, l: 34, a: 0.12 },
+    { cx: 0.55, cy: 0.65, r: 0.38, h: 170, s: 65, l: 36, a: 0.09 },
+    { cx: 0.45, cy: 0.2, r: 0.42, h: 15, s: 85, l: 45, a: 0.09 },
+    { cx: 0.6, cy: 0.45, r: 0.48, h: 220, s: 75, l: 38, a: 0.10 },
+    { cx: 0.25, cy: 0.5, r: 0.4, h: 350, s: 70, l: 35, a: 0.11 },
+  ];
+  for (const c of clouds) {
+    const cx = w*c.cx + Math.sin(t*0.25 + c.h*0.01)*w*0.06;
+    const cy = h*c.cy + Math.cos(t*0.2 + c.h*0.01)*h*0.06;
+    const r = Math.max(w,h)*c.r + Math.sin(t*0.4 + c.h)*20;
+    const g = ctx.createRadialGradient(cx, cy, r*0.05, cx, cy, r);
+    g.addColorStop(0, `hsla(${c.h},${c.s}%,${c.l}%,${c.a})`);
+    g.addColorStop(0.15, `hsla(${c.h+10},${c.s}%,${c.l+5}%,${c.a*0.85})`);
+    g.addColorStop(0.4, `hsla(${c.h-5},${c.s-5}%,${c.l-3}%,${c.a*0.5})`);
+    g.addColorStop(0.7, `hsla(${c.h-15},${c.s}%,${c.l-8}%,${c.a*0.18})`);
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  }
+  // wispy filaments — smaller, elongated trails wrapping around clouds
+  for (let i = 0; i < 12; i++) {
+    const wx = w*(0.1 + i*0.07) + Math.sin(t*0.15 + i)*w*0.08;
+    const wy = h*0.45 + Math.cos(t*0.18 + i*0.7)*h*0.35;
+    const wr = 60 + Math.sin(i*1.5 + t)*30;
+    const wh = [270, 310, 195, 340, 230, 170, 285, 15, 220, 330, 200, 260][i % 12];
+    const wisp = ctx.createRadialGradient(wx, wy, 0, wx, wy, wr);
+    wisp.addColorStop(0, `hsla(${wh},65%,45%,0.12)`);
+    wisp.addColorStop(0.4, `hsla(${wh},55%,35%,0.06)`);
+    wisp.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = wisp; ctx.fillRect(0, 0, w, h);
+  }
+  // bright core areas — dense glowing spots
+  const cores = [
+    [0.38, 0.42, 0.15, 300, 75, 48, 0.14],
+    [0.62, 0.52, 0.13, 270, 80, 44, 0.11],
+    [0.5, 0.38, 0.12, 210, 65, 42, 0.10],
+    [0.75, 0.65, 0.11, 340, 70, 44, 0.10],
+    [0.22, 0.28, 0.1, 180, 60, 40, 0.09],
+  ];
+  for (const [cx, cy, rs, h, s, l, a] of cores) {
+    const px = w*cx + Math.sin(t*0.3)*w*0.03;
+    const py = h*cy + Math.cos(t*0.25)*h*0.03;
+    const pr = Math.max(w,h)*rs;
+    const coreG = ctx.createRadialGradient(px, py, 0, px, py, pr);
+    coreG.addColorStop(0, `hsla(${h},${s}%,${l}%,${a})`);
+    coreG.addColorStop(0.3, `hsla(${h+10},${s}%,${l-3}%,${a*0.5})`);
+    coreG.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = coreG; ctx.fillRect(0, 0, w, h);
+  }
+  // embedded stars — tiny scattered dots with twinkle
+  if (!_bgState.nestars || _bgState.nsw !== w || _bgState.nsh !== h) {
+    _bgState.nestars = []; _bgState.nsw = w; _bgState.nsh = h;
+    for (let i = 0; i < 300; i++) {
+      const r = Math.random();
+      _bgState.nestars.push({
+        x: Math.random()*w, y: Math.random()*h,
+        r: Math.random()*1.1+0.2, o: Math.random()*0.6+0.15,
+        tw: Math.random()*6.28, ts: 0.005+Math.random()*0.02,
+        c: r<0.08 ? [255,180,220] : r<0.16 ? [180,220,255] : r<0.24 ? [255,220,170] : r<0.3 ? [220,200,255] : [240,240,255],
+      });
+    }
+  }
+  for (const s of _bgState.nestars) {
+    const o = s.o * (0.55 + Math.sin(s.tw + frame*s.ts) * 0.45);
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.28);
+    ctx.fillStyle = `rgba(${s.c[0]},${s.c[1]},${s.c[2]},${o})`; ctx.fill();
+  }
+}
+function _bgFlow(ctx, frame, w, h) {
+  ctx.clearRect(0, 0, w, h);
+  const t = frame * 0.018;
+  for (let i = 0; i < 8; i++) {
+    const cx = w/2 + Math.sin(t*0.7 + i) * w * 0.22;
+    const cy = h/2 + Math.cos(t*0.55 + i) * h * 0.22;
+    const r = 90 + Math.sin(t + i * 1.3) * 35;
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    g.addColorStop(0, "rgba(145,185,225,0.12)"); g.addColorStop(1, "rgba(145,185,225,0)");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  }
+}
+function _bgMatrix(ctx, w, h) {
+  if (!_bgState.matrix || _bgState.mw !== w || _bgState.mh !== h) {
+    _bgState.matrix = []; _bgState.mw = w; _bgState.mh = h;
+    const cols = Math.floor(w / 22);
+    for (let i = 0; i < cols; i++) _bgState.matrix.push({ x: i*22+Math.random()*10, y: Math.random()*h, s: Math.random()*1.2+0.4 });
+  }
+  ctx.fillStyle = "rgba(4,10,6,0.07)"; ctx.fillRect(0, 0, w, h);
+  ctx.font = "10px monospace";
+  for (const d of _bgState.matrix) {
+    const ch = String.fromCharCode(0x30A0 + Math.random() * 96);
+    ctx.fillStyle = "rgba(100,220,120,0.3)"; ctx.fillText(ch, d.x, d.y);
+    ctx.fillStyle = "rgba(160,230,180,0.45)"; ctx.fillText(ch, d.x, d.y - 11);
+    d.y += d.s; if (d.y > h + 20) { d.y = -20; d.x = Math.floor(Math.random()*(w/22))*22+Math.random()*10; }
+  }
+}
+function _bgSnow(ctx, w, h) {
+  if (!_bgState.snow || _bgState.snw !== w || _bgState.snh !== h) {
+    _bgState.snow = []; _bgState.snw = w; _bgState.snh = h;
+    for (let i = 0; i < 120; i++) _bgState.snow.push({ x: Math.random()*w, y: Math.random()*h, r: Math.random()*2.5+0.5, s: Math.random()*1.5+0.5, wb: Math.random()*0.5 });
+  }
+  ctx.clearRect(0, 0, w, h);
+  for (const s of _bgState.snow) {
+    s.y += s.s; s.x += Math.sin(s.y * 0.005) * s.wb;
+    if (s.y > h + 5) { s.y = -5; s.x = Math.random() * w; }
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.28);
+    ctx.fillStyle = "rgba(230,240,250,0.45)"; ctx.fill();
+  }
+}
+function _bgBlizzard(ctx, frame, w, h) {
+  if (!_bgState.blizzard || _bgState.blzw !== w || _bgState.blzh !== h) {
+    _bgState.blizzard = { snow: [], fog: [] };
+    _bgState.blzw = w; _bgState.blzh = h;
+    for (let i = 0; i < 700; i++) {
+      _bgState.blizzard.snow.push({
+        x: Math.random() * w,
+        y: Math.random() * h,
+        r: Math.random() * 3.5 + 0.8,
+        s: Math.random() * 5 + 2,
+        wb: (Math.random() - 0.5) * 7,
+        o: Math.random() * 0.35 + 0.25
+      });
+    }
+    for (let i = 0; i < 45; i++) {
+      _bgState.blizzard.fog.push({
+        x: Math.random() * w,
+        y: h * 0.4 + Math.random() * h * 0.6,
+        r: h * 0.25 + Math.random() * h * 0.3,
+        s: Math.random() * 0.3 + 0.15,
+        wd: (Math.random() - 0.5) * 4,
+        o: Math.random() * 0.06 + 0.05,
+        ph: Math.random() * 6.28
+      });
+    }
+  }
+  ctx.clearRect(0, 0, w, h);
+  // dark overcast sky
+  const overcast = ctx.createLinearGradient(0, 0, 0, h * 0.6);
+  overcast.addColorStop(0, "rgba(12, 15, 18, 0.4)");
+  overcast.addColorStop(0.3, "rgba(18, 22, 26, 0.25)");
+  overcast.addColorStop(0.7, "rgba(28, 32, 36, 0.08)");
+  overcast.addColorStop(1, "rgba(35, 38, 42, 0)");
+  ctx.fillStyle = overcast; ctx.fillRect(0, 0, w, h);
+  // fog layer
+  const t = frame * 0.002;
+  for (const f of _bgState.blizzard.fog) {
+    f.x += f.wd + Math.sin(t + f.ph) * 0.3;
+    f.y += f.s * 0.15;
+    if (f.x < -f.r) f.x = w + f.r;
+    if (f.x > w + f.r) f.x = -f.r;
+    if (f.y > h + f.r) { f.y = h * 0.4 + Math.random() * h * 0.1; f.x = Math.random() * w; }
+    const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.r);
+    g.addColorStop(0, `rgba(200, 210, 220, ${f.o})`);
+    g.addColorStop(0.3, `rgba(180, 190, 205, ${f.o * 0.5})`);
+    g.addColorStop(0.6, `rgba(140, 150, 165, ${f.o * 0.15})`);
+    g.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(f.x - f.r, f.y - f.r, f.r * 2, f.r * 2);
+  }
+  // blowing snow
+  for (const s of _bgState.blizzard.snow) {
+    s.y += s.s;
+    s.x += s.wb;
+    if (s.y > h + 10) { s.y = -10; s.x = Math.random() * w; }
+    if (s.x < -40) s.x = w + 40;
+    if (s.x > w + 40) s.x = -40;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.28);
+    ctx.fillStyle = `rgba(230, 240, 250, ${s.o})`;
+    ctx.fill();
+  }
+}
+function _bgFog(ctx, frame, w, h) {
+  if (!_bgState.fog || _bgState.fgw !== w || _bgState.fgh !== h) {
+    _bgState.fog = []; _bgState.fgw = w; _bgState.fgh = h;
+    for (let i = 0; i < 40; i++) {
+      _bgState.fog.push({
+        x: Math.random() * w,
+        y: h * 0.4 + Math.random() * h * 0.6,
+        r: h * 0.12 + Math.random() * h * 0.3,
+        s: Math.random() * 0.15 + 0.05,
+        o: Math.random() * 0.03 + 0.01,
+        ph: Math.random() * 6.28
+      });
+    }
+  }
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "rgba(0, 0, 0, 0)";
+  ctx.fillRect(0, 0, w, h);
+  for (const f of _bgState.fog) {
+    f.x += f.s * Math.sin(frame * 0.003 + f.ph) * 0.5;
+    f.y += f.s * 0.05;
+    if (f.x < -f.r) f.x = w + f.r;
+    if (f.x > w + f.r) f.x = -f.r;
+    if (f.y > h + f.r) { f.y = h * 0.4 + Math.random() * h * 0.1; f.x = Math.random() * w; }
+    const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.r);
+    g.addColorStop(0, `rgba(200, 210, 225, ${f.o})`);
+    g.addColorStop(0.4, `rgba(190, 200, 215, ${f.o * 0.6})`);
+    g.addColorStop(0.75, `rgba(180, 190, 205, ${f.o * 0.2})`);
+    g.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(f.x - f.r, f.y - f.r, f.r * 2, f.r * 2);
+  }
+}
+function _bgEmbers(ctx, w, h) {
+  if (!_bgState.embers || _bgState.ew !== w || _bgState.eh !== h) {
+    _bgState.embers = []; _bgState.smoke = []; _bgState.ew = w; _bgState.eh = h;
+    for (let i = 0; i < 60; i++) {
+      _bgState.embers.push({
+        x: w * 0.1 + Math.random() * w * 0.8,
+        y: h * 0.9 + Math.random() * h * 0.1,
+        r: Math.random() * 1.2 + 0.4,
+        s: Math.random() * 2.5 + 1.5,
+        wb: (Math.random() - 0.5) * 1.6,
+        o: 0.5 + Math.random() * 0.5,
+        life: Math.random(),
+        pulse: Math.random() * 6.28
+      });
+    }
+    for (let i = 0; i < 40; i++) {
+      _bgState.smoke.push({
+        x: w * 0.15 + Math.random() * w * 0.7,
+        y: h * 0.92 + Math.random() * h * 0.08,
+        r: Math.random() * 15 + 8,
+        s: Math.random() * 0.15 + 0.04,
+        wb: (Math.random() - 0.5) * 0.3,
+        o: Math.random() * 0.06 + 0.015
+      });
+    }
+  }
+  ctx.clearRect(0, 0, w, h);
+
+  const glow = ctx.createLinearGradient(0, h, 0, 0);
+  glow.addColorStop(0, "rgba(200, 100, 30, 0.10)");
+  glow.addColorStop(0.2, "rgba(160, 70, 20, 0.07)");
+  glow.addColorStop(0.45, "rgba(90, 35, 10, 0.04)");
+  glow.addColorStop(0.7, "rgba(35, 14, 5, 0.02)");
+  glow.addColorStop(0.85, "rgba(10, 4, 2, 0.008)");
+  glow.addColorStop(1, "rgba(0, 0, 0, 0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, w, h);
+
+  for (const s of _bgState.smoke) {
+    s.y -= s.s;
+    s.x += s.wb * 0.3 + (Math.random() - 0.5) * 0.1;
+    if (s.y < -80) {
+      s.y = h * 0.92 + Math.random() * h * 0.08;
+      s.x = w * 0.15 + Math.random() * w * 0.7;
+    }
+    const sr = s.r * (1 + (h - s.y) / h * 1.5);
+    const g = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, sr);
+    g.addColorStop(0, `rgba(25, 20, 18, ${s.o})`);
+    g.addColorStop(0.5, `rgba(15, 12, 10, ${s.o * 0.4})`);
+    g.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(s.x - sr, s.y - sr, sr * 2, sr * 2);
+  }
+
+  for (const e of _bgState.embers) {
+    e.life += 0.0015;
+    if (e.life > 1) {
+      e.life = 0;
+      e.y = h * 0.9 + Math.random() * h * 0.1;
+      e.x = w * 0.1 + Math.random() * w * 0.8;
+      e.o = 0.5 + Math.random() * 0.5;
+    }
+    e.y -= e.s;
+    e.x += e.wb * 0.35;
+    if (e.y < -20) {
+      e.y = h * 0.9 + Math.random() * h * 0.1;
+      e.x = w * 0.1 + Math.random() * w * 0.8;
+      e.life = 0;
+      e.o = 0.5 + Math.random() * 0.5;
+    }
+    const t = 1 - Math.min(1, ((h - e.y) / h) * 0.55);
+    const flicker = 0.6 + Math.sin(e.life * 20 + e.pulse) * 0.4;
+    const r = Math.round(255 * t + 200 * (1 - t));
+    const g = Math.round(180 * t + 80 * (1 - t));
+    const b = Math.round(60 * t + 20 * (1 - t));
+    const glowSize = e.r * 2.5 * (0.5 + t * 0.5);
+    const alpha = e.o * flicker * Math.max(0.15, t);
+
+    const gd = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, glowSize);
+    gd.addColorStop(0, `rgba(${r},${g},${b},${alpha * 0.9})`);
+    gd.addColorStop(0.3, `rgba(${Math.round(r*0.7)},${Math.round(g*0.4)},${Math.round(b*0.2)},${alpha * 0.35})`);
+    gd.addColorStop(0.6, `rgba(${Math.round(r*0.3)},${Math.round(g*0.15)},${Math.round(b*0.05)},${alpha * 0.08})`);
+    gd.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = gd;
+    ctx.fillRect(e.x - glowSize, e.y - glowSize, glowSize * 2, glowSize * 2);
+
+    const core = Math.max(1, e.r * 0.8);
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, core, 0, 6.28);
+    ctx.fillStyle = `rgba(${Math.min(255, r + 40)},${Math.min(255, g + 30)},${b},${alpha * 0.7})`;
+    ctx.fill();
+  }
+}
+function _bgPulse(ctx, frame, w, h) {
+  ctx.clearRect(0, 0, w, h);
+  const a = 0.1 + Math.sin(frame * 0.02) * 0.06;
+  const g = ctx.createRadialGradient(w/2, h/2, 0, w/2, h/2, Math.max(w,h)*0.5);
+  g.addColorStop(0, `rgba(160, 190, 230, ${a * 1.5})`);
+  g.addColorStop(0.4, `rgba(120, 150, 200, ${a * 0.8})`);
+  g.addColorStop(0.7, `rgba(80, 110, 160, ${a * 0.3})`);
+  g.addColorStop(1, "rgba(0, 0, 0, 0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+}
+function _bgWaves(ctx, frame, w, h) {
+  ctx.clearRect(0, 0, w, h);
+  const t = frame * 0.015;
+  for (let i = 0; i < 5; i++) {
+    ctx.beginPath();
+    for (let x = 0; x <= w; x += 4) {
+      const y = h*0.72 + Math.sin(x*0.004 + t + i*0.9) * 22 + Math.sin(x*0.012 - t*0.6 + i) * 12;
+      x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+    ctx.fillStyle = `rgba(100,150,210,${0.06 - i*0.01})`; ctx.fill();
+  }
+}
+function _bgLowpoly(ctx, frame, w, h) {
+  ctx.clearRect(0, 0, w, h);
+  const t = frame * 0.004;
+  const pts = [];
+  for (let i = 0; i < 6; i++) {
+    pts.push({ x: w/2 + Math.cos(t + i*1.05) * w*0.32, y: h/2 + Math.sin(t*0.8 + i*1.05) * h*0.32 });
+  }
+  for (let a = 0; a < pts.length; a++) {
+    for (let b = a+1; b < pts.length; b++) {
+      for (let c = b+1; c < pts.length; c++) {
+        ctx.beginPath(); ctx.moveTo(pts[a].x, pts[a].y);
+        ctx.lineTo(pts[b].x, pts[b].y); ctx.lineTo(pts[c].x, pts[c].y); ctx.closePath();
+        ctx.fillStyle = "rgba(120,150,190,0.04)"; ctx.strokeStyle = "rgba(120,150,190,0.06)";
+        ctx.lineWidth = 0.5; ctx.fill(); ctx.stroke();
+      }
+    }
+  }
+}
+function _bgRain(ctx, w, h) {
+  if (!_bgState.rain || _bgState.rnw !== w || _bgState.rnh !== h) {
+    _bgState.rain = []; _bgState.rnw = w; _bgState.rnh = h;
+    for (let i = 0; i < 200; i++) {
+      _bgState.rain.push({
+        x: Math.random() * w, y: -Math.random() * h,
+        l: Math.random() * 20 + 10,
+        s: Math.random() * 4 + 3,
+        dr: (Math.random() - 0.5) * 0.3,
+        w: Math.random() * 0.4 + 0.4,
+        o: Math.random() * 0.15 + 0.08
+      });
+    }
+  }
+  ctx.clearRect(0, 0, w, h);
+  const sky = ctx.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, "rgba(14, 17, 20, 0.12)");
+  sky.addColorStop(0.5, "rgba(20, 24, 27, 0.04)");
+  sky.addColorStop(1, "rgba(0, 0, 0, 0)");
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, w, h);
+  for (const r of _bgState.rain) {
+    r.y += r.s;
+    r.x -= 0.3 - r.dr;
+    if (r.y > h + r.l) { r.y = -r.l; r.x = Math.random() * w; }
+    ctx.globalAlpha = r.o;
+    ctx.strokeStyle = "rgba(160, 185, 215, 1)";
+    ctx.lineWidth = r.w;
+    ctx.beginPath();
+    ctx.moveTo(r.x, r.y);
+    ctx.lineTo(r.x - 0.35 + r.dr * 0.3, r.y + r.l);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+function _bgThunderstorm(ctx, frame, w, h) {
+  if (!_bgState.ts || _bgState.tsw !== w || _bgState.tsh !== h) {
+    _bgState.ts = { rain: [] }; _bgState.tsw = w; _bgState.tsh = h;
+    for (let i = 0; i < 400; i++) _bgState.ts.rain.push({ x: Math.random()*w, y: Math.random()*h, l: Math.random()*15+10, s: Math.random()*7+8 });
+    _bgState.ts.flashTimer = 0; _bgState.ts.flashAlpha = 0; _bgState.ts.bolts = [];
+  }
+  const ts = _bgState.ts;
+  ctx.clearRect(0, 0, w, h);
+  // storm atmosphere — layered overcast, rolling mist, wind streaks
+  const t = frame * 0.0015;
+  // dark overcast ceiling — thick cloud cover across top third
+  const overcast = ctx.createLinearGradient(0, 0, 0, h*0.45);
+  overcast.addColorStop(0, "rgba(8,10,13,0.35)");
+  overcast.addColorStop(0.3, "rgba(12,15,18,0.2)");
+  overcast.addColorStop(0.7, "rgba(18,22,25,0.06)");
+  overcast.addColorStop(1, "rgba(20,24,26,0)");
+    ctx.fillStyle = overcast; ctx.fillRect(0, 0, w, h);
+  // rolling fog banks — many overlapping soft layers
+  if (!_bgState.tsFog || _bgState.tsFgw !== w || _bgState.tsFgh !== h) {
+    _bgState.tsFog = []; _bgState.tsFgw = w; _bgState.tsFgh = h;
+    for (let i = 0; i < 55; i++) {
+      _bgState.tsFog.push({
+        x: Math.random() * w,
+        y: h * 0.5 + Math.random() * h * 0.5,
+        r: h * 0.15 + Math.random() * h * 0.25,
+        s: Math.random() * 0.12 + 0.04,
+        o: Math.random() * 0.05 + 0.05,
+        ph: Math.random() * 6.28
+      });
+    }
+  }
+  // heavy fog base layer at the bottom
+  const fogBase = ctx.createLinearGradient(0, h * 0.7, 0, h);
+  fogBase.addColorStop(0, "rgba(0, 0, 0, 0)");
+  fogBase.addColorStop(0.3, "rgba(140, 155, 170, 0.015)");
+  fogBase.addColorStop(0.7, "rgba(190, 200, 215, 0.05)");
+  fogBase.addColorStop(1, "rgba(200, 210, 225, 0.08)");
+  ctx.fillStyle = fogBase; ctx.fillRect(0, 0, w, h);
+  for (const f of _bgState.tsFog) {
+    f.x += f.s * Math.sin(t * 1.5 + f.ph) * 0.5;
+    f.y += f.s * 0.03;
+    if (f.x < -f.r) f.x = w + f.r;
+    if (f.x > w + f.r) f.x = -f.r;
+    if (f.y > h + f.r) { f.y = h * 0.5 + Math.random() * h * 0.1; f.x = Math.random() * w; }
+    const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.r);
+    g.addColorStop(0, `rgba(200, 210, 225, ${f.o})`);
+    g.addColorStop(0.3, `rgba(150, 165, 180, ${f.o * 0.55})`);
+    g.addColorStop(0.6, `rgba(90, 100, 115, ${f.o * 0.15})`);
+    g.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(f.x - f.r, f.y - f.r, f.r * 2, f.r * 2);
+  }
+  // rain
+  ctx.strokeStyle = "rgba(150,175,210,0.4)"; ctx.lineWidth = 1.0;
+  for (const r of ts.rain) {
+    ctx.beginPath(); ctx.moveTo(r.x, r.y); ctx.lineTo(r.x - 0.5, r.y + r.l);
+    ctx.stroke();
+    r.y += r.s; r.x -= 0.6;
+    if (r.y > h + 15) { r.y = -15; r.x = Math.random() * w; }
+  }
+  // lightning
+  if (ts.flashTimer <= 0) {
+    if (Math.random() < 0.004) {
+      ts.flashTimer = 5 + Math.floor(Math.random()*7);
+      ts.flashAlpha = 1;
+      ts.bolts = [];
+      const sx = w*(0.2 + Math.random()*0.6), ex = sx + (Math.random()-0.5)*w*0.25;
+      const main = [sx, 0, ex, h*(0.45 + Math.random()*0.35)];
+      const pts = _genBolt(main[0], main[1], main[2], main[3], 6);
+      ts.bolts.push(pts);
+      // branches
+      const n = 1 + Math.floor(Math.random()*3);
+      for (let b = 0; b < n; b++) {
+        const bi = 2 + Math.floor(Math.random()*(pts.length/2 - 1));
+        const br = Math.random()*0.4 + 0.25;
+        ts.bolts.push(_genBolt(pts[bi].x, pts[bi].y, pts[bi].x + (Math.random()-0.5)*w*0.2, pts[bi].y + h*0.08 + Math.random()*h*0.12, 4));
+      }
+    }
+  } else {
+    ts.flashTimer--;
+    ts.flashAlpha *= 0.6;
+    if (ts.flashAlpha > 0.015) {
+      for (const pts of ts.bolts) {
+        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.strokeStyle = `rgba(140,170,240,${ts.flashAlpha*0.4})`; ctx.lineWidth = 8; ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.strokeStyle = `rgba(200,225,255,${ts.flashAlpha*0.7})`; ctx.lineWidth = 3; ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.strokeStyle = `rgba(250,250,255,${ts.flashAlpha})`; ctx.lineWidth = 1; ctx.stroke();
+      }
+      if (ts.bolts.length > 0 && ts.bolts[0].length > 0) {
+        const bx = ts.bolts[0][0].x, by = h*0.12;
+        const fg = ctx.createRadialGradient(bx, by, 0, bx, by, w*0.55);
+        fg.addColorStop(0, `rgba(210,220,250,${ts.flashAlpha*0.16})`);
+        fg.addColorStop(0.5, `rgba(180,195,240,${ts.flashAlpha*0.05})`);
+        fg.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = fg; ctx.fillRect(0, 0, w, h);
+      }
+    } else {
+      ts.bolts = [];
+    }
+  }
+}
+function _genBolt(x1, y1, x2, y2, depth) {
+  if (depth <= 0) return [{ x: x1, y: y1 }, { x: x2, y: y2 }];
+  const mx = (x1 + x2)/2 + (Math.random()-0.5)*Math.abs(x2-x1)*0.35;
+  const my = (y1 + y2)/2 + (Math.random()-0.5)*Math.abs(y2-y1)*0.35;
+  const left = _genBolt(x1, y1, mx, my, depth-1);
+  const right = _genBolt(mx, my, x2, y2, depth-1);
+  left.pop();
+  return [...left, ...right];
+}
+function applyColors() {
+  const accentHex = state.settings.themeColor;
+  const panelHex = state.settings.panelColorSynced ? accentHex : state.settings.panelColor;
+  const accentRgb = hexToRgb(accentHex) ?? hexToRgb(DEFAULT_SETTINGS.themeColor);
+  const panelRgb = hexToRgb(panelHex) ?? accentRgb;
+  document.documentElement.style.setProperty("--accent", rgbToHex(accentRgb));
+  document.documentElement.style.setProperty("--accent-rgb", `${Math.round(accentRgb.r)}, ${Math.round(accentRgb.g)}, ${Math.round(accentRgb.b)}`);
+  document.documentElement.style.setProperty("--accent-ink", luminance(accentRgb) > .55 ? "#08110c" : "#f6fff8");
+  document.documentElement.style.setProperty("--bg", rgbToHex(mix({ r: 0, g: 0, b: 0 }, accentRgb, .13)));
+  const panel = mix({ r: 18, g: 22, b: 20 }, panelRgb, .16);
+  const panel2 = mix({ r: 18, g: 22, b: 20 }, panelRgb, .28);
   document.documentElement.style.setProperty("--panel", rgbToHex(panel));
   document.documentElement.style.setProperty("--panel-2", rgbToHex(panel2));
   document.documentElement.style.setProperty("--panel-rgb", `${Math.round(panel.r)}, ${Math.round(panel.g)}, ${Math.round(panel.b)}`);
   document.documentElement.style.setProperty("--panel-2-rgb", `${Math.round(panel2.r)}, ${Math.round(panel2.g)}, ${Math.round(panel2.b)}`);
-  document.documentElement.style.setProperty("--line", rgbToHex(mix({ r: 18, g: 22, b: 20 }, rgb, .48)));
-  document.documentElement.style.setProperty("--muted", rgbToHex(mix({ r: 255, g: 255, b: 255 }, rgb, .34)));
-  $("themeColorInput").value = rgbToHex(rgb);
+  document.documentElement.style.setProperty("--line", rgbToHex(mix({ r: 18, g: 22, b: 20 }, panelRgb, .48)));
+  document.documentElement.style.setProperty("--muted", rgbToHex(mix({ r: 255, g: 255, b: 255 }, panelRgb, .34)));
+  $("themeColorInput").value = rgbToHex(accentRgb);
+  $("panelColorInput").value = rgbToHex(panelRgb);
+  $("panelColorInput").disabled = state.settings.panelColorSynced;
+  $("panelColorOverlay").hidden = !state.settings.panelColorSynced;
+  $("panelColorSyncToggle").checked = state.settings.panelColorSynced;
 }
 function hexToRgb(hex) { const m = /^#?([0-9a-f]{6})$/i.exec(hex || ""); if (!m) return null; const v = parseInt(m[1], 16); return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255 }; }
 function rgbToHex({ r, g, b }) { return `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`; }
@@ -3338,6 +4144,7 @@ $("groupList").addEventListener("drop", handleGroupListDrop);
 $("gridSizeInput").addEventListener("input", () => { state.settings.gridSize = Number($("gridSizeInput").value); applyGridSize(); queueSaveSettings(); });
 $("databaseGridSizeInput").addEventListener("input", () => { state.settings.databaseGridSize = Number($("databaseGridSizeInput").value); applyGridSize(); queueSaveSettings(); });
 window.addEventListener("resize", applyGridSize);
+window.addEventListener("resize", () => { if (_bgCanvas && _bgActive) { _bgCanvas.width = window.innerWidth; _bgCanvas.height = window.innerHeight; _bgState = {}; } });
 $("customizationBtn").addEventListener("click", openSettingsDialog);
 $("settingsCustomizationTab").addEventListener("click", () => setSettingsTab("customization"));
 $("settingsLogsTab").addEventListener("click", () => setSettingsTab("logs"));
@@ -3356,7 +4163,16 @@ $("openGameBtn").addEventListener("click", async () => {
   if (!await confirmAction({ title: "Open Game", message: "Open VRChat in desktop mode?", confirmLabel: "Open", confirmClass: "primary" })) return;
   try { await api("openGame"); } catch (e) { toast(e.message); }
 });
-$("themeColorInput").addEventListener("input", () => { state.settings.themeColor = $("themeColorInput").value; applyThemeColor(state.settings.themeColor); });
+$("themeColorInput").addEventListener("input", () => { state.settings.themeColor = $("themeColorInput").value; if (state.settings.panelColorSynced) state.settings.panelColor = state.settings.themeColor; applyColors(); });
+$("panelColorInput").addEventListener("input", () => { if (state.settings.panelColorSynced) return; state.settings.panelColor = $("panelColorInput").value; applyColors(); });
+$("panelColorOverlay").addEventListener("click", () => confirmAction({
+  title: "Panel Color Locked",
+  message: "Turn off Sync colors to unlock the panel color picker.",
+  confirmLabel: "OK",
+  confirmClass: "primary",
+  hideCancel: true
+}));
+$("panelColorSyncToggle").addEventListener("change", () => { state.settings.panelColorSynced = $("panelColorSyncToggle").checked; if (state.settings.panelColorSynced) state.settings.panelColor = state.settings.themeColor; applyColors(); });
 $("backgroundOpacityInput").addEventListener("input", () => { state.settings.backgroundOpacity = Number($("backgroundOpacityInput").value); applyBackgroundOpacity(); });
 $("backgroundOpacityNumber").addEventListener("input", syncBackgroundOpacityFromNumber);
 $("backgroundOpacityPrevBtn").addEventListener("click", () => stepBackgroundOpacity(-1));
@@ -3366,7 +4182,7 @@ $("panelOpacityNumber").addEventListener("input", syncPanelOpacityFromNumber);
 $("panelOpacityPrevBtn").addEventListener("click", () => stepPanelOpacity(-1));
 $("panelOpacityNextBtn").addEventListener("click", () => stepPanelOpacity(1));
 $("checkUpdateBtn").addEventListener("click", () => checkForUpdates());
-$("resetThemeBtn").addEventListener("click", () => { state.settings.themeColor = DEFAULT_SETTINGS.themeColor; state.settings.backgroundOpacity = DEFAULT_SETTINGS.backgroundOpacity; state.settings.panelOpacity = DEFAULT_SETTINGS.panelOpacity; applySettings(); });
+$("resetThemeBtn").addEventListener("click", () => { state.settings.themeColor = DEFAULT_SETTINGS.themeColor; state.settings.panelColor = DEFAULT_SETTINGS.panelColor; state.settings.panelColorSynced = DEFAULT_SETTINGS.panelColorSynced; state.settings.backgroundOpacity = DEFAULT_SETTINGS.backgroundOpacity; state.settings.panelOpacity = DEFAULT_SETTINGS.panelOpacity; state.settings.backgroundEffect = DEFAULT_SETTINGS.backgroundEffect; $("bgEffectSelect").value = ""; updateSortButton("bgEffectSelect", "bgEffectMenuBtn"); applySettings(); });
 $("cancelSettingsBtn").addEventListener("click", cancelSettingsDialog);
 $("applySettingsBtn").addEventListener("click", applySettingsDialog);
 $("restoreBackupNewBtn").addEventListener("click", () => restoreBackup("new"));
@@ -3377,6 +4193,8 @@ $("openLogsFolderBtn").addEventListener("click", openLogsFolder);
 $("clearLogsBtn").addEventListener("click", clearSettingsLogs);
 $("openBackupsFolderBtn").addEventListener("click", openBackupsFolder);
 $("openBackgroundFolderBtn").addEventListener("click", openBackgroundFolder);
+$("bgEffectMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "bgEffectSelect", "bgEffectMenu", "bgEffectMenuBtn", () => { state.settings.backgroundEffect = $("bgEffectSelect").value; startBgEffect(state.settings.backgroundEffect); queueSaveSettings(); }));
+$("bgEffectMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "bgEffectSelect", "bgEffectMenuBtn", () => { state.settings.backgroundEffect = $("bgEffectSelect").value; startBgEffect(state.settings.backgroundEffect); queueSaveSettings(); }), { passive: false });
 $("changeGroupIconBtn").addEventListener("click", () => changeGroupIcon());
 $("removeGroupIconBtn").addEventListener("click", () => removeGroupIcon());
 ["thumbnailInput", "imageInput"].forEach((id) => $(id).addEventListener("input", updateAvatarPreview));
@@ -3439,6 +4257,11 @@ $("avatarDatabaseProviderMenuBtn").addEventListener("click", (event) => toggleSo
   resetAvatarDatabaseResults();
   maybeShowVrcxDatabaseNotice();
 }));
+$("avatarDatabaseProviderMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "avatarDatabaseProviderSelect", "avatarDatabaseProviderMenuBtn", () => {
+  state.avatarDatabaseProvider = avatarDatabaseProvider();
+  resetAvatarDatabaseResults();
+  maybeShowVrcxDatabaseNotice();
+}), { passive: false });
 $("avatarDatabaseProviderSelect").addEventListener("change", () => {
   state.avatarDatabaseProvider = avatarDatabaseProvider();
   resetAvatarDatabaseResults();
@@ -3447,7 +4270,8 @@ $("avatarDatabaseProviderSelect").addEventListener("change", () => {
 ["databaseSearchAvatarToggle", "databaseSearchAuthorToggle", "databaseSearchDescriptionToggle", "databaseSearchTagsToggle", "databasePlatformPcToggle", "databasePlatformAndroidToggle", "databasePlatformIosToggle"].forEach((id) => $(id).addEventListener("change", () => { state.avatarDatabaseAuthorId = ""; updateDatabaseFieldMenuButton(); }));
 $("randomAvatarDatabaseBtn").addEventListener("click", runRandomAvatarDatabasePage);
 $("equipRandomAvatarBtn").addEventListener("click", () => equipRandomDatabaseAvatar().catch(() => {}));
-$("avatarRouletteBtn").addEventListener("click", openAvatarRouletteDialog);
+$("avatarRouletteBtn").addEventListener("click", () => openAvatarRouletteDialog('database'));
+$("favRouletteBtn").addEventListener("click", () => openAvatarRouletteDialog('favorites'));
 $("startAvatarRouletteBtn").addEventListener("click", startAvatarRoulette);
 $("stopAvatarRouletteBtn").addEventListener("click", () => stopAvatarRoulette());
 $("closeCaptchaDialogBtn").addEventListener("click", () => $("captchaDialog").close());
@@ -3478,7 +4302,12 @@ $("confirmDatabaseJumpBtn").addEventListener("click", async (event) => {
   event.preventDefault();
   const requested = Math.floor(Number($("databaseJumpPageInput").value));
   const maxPage = databaseMaxPage();
-  if (!Number.isFinite(requested) || requested < 1 || requested > maxPage) { toast(`Enter a page from 1 to ${maxPage}.`); return; }
+  if (!Number.isFinite(requested) || requested < 1 || requested > maxPage) {
+    toast(state.pageJumpTarget === "database" && state.avatarDatabaseTotal == null && state.avatarDatabaseCounting
+      ? `Pages up to ${maxPage} are available while the total is still counting.`
+      : `Enter a page from 1 to ${maxPage}.`);
+    return;
+  }
   $("databaseJumpDialog").close();
   if (state.pageJumpTarget === "avatars") {
     goAvatarPage(requested - 1);

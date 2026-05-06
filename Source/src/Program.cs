@@ -253,6 +253,7 @@ internal static class Program
                 "backupRestore" => Store.RestoreBackup(GetPayload<BackupRestoreInput>(request)),
                 "avatarDatabaseSearch" => await AvatarDatabase.SearchAsync(GetPayload<AvatarSearchInput>(request), VrChat),
                 "avatarDatabaseCount" => await AvatarDatabase.CountAsync(GetPayload<AvatarSearchInput>(request)),
+                "avatarDatabaseCountProgress" => AvatarDatabase.CountProgress(GetPayload<AvatarSearchInput>(request)),
                 "avatarDatabaseRandom" => await AvatarDatabase.RandomAsync(GetPayload<AvatarSearchInput>(request), VrChat),
                 "avatarDatabaseVrcxStatus" => AvatarDatabase.GetVrcxStatus(),
                 "avatarDatabasePasUpdateStatus" => await AvatarDatabase.GetPasUpdateStatusAsync(),
@@ -2077,7 +2078,7 @@ internal sealed class AvatarStore
 
 internal sealed class AppSettingsStore
 {
-    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, 6);
+    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", 6);
     private readonly string _settingsPath = AppPaths.SettingsPath;
     public AppSettings Get()
     {
@@ -2094,12 +2095,14 @@ internal sealed class AppSettingsStore
     }
     private static AppSettings Normalize(AppSettings s)
     {
-        var grid = s.SchemaVersion < 2 && s.GridSize == 4 ? DefaultSettings.GridSize : Math.Clamp(s.GridSize, 5, 10);
-        var databaseGrid = s.DatabaseGridSize == 0 ? grid : Math.Clamp(s.DatabaseGridSize, 5, 10);
+        var grid = s.SchemaVersion < 2 && s.GridSize == 4 ? DefaultSettings.GridSize : Math.Clamp(s.GridSize, 3, 10);
+        var databaseGrid = s.DatabaseGridSize == 0 ? grid : Math.Clamp(s.DatabaseGridSize, 3, 10);
         var color = string.IsNullOrWhiteSpace(s.ThemeColor) || !System.Text.RegularExpressions.Regex.IsMatch(s.ThemeColor, "^#[0-9a-fA-F]{6}$") ? DefaultSettings.ThemeColor : s.ThemeColor;
         var opacity = s.SchemaVersion < 4 && s.BackgroundOpacity == 18 ? 20 : Math.Clamp(s.BackgroundOpacity, 0, 100);
         var panelOpacity = s.SchemaVersion < 6 && s.PanelOpacity == 0 ? DefaultSettings.PanelOpacity : Math.Clamp(s.PanelOpacity, 0, 100);
-        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, 6);
+        var panelColor = string.IsNullOrWhiteSpace(s.PanelColor) || !System.Text.RegularExpressions.Regex.IsMatch(s.PanelColor, "^#[0-9a-fA-F]{6}$") ? color : s.PanelColor;
+        var panelSynced = s.SchemaVersion < 6 || s.PanelColorSynced;
+        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", 6);
     }
 }
 
@@ -2833,6 +2836,8 @@ internal sealed class AvatarDatabaseClient
     private const string PasDatabaseBackupUrl = "https://prismic.net/vrc/pasavtrdb.txt";
     private static readonly Dictionary<string, AvatarDatabaseSearchResult> Cache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, AvatarDatabaseCountResult> CountCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, AvatarDatabaseCountProgress> CountProgressCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object CountProgressGate = new();
     private static readonly Dictionary<string, AvatarInput> VrChatAvatarDetailCache = new(StringComparer.OrdinalIgnoreCase);
     private static PasDatabaseData? PasCache;
     private static readonly SemaphoreSlim QueryGate = new(1, 1);
@@ -2862,6 +2867,17 @@ internal sealed class AvatarDatabaseClient
         if (query.Length > 0 && query.Length < 3 && !IsAuthorIdOnlySearch(input) && !HasOptionFilter(input)) throw new InvalidOperationException("Enter at least 3 characters to search the avatar database.");
         if (!HasSearchField(input)) throw new InvalidOperationException("Enable at least one search field.");
         return await CountRemoteVrcxAsync(input, vrchat);
+    }
+
+    public AvatarDatabaseCountProgress CountProgress(AvatarSearchInput input)
+    {
+        var key = AllCountProgressKey(input);
+        lock (CountProgressGate)
+        {
+            return CountProgressCache.TryGetValue(key, out var progress)
+                ? progress
+                : new AvatarDatabaseCountProgress(0, false, false);
+        }
     }
 
     public async Task<AvatarDatabaseSearchResult> RandomAsync(AvatarSearchInput input, VrChatClient? vrchat = null)
@@ -2994,20 +3010,92 @@ internal sealed class AvatarDatabaseClient
     private async Task<AvatarDatabaseCountResult> CountAllAsync(AvatarSearchInput input, VrChatClient? vrchat)
     {
         var errors = new List<string>();
-        var total = 0;
+        var unique = new List<AvatarInput>();
+        var byDuplicateKey = new Dictionary<string, AvatarInput>(StringComparer.OrdinalIgnoreCase);
+        var providerHasMore = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["avtrzip"] = true,
+            ["pas"] = true,
+            ["vrcx"] = true
+        };
+        var providerErrors = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
+        var progressKey = AllCountProgressKey(input);
+        SetCountProgress(progressKey, 0, true, false);
 
-        try { total += (await CountAvtrZipAsync(input with { Provider = "avtrzip" }, vrchat)).Total; }
-        catch (Exception ex) { errors.Add($"AVTRZIP: {ex.Message}"); }
+        for (var providerPage = 1; providerHasMore.Values.Any(BooleanIdentity); providerPage++)
+        {
+            var pageResults = new List<AvatarDatabaseSearchResult>();
+            if (providerHasMore["avtrzip"])
+            {
+                try
+                {
+                    var result = await SearchAvtrZipAsync(input with { Provider = "avtrzip", Page = providerPage, Limit = limit }, null);
+                    pageResults.Add(result);
+                    providerHasMore["avtrzip"] = result.HasMore;
+                }
+                catch (Exception ex)
+                {
+                    providerHasMore["avtrzip"] = false;
+                    if (providerErrors.Add("avtrzip")) errors.Add($"AVTRZIP: {ex.Message}");
+                }
+            }
 
-        try { total += (await CountPasAsync(input with { Provider = "pas" })).Total; }
-        catch (Exception ex) { errors.Add($"Prismic PAS: {ex.Message}"); }
+            if (providerHasMore["pas"])
+            {
+                try
+                {
+                    var result = await SearchPasAsync(input with { Provider = "pas", Page = providerPage, Limit = limit }, null);
+                    pageResults.Add(result);
+                    providerHasMore["pas"] = result.HasMore;
+                }
+                catch (Exception ex)
+                {
+                    providerHasMore["pas"] = false;
+                    if (providerErrors.Add("pas")) errors.Add($"Prismic PAS: {ex.Message}");
+                }
+            }
 
-        try { total += (await CountRemoteVrcxAsync(input with { Provider = "vrcx" }, vrchat)).Total; }
-        catch (Exception ex) { errors.Add($"VRCX DB: {ex.Message}"); }
+            if (providerHasMore["vrcx"])
+            {
+                try
+                {
+                    var result = await SearchRemoteVrcxAsync(input with { Provider = "vrcx", Page = providerPage, Limit = limit }, null);
+                    pageResults.Add(result);
+                    providerHasMore["vrcx"] = result.HasMore;
+                }
+                catch (Exception ex)
+                {
+                    providerHasMore["vrcx"] = false;
+                    if (providerErrors.Add("vrcx")) errors.Add($"VRCX DB: {ex.Message}");
+                }
+            }
 
-        if (total == 0 && errors.Count == 3) throw new InvalidOperationException(string.Join(" | ", errors));
-        return new AvatarDatabaseCountResult(input.Query?.Trim() ?? "", total, DateTimeOffset.UtcNow);
+            AddDedupedAvatarResults(pageResults, unique, byDuplicateKey);
+            SetCountProgress(progressKey, unique.Count, true, false);
+            if (pageResults.Count == 0) break;
+            if (pageResults.All(x => x.Results.Count == 0 && !x.HasMore)) break;
+        }
+
+        if (unique.Count == 0 && errors.Count == 3)
+        {
+            SetCountProgress(progressKey, 0, false, true);
+            throw new InvalidOperationException(string.Join(" | ", errors));
+        }
+        SetCountProgress(progressKey, unique.Count, false, true);
+        return new AvatarDatabaseCountResult(input.Query?.Trim() ?? "", unique.Count, DateTimeOffset.UtcNow);
     }
+
+    private static void SetCountProgress(string key, int discovered, bool counting, bool finished)
+    {
+        lock (CountProgressGate)
+        {
+            CountProgressCache[key] = new AvatarDatabaseCountProgress(Math.Max(0, discovered), counting, finished);
+        }
+    }
+
+    private static string AllCountProgressKey(AvatarSearchInput input) =>
+        $"all-count\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.PlatformFilters}";
 
     private async Task<List<AvatarInput>> LoadSearchWindowAsync(AvatarSearchInput input, VrChatClient? vrchat, int maxPages)
     {
@@ -4667,10 +4755,11 @@ internal sealed record AppLogEntry(DateTimeOffset Timestamp, string Level, strin
 internal sealed record AppLogList(string Folder, List<AppLogEntry> Entries);
 internal sealed record ExportResult(string Path);
 internal sealed record GroupClearResult(LibraryData Library, int Removed, string BackupPath);
-internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, int SchemaVersion = 6);
+internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", int SchemaVersion = 6);
 internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx");
 internal sealed record AvatarDatabaseSearchResult(List<AvatarInput> Results, int Page, bool HasMore, DateTimeOffset CachedAt, int Total = 0);
 internal sealed record AvatarDatabaseCountResult(string Query, int Total, DateTimeOffset CachedAt);
+internal sealed record AvatarDatabaseCountProgress(int Discovered, bool Counting, bool Finished);
 internal sealed record VrcxDatabaseStatus(bool HasLocalDatabase, string Path, string DatabaseDirectory);
 internal sealed record PasUpdateStatus(bool HasLocalFile, bool HasUpdate, string LocalFileDate, string RemoteFileDate, long LocalBytes, long RemoteBytes, string Url, string Message);
 internal sealed record AvtrZipSearchPage(AvatarDatabaseSearchResult Result, int TotalCount, int TotalPages, int NextCode, int RandomCode, int InputPageCode);

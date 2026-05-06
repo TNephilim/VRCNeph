@@ -69,7 +69,7 @@
       </nav>
       <section id="favoritesPage" class="workspace-page">
         <header class="toolbar">
-          <div class="toolbar-title"><h2 id="activeGroupName">Favorites</h2><p id="activeGroupDescription"></p></div>
+          <div class="toolbar-title"><h2 id="activeGroupName">Favorites</h2><p id="activeGroupDescription"></p><span id="rouletteCountdownFav" class="roulette-countdown toolbar-countdown" hidden></span></div>
           <div class="toolbar-actions">
             <input id="searchInput" type="search" placeholder="Search avatars">
             <div class="sort-control">
@@ -83,7 +83,6 @@
                 <option value="authorAsc">Author A-Z</option>
               </select>
             </div>
-            <label class="range-control">Columns<input id="gridSizeInput" type="range" min="5" max="10" value="10"><output id="gridSizeValue">10</output></label>
             <label id="syncedAvatarEditToggleWrap" class="edit-mode-toggle" hidden><span>Edit mode</span><input id="syncedAvatarEditToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span></label>
             <button id="applySyncedAvatarOrderBtn" class="primary" type="button" hidden>Save</button>
             <button id="cancelSyncedAvatarOrderBtn" type="button" hidden>Cancel</button>
@@ -93,6 +92,9 @@
             <button id="unfavoriteAllBtn" type="button" class="danger">Unfavorite All</button>
             <button id="checkDeletedFavoritesBtn" type="button" hidden>Check for Deleted/Private</button>
             <button id="addAvatarBtn" class="primary">Add Avatar</button>
+            <button id="favRouletteBtn" type="button" title="Favorite avatar roulette">Fav Roulette</button>
+            <span class="flex-break"></span>
+            <label class="range-control">Columns<input id="gridSizeInput" type="range" min="3" max="10" value="10"><output id="gridSizeValue">10</output></label>
           </div>
         </header>
         <section id="avatarGrid" class="avatar-grid"></section>
@@ -101,7 +103,7 @@
       </section>
       <section id="databasePage" class="workspace-page" hidden>
         <header class="toolbar">
-          <div class="toolbar-title"><h2>Database Search</h2><p id="avatarDatabaseStatus">Search AVTRZIP, Prismic PAS, and VRCX DB.</p></div>
+          <div class="toolbar-title"><h2>Database Search</h2><p id="avatarDatabaseStatus">Search AVTRZIP, Prismic PAS, and VRCX DB.</p><span id="rouletteCountdownDb" class="roulette-countdown toolbar-countdown" hidden></span></div>
           <div class="toolbar-actions database-toolbar-actions">
             <input id="avatarDatabaseSearchInput" type="search" placeholder="Search all databases">
             <button id="searchAvatarDatabaseBtn" type="button" class="primary">Search</button>
@@ -127,7 +129,6 @@
                 <option value="authorAsc">Author A-Z</option>
               </select>
             </div>
-            <label class="range-control">Columns<input id="databaseGridSizeInput" type="range" min="5" max="10" value="10"><output id="databaseGridSizeValue">10</output></label>
             <div class="database-field-dropdown">
               <button id="databaseFieldMenuBtn" type="button">Search By</button>
               <div id="databaseFieldMenu" class="database-field-menu" hidden aria-label="Database search fields">
@@ -143,6 +144,8 @@
             <button id="randomAvatarDatabaseBtn" type="button" title="Random page">Random</button>
             <button id="equipRandomAvatarBtn" type="button" class="primary">Equip Random</button>
             <button id="avatarRouletteBtn" type="button" title="Avatar roulette">Roulette</button>
+            <span class="flex-break"></span>
+            <label class="range-control">Columns<input id="databaseGridSizeInput" type="range" min="3" max="10" value="10"><output id="databaseGridSizeValue">10</output></label>
           </div>
         </header>
         <section id="avatarDatabaseResults" class="avatar-grid"></section>
@@ -214,8 +217,8 @@
     <header><h3>Avatar Roulette</h3><button type="button" class="icon-button" data-close="avatarRouletteDialog">x</button></header>
     <p id="avatarRouletteStatus" class="dialog-note">Equip a random favorite avatar on a timer.</p>
     <div class="form-grid">
-      <label>Every<input id="avatarRouletteIntervalInput" type="number" min="5" step="1" value="60"></label>
-      <label>Unit<select id="avatarRouletteUnitInput"><option value="seconds">Seconds</option><option value="minutes">Minutes</option></select></label>
+      <label>Minutes<input id="avatarRouletteMinutesInput" type="number" min="0" step="1" value="1"></label>
+      <label>Seconds<input id="avatarRouletteSecondsInput" type="number" min="0" max="59" step="1" value="0"></label>
     </div>
     <menu><button id="stopAvatarRouletteBtn" type="button" class="danger">Stop</button><button type="button" data-close="avatarRouletteDialog">Cancel</button><button id="startAvatarRouletteBtn" type="button" class="primary">Start</button></menu>
   </form></dialog>
@@ -228,11 +231,12 @@
       <button id="settingsBackupsTab" type="button">Backups</button>
     </div>
     <section id="settingsCustomizationPanel" class="settings-panel">
-      <div class="settings-panel-actions"><button id="openBackgroundFolderBtn" type="button">Open Background Folder</button><button id="resetThemeBtn" type="button">Reset Theme</button></div>
-      <label class="theme-control">Theme<input id="themeColorInput" type="color" value="#303735"></label>
+      <div class="settings-panel-actions"><button id="openBackgroundFolderBtn" type="button">Open Background Folder</button><div class="sort-control bg-effect-control"><button id="bgEffectMenuBtn" type="button">None</button><div id="bgEffectMenu" class="sort-menu" hidden></div><select id="bgEffectSelect" hidden><option value="">None</option><option value="aurora">Aurora</option><option value="aurorasnow">Aurora 2</option><option value="blizzard">Blizzard</option><option value="embers">Embers</option><option value="fog">Fog</option><option value="pulse">Gradient pulse</option><option value="lowpoly">Low-poly</option><option value="matrix">Matrix rain</option><option value="nebula">Nebula</option><option value="particles">Particles</option><option value="flow">Perlin flow</option><option value="rain">Rain</option><option value="snow">Snowfall</option><option value="stars">Starfield</option><option value="thunderstorm">Thunderstorm</option><option value="noise">White noise</option><option value="noise2">White noise 2</option></select></div><button id="resetThemeBtn" type="button">Reset Theme</button></div>
+      <div class="color-row"><label class="theme-control">Background Color<input id="themeColorInput" type="color" value="#303735"></label><label class="sync-toggle-label">Sync colors<input id="panelColorSyncToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span></label></div>
       <label>Background opacity</label>
       <div class="page-slider-row"><button id="backgroundOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="backgroundOpacityInput" type="range" min="0" max="100" value="20"><button id="backgroundOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button></div>
       <label id="backgroundOpacityValue" class="page-slider-value">Opacity <input id="backgroundOpacityNumber" type="number" min="0" max="100" step="1" value="20">%</label>
+      <label id="panelColorLabel" class="theme-control">Panel Color<input id="panelColorInput" type="color" value="#303735"><span id="panelColorOverlay" class="color-overlay" hidden></span></label>
       <label>Panel opacity</label>
       <div class="page-slider-row"><button id="panelOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="panelOpacityInput" type="range" min="0" max="100" value="35"><button id="panelOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button></div>
       <label id="panelOpacityValue" class="page-slider-value">Opacity <input id="panelOpacityNumber" type="number" min="0" max="100" step="1" value="35">%</label>
