@@ -1,8 +1,10 @@
 bin/
 obj/
 artifacts/
+Source/
 .vs/
 *.user
 *.suo
 *.pdb
 VRCNeph.exe
+Source/

@@ -24,6 +24,7 @@ internal static class AppPaths
     public static readonly string GroupsDirectory = Path.Combine(RootDirectory, "Groups");
     public static readonly string ExportDirectory = Path.Combine(RootDirectory, "Export");
     public static readonly string BackupsDirectory = Path.Combine(RootDirectory, "Backups");
+    public static readonly string AccountBackupsDirectory = Path.Combine(RootDirectory, "Account Avatars Backups");
     public static readonly string BackgroundDirectory = Path.Combine(RootDirectory, "Custom Background");
     public static readonly string GroupBackgroundDirectory = Path.Combine(BackgroundDirectory, "Groups");
     public static readonly string DatabaseDirectory = Path.Combine(RootDirectory, "Database");
@@ -48,12 +49,15 @@ internal static class AppPaths
         NormalizeFolderName("Groups");
         NormalizeFolderName("Export");
         NormalizeFolderName("Backups");
+        MigrateOldAccountBackups();
+        NormalizeFolderName("Account Avatars Backups");
         NormalizeFolderName("Custom Background");
         NormalizeFolderName("Database");
         NormalizeFolderName("Logs");
         Directory.CreateDirectory(GroupsDirectory);
         Directory.CreateDirectory(ExportDirectory);
         Directory.CreateDirectory(BackupsDirectory);
+        Directory.CreateDirectory(AccountBackupsDirectory);
         Directory.CreateDirectory(BackgroundDirectory);
         Directory.CreateDirectory(GroupBackgroundDirectory);
         Directory.CreateDirectory(DatabaseDirectory);
@@ -94,6 +98,23 @@ internal static class AppPaths
         }
 
         if (!Directory.EnumerateFileSystemEntries(oldBackupDirectory).Any()) Directory.Delete(oldBackupDirectory);
+    }
+    private static void MigrateOldAccountBackups()
+    {
+        var oldDirectory = Path.Combine(RootDirectory, "Account Backups");
+        if (!Directory.Exists(oldDirectory)) return;
+        var newDirectory = AccountBackupsDirectory;
+        Directory.CreateDirectory(newDirectory);
+        foreach (var file in Directory.EnumerateFiles(oldDirectory))
+        {
+            var target = Path.Combine(newDirectory, Path.GetFileName(file));
+            if (File.Exists(target))
+            {
+                target = Path.Combine(newDirectory, $"{Path.GetFileNameWithoutExtension(file)}-{DateTimeOffset.Now:yyyyMMddHHmmssfff}{Path.GetExtension(file)}");
+            }
+            File.Move(file, target);
+        }
+        if (!Directory.EnumerateFileSystemEntries(oldDirectory).Any()) Directory.Delete(oldDirectory);
     }
 
     private static void NormalizeFolderName(string desiredName)
@@ -182,6 +203,7 @@ internal static class Program
             try
             {
                 if (status.Connected) Logs.Info("Pipeline", "Live sync connected.");
+                else if (status.State.Equals("Connecting", StringComparison.OrdinalIgnoreCase)) Logs.Info("Pipeline", status.State);
                 else if (!status.State.Equals("Stopped", StringComparison.OrdinalIgnoreCase)) Logs.Warn("Pipeline", status.State);
                 window.SendWebMessage(JsonSerializer.Serialize(AppEvent.Push("vrchatPipelineStatus", status), ProgramJson.Options));
                 await Task.CompletedTask;
@@ -269,6 +291,9 @@ internal static class Program
                 "copyAvatar" => Store.CopyAvatar(GetPayload<MoveAvatarInput>(request)),
                 "reorderAvatar" => Store.ReorderAvatar(GetPayload<ReorderInput>(request)),
                 "backupGroup" => Store.BackupGroup(GetPayload<IdInput>(request).Id),
+                "accountBackupCreate" => Store.CreateAccountBackup("manual"),
+                "accountBackupList" => Store.ListAccountBackups(),
+                "accountBackupFolder" => new { path = AppPaths.AccountBackupsDirectory },
                 "applySyncedAvatarOrder" => await Store.ApplySyncedGroupAvatarOrderAsync(GetPayload<SyncedAvatarOrderInput>(request), VrChat, UpdateSyncedOrderProgress),
                 "syncedAvatarOrderProgress" => GetSyncedOrderProgress(),
                 "clearGroupAvatars" => await Store.ClearGroupAvatarsAsync(GetPayload<IdInput>(request).Id, VrChat),
@@ -298,12 +323,17 @@ internal static class Program
                 "vrchatFavoriteFriends" => await VrChat.GetFavoriteFriendsAsync(GetPayload<PageInput>(request)),
                 "vrchatUserCurrentAvatar" => await VrChat.GetUserCurrentAvatarAsync(GetPayload<IdInput>(request).Id),
                 "vrchatFriendGroups" => await VrChat.GetUserGroupsAsync(GetPayload<IdInput>(request).Id),
+                "vrchatUserUploadedAvatars" => await VrChat.GetUserUploadedAvatarsAsync(GetPayload<IdInput>(request).Id),
+                "vrchatUserWorlds" => await VrChat.GetUserWorldsAsync(GetPayload<IdInput>(request).Id),
+                "vrchatMutualFriends" => await VrChat.GetMutualFriendsAsync(GetPayload<IdInput>(request).Id),
                 "vrchatEncounterHistory" => VrChatLogWatcher.EncounterHistory(GetPayload<EncounterHistoryInput>(request)),
+                "vrchatPlayerActivityLog" => VrChatLogWatcher.PlayerActivityLog(GetPayload<PlayerActivityLogInput>(request)),
                 "vrchatFriendRequest" => await VrChat.SendFriendRequestAsync(GetPayload<IdInput>(request).Id),
                 "vrchatUnfriend" => await VrChat.UnfriendAsync(GetPayload<IdInput>(request).Id),
                 "vrchatBlockUser" => await VrChat.ModerateUserAsync(GetPayload<UserModerationInput>(request).Id, "block"),
                 "vrchatUnblockUser" => await VrChat.UnmoderateUserAsync(GetPayload<UserModerationInput>(request).Id, "block"),
                 "vrchatInviteMessages" => await VrChat.GetInviteMessagesAsync(GetPayload<InviteMessageInput>(request).Type),
+                "vrchatUpdateInviteMessage" => await VrChat.UpdateInviteMessageAsync(GetPayload<InviteMessageUpdateInput>(request)),
                 "vrchatInviteUser" => await VrChat.InviteUserAsync(GetPayload<InviteUserInput>(request)),
                 "vrchatRequestInvite" => await VrChat.RequestInviteAsync(GetPayload<RequestInviteInput>(request)),
                 "vrchatSendChatMessage" => await VrChat.SendChatMessageAsync(GetPayload<ChatMessageInput>(request)),
@@ -313,10 +343,11 @@ internal static class Program
                 "vrchatWorldSearch" => await VrChat.SearchWorldsAsync(GetPayload<WorldSearchInput>(request)),
                 "vrchatFavoriteWorlds" => await VrChat.GetFavoriteWorldsAsync(GetPayload<PageInput>(request)),
                 "vrchatFavoriteWorldGroups" => await VrChat.GetFavoriteWorldGroupsAsync(GetPayload<PageInput>(request)),
-                "vrchatFavoriteWorldAdd" => await VrChat.AddFavoriteWorldAsync(GetPayload<IdInput>(request).Id),
+                "vrchatFavoriteWorldAdd" => await VrChat.AddFavoriteWorldAsync(GetPayload<WorldFavoriteInput>(request)),
                 "vrchatFavoriteWorldRemove" => await VrChat.RemoveFavoriteWorldAsync(GetPayload<IdInput>(request).Id),
                 "vrchatWorldDetail" => await VrChat.GetWorldDetailAsync(GetPayload<IdInput>(request).Id),
-                "vrchatOpenWorld" => OpenVrChatWorld(GetPayload<WorldLaunchInput>(request)),
+                "vrchatWorldVisitHistory" => VrChatLogWatcher.WorldVisitHistory(GetPayload<WorldVisitHistoryInput>(request)),
+                "vrchatOpenWorld" => await VrChat.OpenWorldAsync(GetPayload<WorldLaunchInput>(request)),
                 "vrchatCurrentLocation" => await VrChat.GetCurrentLocationAsync(),
                 "vrchatFavoriteAdd" => await VrChat.AddFavoriteAvatarAsync(GetPayload<VrChatFavoriteChangeInput>(request)),
                 "vrchatFavoriteRemove" => await VrChat.RemoveFavoriteAvatarAsync(GetPayload<VrChatFavoriteChangeInput>(request)),
@@ -362,6 +393,7 @@ internal static class Program
                 else Logs.Warn("Avatars", "Cleared group avatars.");
                 break;
             case "backupRestore": Logs.Warn("Backups", "Backup restored."); break;
+            case "accountBackupCreate": Logs.Info("Backups", "Account backup created."); break;
             case "importLibrary": Logs.Info("Import", "Library import completed."); break;
             case "exportLibrary": Logs.Info("Export", "Library export completed."); break;
             case "exportGroup": Logs.Info("Export", "Group export completed."); break;
@@ -430,18 +462,6 @@ internal static class Program
     {
         Process.Start(new ProcessStartInfo("steam://run/438100//--no-vr") { UseShellExecute = true });
         return new { ok = true };
-    }
-
-    private static object OpenVrChatWorld(WorldLaunchInput input)
-    {
-        var target = !string.IsNullOrWhiteSpace(input.Location)
-            ? input.Location.Trim()
-            : !string.IsNullOrWhiteSpace(input.InstanceId)
-                ? $"{input.WorldId.Trim()}:{input.InstanceId.Trim()}"
-                : input.WorldId.Trim();
-        if (string.IsNullOrWhiteSpace(target)) throw new InvalidOperationException("World not found.");
-        Process.Start(new ProcessStartInfo($"vrchat://launch?id={Uri.EscapeDataString(target)}") { UseShellExecute = true });
-        return new { ok = true, target };
     }
 
     private static object BackgroundFolder(BackgroundInput input)
@@ -721,10 +741,14 @@ internal sealed record AppUpdateInfo(bool UpdateAvailable, string CurrentVersion
 internal sealed record AppUpdateInstallResult(bool Restarting, string Message);
 internal sealed record BackupFileInfo(string Name, string DisplayName, string Path, long Size, DateTime LastModified, string Reason);
 internal sealed record BackupListResult(string Folder, List<BackupFileInfo> Files);
+internal sealed record AccountBackupFileInfo(string Name, string Path, long Size, DateTime LastModified, DateTimeOffset CreatedAt, string Reason, int GroupCount, int AvatarCount);
+internal sealed record AccountBackupListResult(string Folder, int Retention, List<AccountBackupFileInfo> Files);
+internal sealed record AccountBackupResult(string Path, DateTimeOffset CreatedAt, int GroupCount, int AvatarCount, string Reason, int Retention);
 
 internal sealed class AvatarStore
 {
     private readonly AppDataStore _appData = AppDataStore.Shared;
+    private const int AccountBackupRetention = 5;
     private const int DefaultSyncedGroupCount = 1;
     private const int SyncedGroupAvatarLimit = 50;
     private const string RecentAvatarGroupId = "recent_avatars";
@@ -738,6 +762,7 @@ internal sealed class AvatarStore
     private readonly string _dataDirectory = AppPaths.GroupsDirectory;
     private readonly string _exportDirectory = AppPaths.ExportDirectory;
     private readonly string _backupDirectory = AppPaths.BackupsDirectory;
+    private readonly string _accountBackupDirectory = AppPaths.AccountBackupsDirectory;
     private readonly string _libraryPath;
     private readonly string _avatarsJsonPath = AppPaths.AvatarsJsonPath;
     private readonly string _categoriesJsonPath = AppPaths.CategoriesJsonPath;
@@ -748,6 +773,7 @@ internal sealed class AvatarStore
         AppPaths.EnsureInitialized();
         Directory.CreateDirectory(_dataDirectory);
         Directory.CreateDirectory(_exportDirectory);
+        Directory.CreateDirectory(_accountBackupDirectory);
         _libraryPath = Path.Combine(_dataDirectory, "library.json");
         if (!File.Exists(_libraryPath))
         {
@@ -1030,6 +1056,24 @@ internal sealed class AvatarStore
             return WriteGroupBackup(lib, group, "edit");
         }
     }
+    public AccountBackupResult CreateAccountBackup(string reason = "manual")
+    {
+        lock (_gate)
+        {
+            var result = WriteAccountBackup(Load(), reason);
+            PruneAccountBackups();
+            return result;
+        }
+    }
+    public AccountBackupListResult ListAccountBackups()
+    {
+        Directory.CreateDirectory(_accountBackupDirectory);
+        var files = Directory.EnumerateFiles(_accountBackupDirectory, "account-avatars-backup-*.json", SearchOption.TopDirectoryOnly)
+            .Select(AccountBackupFileInfo)
+            .OrderByDescending(x => x.LastModified)
+            .ToList();
+        return new AccountBackupListResult(_accountBackupDirectory, AccountBackupRetention, files);
+    }
     public LibraryData RestoreBackup(BackupRestoreInput input)
     {
         lock (_gate)
@@ -1297,6 +1341,8 @@ internal sealed class AvatarStore
             Save(lib, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { UploadedAvatarGroupId, UpdatedAvatarGroupId });
             AddUpdatedAvatarGroup(lib, storedAvatarRefresh.ChangedAvatars, now);
             NormalizeOrders(lib);
+            _ = WriteAccountBackup(lib, "sync");
+            PruneAccountBackups();
             return new VrChatSyncResult(lib, imported.Groups.Count, imported.Avatars.Count, movedToDeleted.Count, movedToDeleted.Select(x => x.Name).ToList(), movedToDeleted, storedAvatarRefresh.ChangedAvatars.Count, storedAvatarRefresh.ChangedAvatars.Select(x => string.IsNullOrWhiteSpace(x.Name) ? x.AvatarId : x.Name).Where(x => !string.IsNullOrWhiteSpace(x)).ToList(), uploadedAvatars.Count, imported.Groups.Count, syncConflicts.Count, syncConflicts.Take(12).Select(x => x.Detail).Where(x => !string.IsNullOrWhiteSpace(x)).ToList());
         }
     }
@@ -1767,6 +1813,51 @@ internal sealed class AvatarStore
         BackgroundStore.CopyGroupBackgroundToBackup(group.Id, group.Name, path);
         return new ExportResult(path);
     }
+    private AccountBackupResult WriteAccountBackup(LibraryData lib, string reason)
+    {
+        Directory.CreateDirectory(_accountBackupDirectory);
+        var cleanReason = string.IsNullOrWhiteSpace(reason) ? "manual" : SafeFileNameOrDefault(reason, "manual").ToLowerInvariant();
+        var payload = CleanAccountBackup(lib, cleanReason);
+        var timestamp = DateTimeOffset.Now.ToString("yyyyMMdd-HHmmss");
+        var path = UniqueBackupPath(_accountBackupDirectory, $"account-avatars-backup-{timestamp}-{cleanReason}.json");
+        File.WriteAllText(path, JsonSerializer.Serialize(payload, ProgramJson.Options));
+        return new AccountBackupResult(path, payload.CreatedAt, payload.GroupCount, payload.AvatarCount, payload.Reason, AccountBackupRetention);
+    }
+    private void PruneAccountBackups()
+    {
+        Directory.CreateDirectory(_accountBackupDirectory);
+        var files = Directory.EnumerateFiles(_accountBackupDirectory, "account-avatars-backup-*.json", SearchOption.TopDirectoryOnly)
+            .Select(path => new FileInfo(path))
+            .OrderByDescending(x => x.LastWriteTimeUtc)
+            .ThenByDescending(x => x.Name, StringComparer.OrdinalIgnoreCase)
+            .Skip(AccountBackupRetention);
+        foreach (var file in files)
+        {
+            try { file.Delete(); }
+            catch { }
+        }
+    }
+    private static AccountBackupFileInfo AccountBackupFileInfo(string path)
+    {
+        var file = new FileInfo(path);
+        var groupCount = 0;
+        var avatarCount = 0;
+        var reason = "Account backup";
+        DateTimeOffset createdAt = file.LastWriteTime;
+        try
+        {
+            var summary = JsonSerializer.Deserialize<AccountBackupExport>(File.ReadAllText(path), ProgramJson.Options);
+            if (summary is not null)
+            {
+                groupCount = summary.GroupCount;
+                avatarCount = summary.AvatarCount;
+                reason = string.IsNullOrWhiteSpace(summary.Reason) ? reason : summary.Reason;
+                createdAt = summary.CreatedAt;
+            }
+        }
+        catch { }
+        return new AccountBackupFileInfo(file.Name, file.FullName, file.Length, file.LastWriteTime, createdAt, reason, groupCount, avatarCount);
+    }
     private static List<string> OrderedSyncedAvatarIds(LibraryData lib, string groupId, IReadOnlyCollection<string> orderedLocalIds)
     {
         var avatars = lib.Avatars
@@ -1807,6 +1898,27 @@ internal sealed class AvatarStore
         }
     }
     private static CleanLibraryExport CleanExport(LibraryData lib) => new(lib.Groups.OrderBy(x => x.Order).Select(g => GroupSummary(g, lib.Avatars.Where(a => a.GroupId == g.Id).OrderBy(a => a.Order))).ToList());
+    private static AccountBackupExport CleanAccountBackup(LibraryData lib, string reason)
+    {
+        var protectedGroupIds = lib.Groups
+            .Where(IsAccountProtectedGroup)
+            .Select(x => x.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var groups = lib.Groups
+            .Where(x => protectedGroupIds.Contains(x.Id))
+            .OrderBy(x => x.Order)
+            .Select(g => GroupSummary(g, lib.Avatars.Where(a => a.GroupId == g.Id).OrderBy(a => a.Order)))
+            .ToList();
+        var avatarCount = groups.Sum(x => x.Avatars?.Count ?? 0);
+        return new AccountBackupExport(DateTimeOffset.UtcNow, reason, AccountBackupRetention, groups.Count, avatarCount, groups);
+    }
+    private static bool IsAccountProtectedGroup(AvatarGroup group)
+    {
+        return group.Id.StartsWith("vrc_", StringComparison.OrdinalIgnoreCase)
+            || group.Id.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase)
+            || group.Id.Equals(RecentAvatarGroupId, StringComparison.OrdinalIgnoreCase)
+            || group.Id.Equals(DeletedAvatarGroupId, StringComparison.OrdinalIgnoreCase);
+    }
     private static GroupFileSummary GroupSummary(AvatarGroup group, IEnumerable<AvatarFavorite> avatars) => new(group.Id, group.Name, group.Description, group.Icon, group.BackgroundFolder, group.BackgroundEffect, avatars.Select(ExportAvatar).ToList());
     private static AvatarInput ExportAvatar(AvatarFavorite avatar) => new()
     {
@@ -2315,7 +2427,7 @@ internal sealed class AvatarStore
 
 internal sealed class AppSettingsStore
 {
-    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", 6);
+    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", false, false, 7);
     private readonly string _settingsPath = AppPaths.SettingsPath;
     public AppSettings Get()
     {
@@ -2339,7 +2451,7 @@ internal sealed class AppSettingsStore
         var panelOpacity = s.SchemaVersion < 6 && s.PanelOpacity == 0 ? DefaultSettings.PanelOpacity : Math.Clamp(s.PanelOpacity, 0, 100);
         var panelColor = string.IsNullOrWhiteSpace(s.PanelColor) || !System.Text.RegularExpressions.Regex.IsMatch(s.PanelColor, "^#[0-9a-fA-F]{6}$") ? color : s.PanelColor;
         var panelSynced = s.SchemaVersion < 6 || s.PanelColorSynced;
-        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", 6);
+        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", s.HideLockedGroups, s.HideFullGroups, 7);
     }
 }
 
@@ -3319,6 +3431,108 @@ internal static class VrChatLogWatcher
         }
         return new EncounterHistoryResult(items.OrderByDescending(x => x.Timestamp).Take(25).ToList());
     }
+    public static PlayerActivityLogResult PlayerActivityLog(PlayerActivityLogInput input)
+    {
+        if (!Directory.Exists(LogDirectory)) return new PlayerActivityLogResult([]);
+        var limit = Math.Clamp(input.Limit <= 0 ? 250 : input.Limit, 1, 1000);
+        var files = Directory.EnumerateFiles(LogDirectory, "output_log*.txt", SearchOption.TopDirectoryOnly)
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .Take(60)
+            .Reverse()
+            .ToList();
+        var items = new List<PlayerActivityLogItem>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in files)
+        {
+            var room = "";
+            var location = "";
+            foreach (var line in ReadTailLines(file, 9000))
+            {
+                var timestamp = line.Length >= 19 ? line[..19] : "";
+                var entering = line.IndexOf("[Behaviour] Entering Room:", StringComparison.OrdinalIgnoreCase);
+                if (entering >= 0) room = line[(entering + "[Behaviour] Entering Room:".Length)..].Trim();
+                var joining = line.IndexOf("[Behaviour] Joining ", StringComparison.OrdinalIgnoreCase);
+                if (joining >= 0 && !line.Contains("Joining or Creating Room:", StringComparison.OrdinalIgnoreCase)) location = line[(joining + "[Behaviour] Joining ".Length)..].Trim();
+
+                var match = JoinedPlayerRegex.Match(line);
+                var action = "Player joined";
+                if (!match.Success)
+                {
+                    match = LeftPlayerRegex.Match(line);
+                    action = "Player left";
+                }
+                if (!match.Success) continue;
+                var name = match.Groups[1].Value.Trim();
+                var id = match.Groups[2].Value.Trim();
+                var key = $"{timestamp}|{action}|{id}|{room}|{location}";
+                if (!seen.Add(key)) continue;
+                items.Add(new PlayerActivityLogItem(timestamp, action, name, id, room, location, WorldIdFromLocation(location), Path.GetFileName(file)));
+            }
+        }
+        return new PlayerActivityLogResult(items.OrderByDescending(x => x.Timestamp).Take(limit).ToList());
+    }
+    private static string WorldIdFromLocation(string location)
+    {
+        var value = location?.Trim() ?? "";
+        if (!value.StartsWith("wrld_", StringComparison.OrdinalIgnoreCase)) return "";
+        var colon = value.IndexOf(':');
+        return colon > 0 ? value[..colon] : value;
+    }
+    public static WorldVisitHistoryResult WorldVisitHistory(WorldVisitHistoryInput input)
+    {
+        var worldId = input.WorldId?.Trim() ?? "";
+        var instanceId = input.InstanceId?.Trim() ?? "";
+        var targetLocation = input.Location?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(worldId) && targetLocation.StartsWith("wrld_", StringComparison.OrdinalIgnoreCase))
+        {
+            var colon = targetLocation.IndexOf(':');
+            worldId = colon > 0 ? targetLocation[..colon] : targetLocation;
+        }
+        if (string.IsNullOrWhiteSpace(instanceId) && targetLocation.Contains(':'))
+        {
+            instanceId = targetLocation[(targetLocation.IndexOf(':') + 1)..];
+        }
+        if (string.IsNullOrWhiteSpace(worldId) && string.IsNullOrWhiteSpace(instanceId)) return new WorldVisitHistoryResult([]);
+        if (!Directory.Exists(LogDirectory)) return new WorldVisitHistoryResult([]);
+
+        var files = Directory.EnumerateFiles(LogDirectory, "output_log*.txt", SearchOption.TopDirectoryOnly)
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .Take(50)
+            .Reverse()
+            .ToList();
+        var items = new List<WorldVisitHistoryItem>();
+        var currentLocation = "";
+        var room = "";
+        foreach (var file in files)
+        {
+            foreach (var line in ReadTailLines(file, 7000))
+            {
+                var timestamp = line.Length >= 19 ? line[..19] : "";
+                var entering = line.IndexOf("[Behaviour] Entering Room:", StringComparison.OrdinalIgnoreCase);
+                if (entering >= 0) room = line[(entering + "[Behaviour] Entering Room:".Length)..].Trim();
+                var joining = line.IndexOf("[Behaviour] Joining ", StringComparison.OrdinalIgnoreCase);
+                if (joining >= 0 && !line.Contains("Joining or Creating Room:", StringComparison.OrdinalIgnoreCase))
+                {
+                    currentLocation = line[(joining + "[Behaviour] Joining ".Length)..].Trim();
+                    if (LocationMatches(currentLocation, worldId, instanceId))
+                    {
+                        items.Add(new WorldVisitHistoryItem(timestamp, "Joined", room, currentLocation, Path.GetFileName(file)));
+                    }
+                }
+                if ((line.Contains("OnLeftRoom", StringComparison.OrdinalIgnoreCase) || line.Contains("Left Room", StringComparison.OrdinalIgnoreCase)) && LocationMatches(currentLocation, worldId, instanceId))
+                {
+                    items.Add(new WorldVisitHistoryItem(timestamp, "Left", room, currentLocation, Path.GetFileName(file)));
+                }
+            }
+        }
+        return new WorldVisitHistoryResult(items.OrderByDescending(x => x.Timestamp).Take(20).ToList());
+    }
+    private static bool LocationMatches(string location, string worldId, string instanceId)
+    {
+        if (string.IsNullOrWhiteSpace(location)) return false;
+        if (!string.IsNullOrWhiteSpace(instanceId) && location.Contains(instanceId, StringComparison.OrdinalIgnoreCase)) return true;
+        return !string.IsNullOrWhiteSpace(worldId) && location.StartsWith(worldId, StringComparison.OrdinalIgnoreCase);
+    }
 
     private static string LatestLogPath()
     {
@@ -3677,7 +3891,23 @@ internal sealed class VrChatClient
         if (string.IsNullOrWhiteSpace(id)) throw new InvalidOperationException("User not found.");
         using var response = await _client.GetAsync($"users/{WebUtility.UrlEncode(id.Trim())}/avatar");
         var json = await response.Content.ReadAsStringAsync();
-        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat user avatar returned {(int)response.StatusCode}.");
+        if (!response.IsSuccessStatusCode)
+        {
+            if (response.StatusCode == HttpStatusCode.Forbidden || response.StatusCode == HttpStatusCode.NotFound)
+            {
+                return new AvatarInput
+                {
+                    Name = "",
+                    Description = response.StatusCode == HttpStatusCode.NotFound
+                        ? "VRChat no longer exposes this user's current avatar."
+                        : "VRChat did not allow current avatar details to be fetched.",
+                    ReleaseStatus = response.StatusCode == HttpStatusCode.NotFound ? "deleted" : "private",
+                    Source = "vrchat-unavailable",
+                    RawJson = json
+                };
+            }
+            throw new InvalidOperationException($"VRChat user avatar returned {(int)response.StatusCode}.");
+        }
         using var doc = JsonDocument.Parse(json);
         if (doc.RootElement.ValueKind != JsonValueKind.Object) throw new InvalidOperationException("VRChat returned an unexpected user avatar response.");
         return await EnrichAvatarAuthorAsync(ReadAvatar(doc.RootElement));
@@ -3819,6 +4049,49 @@ internal sealed class VrChatClient
         }
         return new VrChatUserGroupsResult(groups.Where(x => !string.IsNullOrWhiteSpace(x.Id) || !string.IsNullOrWhiteSpace(x.Name)).ToList());
     }
+    public async Task<AvatarListResult> GetUserUploadedAvatarsAsync(string id)
+    {
+        id = id.Trim();
+        if (string.IsNullOrWhiteSpace(id)) throw new InvalidOperationException("User not found.");
+        var owner = id.Equals("me", StringComparison.OrdinalIgnoreCase) ? "me" : id;
+        string[] paths = owner.Equals("me", StringComparison.OrdinalIgnoreCase)
+            ? ["avatars?user=me"]
+            :
+            [
+                $"avatars?userId={WebUtility.UrlEncode(owner)}",
+                $"avatars?authorId={WebUtility.UrlEncode(owner)}",
+                $"avatars?user={WebUtility.UrlEncode(owner)}"
+            ];
+        return new AvatarListResult(await ReadPagedAvatarsFromFirstWorkingPathAsync(paths, "VRChat user uploaded avatars"));
+    }
+    public async Task<VrChatWorldSearchResult> GetUserWorldsAsync(string id)
+    {
+        id = id.Trim();
+        if (string.IsNullOrWhiteSpace(id)) throw new InvalidOperationException("User not found.");
+        var owner = id.Equals("me", StringComparison.OrdinalIgnoreCase) ? "me" : id;
+        string[] paths = owner.Equals("me", StringComparison.OrdinalIgnoreCase)
+            ? ["worlds?user=me", "worlds?userId=me"]
+            :
+            [
+                $"worlds?userId={WebUtility.UrlEncode(owner)}",
+                $"worlds?authorId={WebUtility.UrlEncode(owner)}",
+                $"worlds?user={WebUtility.UrlEncode(owner)}"
+            ];
+        return new VrChatWorldSearchResult(await ReadPagedWorldsFromFirstWorkingPathAsync(paths, "VRChat user worlds"), false);
+    }
+    public async Task<VrChatFriendListResult> GetMutualFriendsAsync(string id)
+    {
+        id = id.Trim();
+        if (string.IsNullOrWhiteSpace(id)) throw new InvalidOperationException("User not found.");
+        var paths = new[]
+        {
+            $"users/{WebUtility.UrlEncode(id)}/mutuals/friends",
+            $"users/{WebUtility.UrlEncode(id)}/friends",
+            $"users/{WebUtility.UrlEncode(id)}/friends?mutual=true",
+            $"users/{WebUtility.UrlEncode(id)}/mutualFriends"
+        };
+        return new VrChatFriendListResult(await ReadPagedFriendsFromFirstWorkingPathAsync(paths, "VRChat mutual friends"), false);
+    }
     public async Task<object> SendFriendRequestAsync(string id)
     {
         if (string.IsNullOrWhiteSpace(id)) throw new InvalidOperationException("User not found.");
@@ -3866,6 +4139,18 @@ internal sealed class VrChatClient
             }
         }
         return new InviteMessageListResult(messages.OrderBy(x => x.Slot).ToList());
+    }
+    public async Task<object> UpdateInviteMessageAsync(InviteMessageUpdateInput input)
+    {
+        var user = await GetCurrentUserAsync();
+        var messageType = CleanInviteMessageType(input.Type);
+        var slot = Math.Clamp(input.Slot, 0, 11);
+        var message = (input.Message ?? "").Trim();
+        if (message.Length > 64) message = message[..64];
+        var payload = JsonSerializer.Serialize(new { message });
+        using var response = await _client.PutAsync($"message/{WebUtility.UrlEncode(user.Id)}/{WebUtility.UrlEncode(messageType)}/{slot}", new StringContent(payload, Encoding.UTF8, "application/json"));
+        await ReadActionResponseAsync(response, "Update invite message failed.");
+        return new { type = messageType, slot, message };
     }
     public async Task<object> InviteUserAsync(InviteUserInput input)
     {
@@ -3962,7 +4247,16 @@ internal sealed class VrChatClient
     {
         if (string.IsNullOrWhiteSpace(notificationId)) throw new InvalidOperationException("Notification not found.");
         using var response = await _client.PutAsync($"auth/user/notifications/{WebUtility.UrlEncode(notificationId)}/hide", null);
-        return await ReadActionResponseAsync(response, "Decline notification failed.");
+        var json = await response.Content.ReadAsStringAsync();
+        if (response.IsSuccessStatusCode) return ParseActionResponse(json);
+
+        using var deleteResponse = await _client.DeleteAsync($"auth/user/notifications/{WebUtility.UrlEncode(notificationId)}");
+        var deleteJson = await deleteResponse.Content.ReadAsStringAsync();
+        if (deleteResponse.IsSuccessStatusCode || deleteResponse.StatusCode == HttpStatusCode.NotFound) return ParseActionResponse(deleteJson);
+
+        var message = TryReadErrorMessage(deleteJson);
+        if (string.IsNullOrWhiteSpace(message)) message = TryReadErrorMessage(json);
+        throw new InvalidOperationException(string.IsNullOrWhiteSpace(message) ? $"Decline notification failed. VRChat returned {(int)deleteResponse.StatusCode}." : message);
     }
     private static string CleanInviteMessageType(string? type)
     {
@@ -3997,7 +4291,15 @@ internal sealed class VrChatClient
         var path = $"{pathBase}?{string.Join("&", parameters)}";
         using var response = await _client.GetAsync(path);
         var json = await response.Content.ReadAsStringAsync();
-        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat worlds returned {(int)response.StatusCode}.");
+        if (response.StatusCode == HttpStatusCode.Forbidden)
+        {
+            await Task.Delay(650);
+            using var retry = await _client.GetAsync(path);
+            json = await retry.Content.ReadAsStringAsync();
+            if (retry.StatusCode == HttpStatusCode.Forbidden) return new VrChatWorldSearchResult([], false);
+            if (!retry.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat worlds returned {(int)retry.StatusCode}.");
+        }
+        else if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat worlds returned {(int)response.StatusCode}.");
         using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
         var worlds = new List<VrChatWorldSummary>();
         if (doc.RootElement.ValueKind == JsonValueKind.Array)
@@ -4014,12 +4316,15 @@ internal sealed class VrChatClient
         var limit = Math.Clamp(input.Limit <= 0 ? 100 : input.Limit, 1, 100);
         var offset = Math.Max(0, input.Offset);
         var worlds = new List<VrChatWorldSummary>();
-        using var response = await _client.GetAsync($"favorites?type=world&n={limit}&offset={offset}");
-        var json = await response.Content.ReadAsStringAsync();
-        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat favorite worlds returned {(int)response.StatusCode}.");
-        using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
-        if (doc.RootElement.ValueKind == JsonValueKind.Array)
+        while (true)
         {
+            using var response = await _client.GetAsync($"favorites?type=world&n={limit}&offset={offset}");
+            var json = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat favorite worlds returned {(int)response.StatusCode}.");
+            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) break;
+            var count = doc.RootElement.GetArrayLength();
+            if (count == 0) break;
             var favorites = doc.RootElement.EnumerateArray()
                 .Select(item => new
                 {
@@ -4048,42 +4353,62 @@ internal sealed class VrChatClient
                 }
             });
             worlds.AddRange(await Task.WhenAll(tasks));
+            if (count < limit) break;
+            offset += count;
+            if (input.Offset > 0) break;
         }
-        return new VrChatWorldSearchResult(worlds, worlds.Count == limit);
+        return new VrChatWorldSearchResult(worlds, input.Offset > 0 && worlds.Count == limit);
     }
     public async Task<VrChatFavoriteGroupsResult> GetFavoriteWorldGroupsAsync(PageInput input)
     {
         var limit = Math.Clamp(input.Limit <= 0 ? 100 : input.Limit, 1, 100);
-        var offset = Math.Max(0, input.Offset);
+        var startOffset = Math.Max(0, input.Offset);
+        var currentUser = await GetCurrentUserAsync();
         var groups = new List<VrChatFavoriteGroupSummary>();
-        using var response = await _client.GetAsync($"favorite/groups?n={limit}&offset={offset}");
-        var json = await response.Content.ReadAsStringAsync();
-        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat favorite groups returned {(int)response.StatusCode}.");
-        using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
-        if (doc.RootElement.ValueKind == JsonValueKind.Array)
+        var offset = startOffset;
+        while (true)
         {
+            var owner = string.IsNullOrWhiteSpace(currentUser.Id) ? "" : $"&ownerId={WebUtility.UrlEncode(currentUser.Id)}";
+            using var response = await _client.GetAsync($"favorite/groups?n={limit}&offset={offset}{owner}");
+            var json = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat favorite groups returned {(int)response.StatusCode}.");
+            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) break;
+            var count = doc.RootElement.GetArrayLength();
+            if (count == 0) break;
             foreach (var item in doc.RootElement.EnumerateArray())
             {
                 var type = ReadString(item, "type") ?? "";
-                if (!type.Equals("world", StringComparison.OrdinalIgnoreCase)) continue;
+                var name = ReadString(item, "name") ?? "";
+                if (!type.Contains("world", StringComparison.OrdinalIgnoreCase) && !name.StartsWith("worlds", StringComparison.OrdinalIgnoreCase)) continue;
                 groups.Add(new VrChatFavoriteGroupSummary(
                     ReadString(item, "id") ?? "",
-                    ReadString(item, "name") ?? "",
+                    name,
                     ReadString(item, "displayName") ?? ReadString(item, "name") ?? "Favorite Worlds",
                     type,
                     ReadString(item, "visibility") ?? "",
                     JsonSerializer.Serialize(item, ProgramJson.Options)));
             }
+            if (count < limit) break;
+            offset += count;
+            if (input.Offset > 0) break;
         }
-        return new VrChatFavoriteGroupsResult(groups, groups.Count == limit);
+        return new VrChatFavoriteGroupsResult(groups, input.Offset > 0 && groups.Count == limit);
     }
-    public async Task<object> AddFavoriteWorldAsync(string worldId)
+    public async Task<object> AddFavoriteWorldAsync(WorldFavoriteInput input)
     {
+        var worldId = input.Id?.Trim() ?? "";
         if (string.IsNullOrWhiteSpace(worldId)) throw new InvalidOperationException("World not found.");
-        var payload = JsonSerializer.Serialize(new { type = "world", favoriteId = worldId, tags = Array.Empty<string>() });
+        var tag = input.Tag?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(tag))
+        {
+            var group = (await GetFavoriteWorldGroupsAsync(new PageInput(100, 0))).Groups.FirstOrDefault();
+            tag = !string.IsNullOrWhiteSpace(group?.Name) ? group.Name : "worlds1";
+        }
+        var payload = JsonSerializer.Serialize(new { type = "world", favoriteId = worldId, tags = new[] { tag } });
         using var response = await SendFavoriteRequestWithRateLimitRetryAsync(() => new HttpRequestMessage(HttpMethod.Post, "favorites") { Content = new StringContent(payload, Encoding.UTF8, "application/json") });
         if (!response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.Conflict) throw new InvalidOperationException($"VRChat favorite world returned {(int)response.StatusCode}.");
-        return new { worldId };
+        return new { worldId, tag };
     }
     public async Task<object> RemoveFavoriteWorldAsync(string worldId)
     {
@@ -4114,37 +4439,148 @@ internal sealed class VrChatClient
         if (string.IsNullOrWhiteSpace(id)) throw new InvalidOperationException("World not found.");
         return await GetWorldAsync(id);
     }
+    public async Task<object> OpenWorldAsync(WorldLaunchInput input)
+    {
+        var target = !string.IsNullOrWhiteSpace(input.Location)
+            ? input.Location.Trim()
+            : !string.IsNullOrWhiteSpace(input.InstanceId)
+                ? $"{input.WorldId.Trim()}:{input.InstanceId.Trim()}"
+                : input.WorldId.Trim();
+        if (string.IsNullOrWhiteSpace(target)) throw new InvalidOperationException("World instance not found.");
+
+        var instanceId = ParseInstanceId(target, input.WorldId);
+        var currentUser = await GetCurrentUserAsync();
+        if (string.IsNullOrWhiteSpace(currentUser.Id)) throw new InvalidOperationException("VRChat user not found.");
+        if (string.IsNullOrWhiteSpace(instanceId)) throw new InvalidOperationException("Choose a specific instance to join.");
+
+        var payload = JsonSerializer.Serialize(new { instanceId, messageSlot = 0 });
+        using var response = await _client.PostAsync($"invite/{WebUtility.UrlEncode(currentUser.Id)}", new StringContent(payload, Encoding.UTF8, "application/json"));
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync();
+            var message = TryReadErrorMessage(body);
+            throw new InvalidOperationException(string.IsNullOrWhiteSpace(message) ? $"World invite returned {(int)response.StatusCode}." : message);
+        }
+        return new { ok = true, target, instanceId, method = "self-invite" };
+    }
     public async Task<List<AvatarInput>> GetUploadedAvatarsAsync()
     {
-        var avatars = new List<AvatarInput>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var offset = 0;
-        const int pageSize = 100;
-        while (true)
-        {
-            using var response = await _client.GetAsync($"avatars?user=me&n={pageSize}&offset={offset}&sort=updated&order=descending");
-            var json = await response.Content.ReadAsStringAsync();
-            if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat uploaded avatars returned {(int)response.StatusCode}.");
-            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
-            if (doc.RootElement.ValueKind != JsonValueKind.Array) break;
-
-            var count = doc.RootElement.GetArrayLength();
-            if (count == 0) break;
-            foreach (var item in doc.RootElement.EnumerateArray())
-            {
-                var avatar = ReadAvatar(item);
-                if (!string.IsNullOrWhiteSpace(avatar.AvatarId) && seen.Add(avatar.AvatarId) && !IsUnavailableAvatarStatus(avatar.ReleaseStatus))
-                {
-                    avatar.Source = "vrchat-uploaded";
-                    avatars.Add(avatar);
-                }
-            }
-
-            if (count < pageSize) break;
-            offset += count;
-        }
-        return avatars;
+        return (await GetUserUploadedAvatarsAsync("me")).Avatars;
     }
+    private async Task<List<AvatarInput>> ReadPagedAvatarsFromFirstWorkingPathAsync(IEnumerable<string> pathBases, string label)
+    {
+        foreach (var pathBase in pathBases)
+        {
+            var avatars = new List<AvatarInput>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var offset = 0;
+            const int pageSize = 100;
+            var worked = false;
+            while (true)
+            {
+                var separator = pathBase.Contains('?') ? "&" : "?";
+                using var response = await _client.GetAsync($"{pathBase}{separator}n={pageSize}&offset={offset}&sort=updated&order=descending");
+                var json = await response.Content.ReadAsStringAsync();
+                if (!response.IsSuccessStatusCode)
+                {
+                    if (!worked && IsEndpointProbeFailure(response.StatusCode)) break;
+                    throw new InvalidOperationException($"{label} returned {(int)response.StatusCode}.");
+                }
+                worked = true;
+                using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
+                if (doc.RootElement.ValueKind != JsonValueKind.Array) break;
+                var count = doc.RootElement.GetArrayLength();
+                if (count == 0) break;
+                foreach (var item in doc.RootElement.EnumerateArray())
+                {
+                    var avatar = ReadAvatar(item);
+                    if (!string.IsNullOrWhiteSpace(avatar.AvatarId) && seen.Add(avatar.AvatarId) && !IsUnavailableAvatarStatus(avatar.ReleaseStatus))
+                    {
+                        avatar.Source = "vrchat-uploaded";
+                        avatars.Add(avatar);
+                    }
+                }
+                if (count < pageSize) break;
+                offset += count;
+            }
+            if (worked) return avatars;
+        }
+        return [];
+    }
+    private async Task<List<VrChatWorldSummary>> ReadPagedWorldsFromFirstWorkingPathAsync(IEnumerable<string> pathBases, string label)
+    {
+        foreach (var pathBase in pathBases)
+        {
+            var worlds = new List<VrChatWorldSummary>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var offset = 0;
+            const int pageSize = 100;
+            var worked = false;
+            while (true)
+            {
+                var separator = pathBase.Contains('?') ? "&" : "?";
+                using var response = await _client.GetAsync($"{pathBase}{separator}n={pageSize}&offset={offset}&sort=updated&order=descending");
+                var json = await response.Content.ReadAsStringAsync();
+                if (!response.IsSuccessStatusCode)
+                {
+                    if (!worked && IsEndpointProbeFailure(response.StatusCode)) break;
+                    throw new InvalidOperationException($"{label} returned {(int)response.StatusCode}.");
+                }
+                worked = true;
+                using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
+                if (doc.RootElement.ValueKind != JsonValueKind.Array) break;
+                var count = doc.RootElement.GetArrayLength();
+                if (count == 0) break;
+                foreach (var item in doc.RootElement.EnumerateArray())
+                {
+                    var world = ReadWorld(item);
+                    if (!string.IsNullOrWhiteSpace(world.Id) && seen.Add(world.Id)) worlds.Add(world);
+                }
+                if (count < pageSize) break;
+                offset += count;
+            }
+            if (worked) return worlds;
+        }
+        return [];
+    }
+    private async Task<List<VrChatFriendSummary>> ReadPagedFriendsFromFirstWorkingPathAsync(IEnumerable<string> pathBases, string label)
+    {
+        foreach (var pathBase in pathBases)
+        {
+            var friends = new List<VrChatFriendSummary>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var offset = 0;
+            const int pageSize = 100;
+            var worked = false;
+            while (true)
+            {
+                var separator = pathBase.Contains('?') ? "&" : "?";
+                using var response = await _client.GetAsync($"{pathBase}{separator}n={pageSize}&offset={offset}");
+                var json = await response.Content.ReadAsStringAsync();
+                if (!response.IsSuccessStatusCode)
+                {
+                    if (!worked && IsEndpointProbeFailure(response.StatusCode)) break;
+                    throw new InvalidOperationException($"{label} returned {(int)response.StatusCode}.");
+                }
+                worked = true;
+                using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
+                if (doc.RootElement.ValueKind != JsonValueKind.Array) break;
+                var count = doc.RootElement.GetArrayLength();
+                if (count == 0) break;
+                foreach (var item in doc.RootElement.EnumerateArray())
+                {
+                    var friend = ReadFriend(item);
+                    if (!string.IsNullOrWhiteSpace(friend.Id) && seen.Add(friend.Id)) friends.Add(friend);
+                }
+                if (count < pageSize) break;
+                offset += count;
+            }
+            if (worked) return friends;
+        }
+        return [];
+    }
+    private static bool IsEndpointProbeFailure(HttpStatusCode status) =>
+        status is HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.NotFound;
     public async Task<object> SelectAvatarAsync(string id)
     {
         using var response = await _client.PutAsync($"avatars/{WebUtility.UrlEncode(id)}/select", null);
@@ -4450,7 +4886,46 @@ internal sealed class VrChatClient
         var json = await response.Content.ReadAsStringAsync();
         if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat world returned {(int)response.StatusCode}.");
         using var doc = JsonDocument.Parse(json);
-        return ReadWorld(doc.RootElement);
+        var world = ReadWorld(doc.RootElement);
+        return await EnrichWorldInstanceGroupsAsync(world);
+    }
+    private async Task<VrChatWorldSummary> EnrichWorldInstanceGroupsAsync(VrChatWorldSummary world)
+    {
+        var instances = world.Instances;
+        if (instances is null || instances.Count == 0) return world;
+        var groupIds = instances.Select(x => x.GroupId).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).Take(10).ToList();
+        if (groupIds.Count == 0) return world;
+        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        using var gate = new SemaphoreSlim(3);
+        var tasks = groupIds.Select(async id =>
+        {
+            await gate.WaitAsync();
+            try
+            {
+                var name = await GetGroupNameAsync(id);
+                if (!string.IsNullOrWhiteSpace(name)) names[id] = name;
+            }
+            catch { }
+            finally
+            {
+                gate.Release();
+            }
+        });
+        await Task.WhenAll(tasks);
+        if (names.Count == 0) return world;
+        return world with
+        {
+            Instances = instances.Select(instance => !string.IsNullOrWhiteSpace(instance.GroupId) && names.TryGetValue(instance.GroupId, out var name)
+                ? instance with { GroupName = name }
+                : instance).ToList()
+        };
+    }
+    private async Task<string> GetGroupNameAsync(string groupId)
+    {
+        using var response = await _client.GetAsync($"groups/{WebUtility.UrlEncode(groupId)}");
+        if (!response.IsSuccessStatusCode) return "";
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        return ReadString(doc.RootElement, "name") ?? ReadString(doc.RootElement, "shortCode") ?? "";
     }
     private static async Task<object> ReadActionResponseAsync(HttpResponseMessage response, string fallback)
     {
@@ -4460,6 +4935,10 @@ internal sealed class VrChatClient
             var message = TryReadErrorMessage(json);
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(message) ? $"{fallback} VRChat returned {(int)response.StatusCode}." : message);
         }
+        return ParseActionResponse(json);
+    }
+    private static object ParseActionResponse(string json)
+    {
         if (string.IsNullOrWhiteSpace(json)) return new { ok = true };
         try
         {
@@ -4470,6 +4949,19 @@ internal sealed class VrChatClient
         {
             return new { ok = true, body = json };
         }
+    }
+    private static string ParseInstanceId(string target, string worldId)
+    {
+        var value = target?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(value)) return "";
+        var colon = value.IndexOf(':');
+        if (colon >= 0 && colon + 1 < value.Length) return value[(colon + 1)..].Trim();
+        var trimmedWorld = worldId?.Trim() ?? "";
+        if (!string.IsNullOrWhiteSpace(trimmedWorld) && value.StartsWith(trimmedWorld, StringComparison.OrdinalIgnoreCase))
+        {
+            return value[trimmedWorld.Length..].TrimStart(':');
+        }
+        return value.StartsWith("wrld_", StringComparison.OrdinalIgnoreCase) ? "" : value;
     }
     private static string TryReadErrorMessage(string json)
     {
@@ -4517,17 +5009,24 @@ internal sealed class VrChatClient
                 worldId = colon > 0 ? location[..colon] : location;
         }
         var state = ReadString(root, "state") ?? "";
-        var hasJoinableOrPrivateLocation = !string.IsNullOrWhiteSpace(location)
-            && !location.Equals("offline", StringComparison.OrdinalIgnoreCase);
+        var hasJoinableLocation = !string.IsNullOrWhiteSpace(location)
+            && location.StartsWith("wrld_", StringComparison.OrdinalIgnoreCase);
         var fieldOnline = state.Equals("online", StringComparison.OrdinalIgnoreCase)
-            || state.Equals("active", StringComparison.OrdinalIgnoreCase)
-            || hasJoinableOrPrivateLocation;
+            || (endpointOnline == true && state.Equals("active", StringComparison.OrdinalIgnoreCase))
+            || hasJoinableLocation;
         var online = fieldOnline || endpointOnline == true;
-        var presence = state.Equals("online", StringComparison.OrdinalIgnoreCase) || (endpointOnline == true && hasJoinableOrPrivateLocation)
+        var presence = state.Equals("online", StringComparison.OrdinalIgnoreCase) || (endpointOnline == true && hasJoinableLocation)
             ? "online"
-            : state.Equals("active", StringComparison.OrdinalIgnoreCase) || hasJoinableOrPrivateLocation || endpointOnline == true
+            : (endpointOnline == true && state.Equals("active", StringComparison.OrdinalIgnoreCase)) || hasJoinableLocation || endpointOnline == true
                 ? "active"
                 : "offline";
+        var presenceSource = endpointOnline == true
+            ? "friend-list-online"
+            : endpointOnline == false
+                ? "friend-list-offline"
+                : hasJoinableLocation
+                    ? "detail-location"
+                    : "";
         var representedGroup = root.TryGetProperty("representedGroup", out var groupElement) && groupElement.ValueKind == JsonValueKind.Object ? groupElement : default;
         var hasRepresentedGroup = representedGroup.ValueKind == JsonValueKind.Object;
         var currentAvatarElement = root.TryGetProperty("currentAvatar", out var avatarElement) && avatarElement.ValueKind == JsonValueKind.Object ? avatarElement : default;
@@ -4550,9 +5049,10 @@ internal sealed class VrChatClient
             ReadString(root, "developerType") ?? "",
             tags,
             JsonSerializer.Serialize(root, ProgramJson.Options),
-            ReadProfileImage(root) ?? "",
+            ReadString(root, "profileImageUrl") ?? ReadString(root, "profilePicture") ?? "",
             ReadString(root, "userIcon") ?? "",
-            ReadProfileImage(root) ?? "",
+            ReadString(root, "profilePicOverride") ?? "",
+            ReadString(root, "profilePicOverrideThumbnail") ?? "",
             hasCurrentAvatarObject ? ReadString(currentAvatarElement, "id") ?? "" : ReadString(root, "currentAvatar") ?? ReadString(root, "currentAvatarId") ?? "",
             hasCurrentAvatarObject ? ReadString(currentAvatarElement, "name") ?? "" : ReadString(root, "currentAvatarName") ?? "",
             hasCurrentAvatarObject ? ReadString(currentAvatarElement, "imageUrl") ?? "" : ReadString(root, "currentAvatarImageUrl") ?? "",
@@ -4568,7 +5068,8 @@ internal sealed class VrChatClient
             hasRepresentedGroup ? ReadString(representedGroup, "iconUrl") ?? ReadString(representedGroup, "bannerUrl") ?? "" : "",
             ReadStringArray(root, "bioLinks"),
             endpointOnline.HasValue || ReadBool(root, "isFriend") || tags.Contains("friend", StringComparison.OrdinalIgnoreCase),
-            ReadBool(root, "isBlocked") || ReadBool(root, "blocked") || tags.Contains("blocked", StringComparison.OrdinalIgnoreCase));
+            ReadBool(root, "isBlocked") || ReadBool(root, "blocked") || tags.Contains("blocked", StringComparison.OrdinalIgnoreCase),
+            presenceSource);
     }
     private static string ReadHomeWorldId(JsonElement root)
     {
@@ -4584,8 +5085,11 @@ internal sealed class VrChatClient
         }
         return "";
     }
-    private static VrChatWorldSummary ReadWorld(JsonElement root) => new(
-        ReadString(root, "id") ?? "",
+    private static VrChatWorldSummary ReadWorld(JsonElement root)
+    {
+        var worldId = ReadString(root, "id") ?? "";
+        return new VrChatWorldSummary(
+        worldId,
         ReadString(root, "name") ?? "",
         ReadString(root, "authorName") ?? "",
         ReadString(root, "description") ?? "",
@@ -4600,16 +5104,86 @@ internal sealed class VrChatClient
         ReadString(root, "created_at") ?? ReadString(root, "createdAt") ?? "",
         ReadString(root, "updated_at") ?? ReadString(root, "updatedAt") ?? "",
         JsonSerializer.Serialize(root, ProgramJson.Options),
-        "");
+        "",
+        ReadWorldInstances(root, worldId));
+    }
+    private static List<VrChatWorldInstanceSummary> ReadWorldInstances(JsonElement root, string worldId)
+    {
+        var instances = new List<VrChatWorldInstanceSummary>();
+        if (!root.TryGetProperty("instances", out var items) || items.ValueKind != JsonValueKind.Array) return instances;
+        foreach (var item in items.EnumerateArray())
+        {
+            var id = "";
+            var occupants = 0;
+            if (item.ValueKind == JsonValueKind.Array)
+            {
+                var parts = item.EnumerateArray().ToList();
+                if (parts.Count > 0 && parts[0].ValueKind is JsonValueKind.String or JsonValueKind.Number) id = parts[0].ToString();
+                if (parts.Count > 1) occupants = parts[1].ValueKind == JsonValueKind.Number && parts[1].TryGetInt32(out var count) ? count : 0;
+            }
+            else if (item.ValueKind == JsonValueKind.Object)
+            {
+                id = ReadString(item, "id") ?? ReadString(item, "instanceId") ?? "";
+                occupants = ReadInt(item, "occupants") != 0 ? ReadInt(item, "occupants") : ReadInt(item, "users");
+            }
+            if (string.IsNullOrWhiteSpace(id)) continue;
+            var meta = DescribeWorldInstance(id);
+            instances.Add(new VrChatWorldInstanceSummary(id, string.IsNullOrWhiteSpace(worldId) ? id : $"{worldId}:{id}", occupants, meta.Type, meta.Region, meta.IsLocked, meta.IsAgeRestricted, meta.GroupId, ""));
+        }
+        return instances.OrderByDescending(instance => instance.Occupants).ThenBy(instance => instance.Id, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+    private static (string Type, string Region, bool IsLocked, bool IsAgeRestricted, string GroupId) DescribeWorldInstance(string id)
+    {
+        var value = id ?? "";
+        var lower = value.ToLowerInvariant();
+        var type = lower.Contains("group(") ? "Group"
+            : lower.Contains("friends(") ? "Friends"
+            : lower.Contains("hidden(") ? "Friends+"
+            : lower.Contains("private(") ? "Invite"
+            : "Public";
+        var region = "";
+        var match = System.Text.RegularExpressions.Regex.Match(value, @"~region\((?<region>[^)]+)\)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (match.Success) region = match.Groups["region"].Value.ToUpperInvariant();
+        var groupId = "";
+        var groupMatch = System.Text.RegularExpressions.Regex.Match(value, @"~group\((?<groupId>grp_[^)]+)\)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (groupMatch.Success) groupId = groupMatch.Groups["groupId"].Value;
+        var locked = type != "Public" || lower.Contains("canrequestinvite") || lower.Contains("nonce(");
+        var ageRestricted = lower.Contains("age") || lower.Contains("18+");
+        return (type, region, locked, ageRestricted, groupId);
+    }
     private static VrChatNotificationSummary ReadNotification(JsonElement root) => new(
         ReadString(root, "id") ?? ReadString(root, "notificationId") ?? "",
         ReadString(root, "type") ?? ReadString(root, "notificationType") ?? "",
         ReadString(root, "senderUserId") ?? ReadString(root, "senderId") ?? ReadString(root, "userId") ?? "",
         ReadString(root, "senderUsername") ?? ReadString(root, "senderName") ?? ReadString(root, "displayName") ?? "",
-        ReadString(root, "message") ?? ReadString(root, "details") ?? ReadString(root, "inviteMessage") ?? ReadString(root, "requestMessage") ?? "",
+        ReadNotificationMessage(root),
         ReadString(root, "created_at") ?? ReadString(root, "createdAt") ?? "",
         ReadBool(root, "seen") || ReadBool(root, "isSeen"),
         JsonSerializer.Serialize(root, ProgramJson.Options));
+    private static string ReadNotificationMessage(JsonElement root)
+    {
+        foreach (var name in new[] { "message", "details", "inviteMessage", "requestMessage", "responseMessage", "data", "content" })
+        {
+            if (!root.TryGetProperty(name, out var value)) continue;
+            var text = ReadNotificationValue(value);
+            if (!string.IsNullOrWhiteSpace(text)) return text;
+        }
+        return "";
+    }
+    private static string ReadNotificationValue(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.String) return value.GetString()?.Trim() ?? "";
+        if (value.ValueKind == JsonValueKind.Number || value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False) return value.ToString();
+        if (value.ValueKind == JsonValueKind.Array) return string.Join(" ", value.EnumerateArray().Select(ReadNotificationValue).Where(x => !string.IsNullOrWhiteSpace(x))).Trim();
+        if (value.ValueKind != JsonValueKind.Object) return "";
+        foreach (var name in new[] { "message", "text", "body", "content", "details", "inviteMessage", "requestMessage", "responseMessage" })
+        {
+            if (!value.TryGetProperty(name, out var child)) continue;
+            var text = ReadNotificationValue(child);
+            if (!string.IsNullOrWhiteSpace(text)) return text;
+        }
+        return "";
+    }
     private static bool IsUnavailableAvatarStatus(string? status)
     {
         var value = status?.Trim() ?? "";
@@ -7006,6 +7580,7 @@ internal sealed record SyncedAvatarOrderInput(string GroupId, List<string> Avata
 internal sealed record SyncedAvatarOrderProgress(string GroupId, string Stage, string Message, int Completed, int Total);
 internal sealed record SyncedAvatarOrderApplyResult(LibraryData Library, int Removed, int Added, string Tag, string BackupPath);
 internal sealed record CleanLibraryExport(List<GroupFileSummary> Groups);
+internal sealed record AccountBackupExport(DateTimeOffset CreatedAt, string Reason, int Retention, int GroupCount, int AvatarCount, List<GroupFileSummary> Groups);
 internal sealed record GroupFileSummary(string Id, string Name, string Description, string Icon, string BackgroundFolder = "", string BackgroundEffect = "global", List<AvatarInput>? Avatars = null);
 internal sealed record BackgroundInput(string GroupId = "");
 internal sealed record BackgroundImportResult(int Imported, int Skipped, string Folder);
@@ -7027,8 +7602,9 @@ internal sealed record DiagnosticItem(string Name, string Status, string Detail,
 internal sealed record DiagnosticsResult(List<DiagnosticItem> Items);
 internal sealed record ExportResult(string Path);
 internal sealed record GroupClearResult(LibraryData Library, int Removed, string BackupPath);
-internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", int SchemaVersion = 6);
+internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", bool HideLockedGroups = false, bool HideFullGroups = false, int SchemaVersion = 7);
 internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx");
+internal sealed record AvatarListResult(List<AvatarInput> Avatars);
 internal sealed record AvatarImageResolveInput(string AvatarId = "", string ImageUrl = "", string Name = "", string UserId = "", string DisplayName = "");
 internal sealed record AvatarDatabaseSearchResult(List<AvatarInput> Results, int Page, bool HasMore, DateTimeOffset CachedAt, int Total = 0);
 internal sealed record AvatarDatabaseCountResult(string Query, int Total, DateTimeOffset CachedAt);
@@ -7043,10 +7619,14 @@ internal sealed record LoginInput(string Username, string Password);
 internal sealed record TwoFactorInput(string Code, string Method);
 internal sealed record CurrentAvatarInput(string GroupId);
 internal sealed record VrChatFavoriteChangeInput(string AvatarId, string GroupId);
+internal sealed record WorldFavoriteInput(string Id = "", string Tag = "");
 internal sealed record PageInput(int Limit = 100, int Offset = 0);
 internal sealed record WorldSearchInput(string Query = "", int Limit = 50, int Offset = 0, string Mode = "", string Sort = "popularity", string Order = "descending", string ReleaseStatus = "");
 internal sealed record WorldLaunchInput(string WorldId = "", string InstanceId = "", string Location = "");
+internal sealed record WorldVisitHistoryInput(string WorldId = "", string InstanceId = "", string Location = "");
+internal sealed record PlayerActivityLogInput(int Limit = 250);
 internal sealed record InviteMessageInput(string Type = "message");
+internal sealed record InviteMessageUpdateInput(string Type = "message", int Slot = 0, string Message = "");
 internal sealed record InviteMessageSummary(int Slot, string Message, string MessageType, bool CanBeUpdated, int RemainingCooldownMinutes);
 internal sealed record InviteMessageListResult(List<InviteMessageSummary> Messages);
 internal sealed record InviteUserInput(string UserId = "", string InstanceId = "", int MessageSlot = 0);
@@ -7057,11 +7637,12 @@ internal sealed record UserModerationInput(string Id = "", string Type = "block"
 internal sealed record EncounterHistoryInput(string UserId = "", string DisplayName = "");
 internal sealed record VrChatSessionState(bool IsLoggedIn, bool RequiresTwoFactor, string[] TwoFactorMethods, VrChatUserSummary? User);
 internal sealed record VrChatUserSummary(string Id, string DisplayName, string CurrentAvatarId, string CurrentAvatarImageUrl, string CurrentAvatarThumbnailImageUrl, string Status = "", string StatusDescription = "", string Location = "", string WorldId = "", string InstanceId = "", string HomeWorldId = "", string Bio = "", string DateJoined = "", string LastLogin = "", string DeveloperType = "", string Tags = "", string RawJson = "");
-internal sealed record VrChatFriendSummary(string Id, string DisplayName, string Status, string StatusDescription, string Location, string WorldId, string ImageUrl, bool IsOnline = false, string Presence = "offline", string State = "", string Bio = "", string DateJoined = "", string LastLogin = "", string DeveloperType = "", string Tags = "", string RawJson = "", string ProfileImageUrl = "", string UserIcon = "", string ProfilePicOverride = "", string CurrentAvatarId = "", string CurrentAvatarName = "", string CurrentAvatarImageUrl = "", string CurrentAvatarThumbnailImageUrl = "", string AllowAvatarCopying = "", string Pronouns = "", string AgeVerificationStatus = "", string LastPlatform = "", string RepresentedGroupId = "", string RepresentedGroupName = "", string RepresentedGroupShortCode = "", string RepresentedGroupMemberCount = "", string RepresentedGroupImageUrl = "", string BioLinks = "", bool IsFriend = false, bool IsBlocked = false, string FavoriteTags = "");
+internal sealed record VrChatFriendSummary(string Id, string DisplayName, string Status, string StatusDescription, string Location, string WorldId, string ImageUrl, bool IsOnline = false, string Presence = "offline", string State = "", string Bio = "", string DateJoined = "", string LastLogin = "", string DeveloperType = "", string Tags = "", string RawJson = "", string ProfileImageUrl = "", string UserIcon = "", string ProfilePicOverride = "", string ProfilePicOverrideThumbnail = "", string CurrentAvatarId = "", string CurrentAvatarName = "", string CurrentAvatarImageUrl = "", string CurrentAvatarThumbnailImageUrl = "", string AllowAvatarCopying = "", string Pronouns = "", string AgeVerificationStatus = "", string LastPlatform = "", string RepresentedGroupId = "", string RepresentedGroupName = "", string RepresentedGroupShortCode = "", string RepresentedGroupMemberCount = "", string RepresentedGroupImageUrl = "", string BioLinks = "", bool IsFriend = false, bool IsBlocked = false, string FavoriteTags = "", string PresenceSource = "");
 internal sealed record VrChatFriendListResult(List<VrChatFriendSummary> Friends, bool HasMore);
 internal sealed record VrChatUserGroupSummary(string Id, string Name, string ShortCode, string MemberCount, string Description, string ImageUrl);
 internal sealed record VrChatUserGroupsResult(List<VrChatUserGroupSummary> Groups);
-internal sealed record VrChatWorldSummary(string Id, string Name, string AuthorName, string Description, string ImageUrl, int Occupants, int Favorites, string ReleaseStatus, int Capacity = 0, int Visits = 0, int PublicOccupants = 0, int PrivateOccupants = 0, string CreatedAt = "", string UpdatedAt = "", string RawJson = "", string FavoriteTags = "");
+internal sealed record VrChatWorldSummary(string Id, string Name, string AuthorName, string Description, string ImageUrl, int Occupants, int Favorites, string ReleaseStatus, int Capacity = 0, int Visits = 0, int PublicOccupants = 0, int PrivateOccupants = 0, string CreatedAt = "", string UpdatedAt = "", string RawJson = "", string FavoriteTags = "", List<VrChatWorldInstanceSummary>? Instances = null);
+internal sealed record VrChatWorldInstanceSummary(string Id, string Location, int Occupants, string Type, string Region, bool IsLocked, bool IsAgeRestricted, string GroupId = "", string GroupName = "");
 internal sealed record VrChatWorldSearchResult(List<VrChatWorldSummary> Worlds, bool HasMore);
 internal sealed record VrChatFavoriteGroupSummary(string Id, string Name, string DisplayName, string Type, string Visibility = "", string RawJson = "");
 internal sealed record VrChatFavoriteGroupsResult(List<VrChatFavoriteGroupSummary> Groups, bool HasMore);
@@ -7071,6 +7652,10 @@ internal sealed record VrChatNotificationSummary(string Id, string Type, string 
 internal sealed record VrChatNotificationListResult(List<VrChatNotificationSummary> Notifications, bool HasMore);
 internal sealed record EncounterHistoryItem(string Timestamp, string Action, string DisplayName, string UserId, string WorldName, string Location, string LogFile);
 internal sealed record EncounterHistoryResult(List<EncounterHistoryItem> Items);
+internal sealed record PlayerActivityLogItem(string Timestamp, string Action, string DisplayName, string UserId, string WorldName, string Location, string WorldId, string LogFile);
+internal sealed record PlayerActivityLogResult(List<PlayerActivityLogItem> Items);
+internal sealed record WorldVisitHistoryItem(string Timestamp, string Action, string WorldName, string Location, string LogFile);
+internal sealed record WorldVisitHistoryResult(List<WorldVisitHistoryItem> Items);
 internal sealed record VrChatRemoteGroup(string Tag, string DisplayName, int SortOrder);
 internal sealed record VrChatGroupedAvatar(string GroupTag, AvatarInput Avatar);
 internal sealed record VrChatFavoriteRef(string AvatarId, string RemoteFavoriteId);

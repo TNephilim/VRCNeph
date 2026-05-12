@@ -68,10 +68,31 @@
       <nav class="page-tabs" aria-label="Pages">
         <button id="favoritesTabBtn" class="active" type="button">Avatar Favorites</button>
         <button id="databaseTabBtn" type="button">Database Search</button>
-        <button id="friendsTabBtn" type="button">Friends</button>
         <button id="worldsTabBtn" type="button">Worlds</button>
+        <button id="friendsTabBtn" type="button">Friends</button>
         <button id="messagesTabBtn" type="button">Messages<span id="messagesTabBadge" class="tab-badge" hidden></span></button>
-        <button id="notificationsTabBtn" type="button">Notifications<span id="notificationsTabBadge" class="tab-badge" hidden></span></button>
+        <button id="notificationsTabBtn" type="button">Activity</button>
+        <div class="notification-popover-wrap">
+          <button id="notificationBellBtn" class="notification-bell-button icon-button" type="button" title="Notifications" aria-label="Notifications" aria-expanded="false"><svg class="bell-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path></svg><span id="notificationsTabBadge" class="tab-badge" hidden></span></button>
+          <section id="notificationPopover" class="notification-popover" hidden>
+            <header><h3>Notifications</h3><button id="refreshNotificationsBtn" type="button">Refresh</button></header>
+            <div class="notification-popover-tabs">
+              <div class="sort-control notification-filter-control">
+                <button id="notificationFilterMenuBtn" type="button">All</button>
+                <div id="notificationFilterMenu" class="sort-menu" hidden></div>
+                <select id="notificationFilterSelect" hidden>
+                  <option value="all">All</option>
+                  <option value="invite">Invites</option>
+                  <option value="request">Requests</option>
+                  <option value="friend">Friends</option>
+                  <option value="group">Groups</option>
+                </select>
+              </div>
+            </div>
+            <p id="notificationStatus" class="notification-popover-status">VRChat notifications.</p>
+            <div id="notificationsList" class="notification-popover-list"></div>
+          </section>
+        </div>
       </nav>
       <section id="favoritesPage" class="workspace-page">
         <header class="toolbar">
@@ -213,30 +234,15 @@
       </section>
       <section id="notificationsPage" class="workspace-page social-page" hidden>
         <header class="toolbar">
-          <div class="toolbar-title"><h2>Notifications</h2><p id="notificationStatus">VRChat notifications and live activity.</p></div>
+          <div class="toolbar-title"><h2>Activity</h2><p>Player join and leave logs.</p></div>
           <div class="toolbar-actions">
-            <div class="sort-control notification-filter-control">
-              <button id="notificationFilterMenuBtn" type="button">All</button>
-              <div id="notificationFilterMenu" class="sort-menu" hidden></div>
-              <select id="notificationFilterSelect" hidden>
-                <option value="all">All</option>
-                <option value="invite">Invites</option>
-                <option value="request">Requests</option>
-                <option value="friend">Friends</option>
-                <option value="group">Groups</option>
-                <option value="system">System</option>
-              </select>
-            </div>
-            <button id="refreshNotificationsBtn" type="button" class="primary">Refresh</button>
+            <button id="clearPlayerActivityBtn" type="button" class="danger">Clear</button>
+            <button id="refreshPlayerActivityBtn" type="button" class="primary">Refresh</button>
           </div>
         </header>
-        <section class="notifications-layout">
-          <section class="social-panel notifications-panel">
-            <header><h3>Notifications</h3></header>
-            <div id="notificationsList" class="social-list"></div>
-          </section>
+        <section class="notifications-layout activity-only-layout">
           <section class="social-panel activity-panel">
-            <header><h3>Activity</h3></header>
+            <header><h3 id="activityPanelTitle">Player Logs</h3></header>
             <div id="activityList" class="social-list"></div>
           </section>
         </section>
@@ -260,9 +266,22 @@
         <button id="messagePopupCloseBtn" type="button" class="icon-button">x</button>
         <button id="messagePopupOpenBtn" type="button" class="message-popup-body"></button>
       </aside>
+      <div id="messagePopupDock" class="message-popup-dock" hidden></div>
       <aside id="notificationDetailsPanel" class="notification-details-panel" hidden>
         <header><h3 id="notificationDetailsTitle">Notification Details</h3><button id="closeNotificationDetailsBtn" type="button" class="icon-button">x</button></header>
         <div id="notificationDetailsContent" class="social-list"></div>
+      </aside>
+      <aside id="inlineMessagePanel" class="notification-details-panel inline-message-panel" hidden>
+        <header id="inlineMessageHeader"><h3>Messages</h3><button id="closeInlineMessageBtn" type="button" class="icon-button">x</button></header>
+        <div id="inlineMessageContent" class="message-thread"></div>
+        <span class="inline-message-resize-handle resize-n" data-inline-message-resize="n" aria-hidden="true"></span>
+        <span class="inline-message-resize-handle resize-e" data-inline-message-resize="e" aria-hidden="true"></span>
+        <span class="inline-message-resize-handle resize-s" data-inline-message-resize="s" aria-hidden="true"></span>
+        <span class="inline-message-resize-handle resize-w" data-inline-message-resize="w" aria-hidden="true"></span>
+        <span class="inline-message-resize-handle resize-ne" data-inline-message-resize="ne" aria-hidden="true"></span>
+        <span class="inline-message-resize-handle resize-nw" data-inline-message-resize="nw" aria-hidden="true"></span>
+        <span class="inline-message-resize-handle resize-se" data-inline-message-resize="se" aria-hidden="true"></span>
+        <span class="inline-message-resize-handle resize-sw" data-inline-message-resize="sw" aria-hidden="true"></span>
       </aside>
       <aside id="avatarDetailsPanel" class="avatar-details-panel" hidden>
         <form id="avatarDetailsForm" class="dialog-form wide">
@@ -372,11 +391,10 @@
     </section>
     <section id="settingsLogsPanel" class="settings-panel" hidden>
       <div class="settings-panel-actions"><div class="sort-control settings-log-filter-control"><button id="settingsLogFilterMenuBtn" type="button">All Logs</button><div id="settingsLogFilterMenu" class="sort-menu" hidden></div><select id="settingsLogFilterSelect" hidden><option value="all">All Logs</option><option value="area:App">App</option><option value="area:VRChat">VRChat</option><option value="area:Groups">Groups</option><option value="area:Avatars">Avatars</option><option value="area:Backups">Backups</option><option value="area:Import">Import</option><option value="area:Export">Export</option><option value="area:Settings">Settings</option><option value="area:Database">Database</option><option value="area:Updater">Updater</option><option value="level:Warning">Warnings</option><option value="level:Error">Errors</option></select></div><button id="refreshLogsBtn" type="button">Refresh</button><button id="copyLogsBtn" type="button">Copy Logs</button><button id="openLogsFolderBtn" type="button">Open Logs Folder</button><button id="clearLogsBtn" type="button" class="danger">Clear Logs</button></div>
-      <div id="settingsSyncHealth" class="sync-health-card"></div>
       <div id="settingsLogsList" class="settings-list logs-list"></div>
     </section>
     <section id="settingsBackupsPanel" class="settings-panel" hidden>
-      <div class="settings-panel-actions"><button id="openBackupsFolderBtn" type="button">Open Backups Folder</button></div>
+      <div class="settings-panel-actions"><button id="createAccountBackupBtn" type="button">Create Account Backup</button><button id="openAccountBackupsFolderBtn" type="button">Open Account Backups Folder</button><button id="openBackupsFolderBtn" type="button">Open Group Backups Folder</button></div>
       <div id="settingsBackupsList" class="settings-list"></div>
     </section>
     <menu><button id="checkUpdateBtn" type="button">Check Updates</button><button id="cancelSettingsBtn" type="button">Cancel</button><button id="applySettingsBtn" type="button" class="primary">Apply</button></menu>
@@ -401,8 +419,22 @@
   <dialog id="inviteMessageDialog" class="confirm-dialog"><form method="dialog" class="dialog-form">
     <header><h3 id="inviteMessageTitle">Send Invite</h3><button type="button" class="icon-button" data-close="inviteMessageDialog">x</button></header>
     <p id="inviteMessageText" class="dialog-note"></p>
-    <label>VRChat message<select id="inviteMessageSlotInput"></select></label>
+    <div class="invite-message-picker">
+      <div class="sort-control invite-message-slot-control">
+        <button id="inviteMessageSlotBtn" type="button">Loading messages...</button>
+        <div id="inviteMessageSlotMenu" class="sort-menu" hidden></div>
+        <select id="inviteMessageSlotInput" hidden></select>
+      </div>
+      <label>Edit selected message<textarea id="inviteMessageEditInput" maxlength="64" rows="3" placeholder="VRChat message text"></textarea></label>
+      <div class="invite-message-edit-actions"><span id="inviteMessageEditCount">0/64</span><button id="saveInviteMessageBtn" type="button">Save Message</button></div>
+    </div>
     <menu><button id="cancelInviteMessageBtn" type="button">Cancel</button><button id="confirmInviteMessageBtn" type="button" class="primary">Send</button></menu>
+  </form></dialog>
+  <dialog id="favoriteWorldDialog" class="confirm-dialog"><form method="dialog" class="dialog-form">
+    <header><h3>Favorite World</h3><button type="button" class="icon-button" data-close="favoriteWorldDialog">x</button></header>
+    <p id="favoriteWorldText" class="dialog-note"></p>
+    <label>Favorite group<select id="favoriteWorldGroupInput"></select></label>
+    <menu><button id="cancelFavoriteWorldBtn" type="button">Cancel</button><button id="confirmFavoriteWorldBtn" type="button" class="primary">Favorite</button></menu>
   </form></dialog>
 
   <dialog id="imagePreviewDialog" class="image-preview-dialog"><button type="button" class="icon-button image-preview-close" data-close="imagePreviewDialog">x</button><img id="imagePreviewFull" alt=""></dialog>
@@ -410,6 +442,7 @@
   <dialog id="confirmDeleteDialog" class="confirm-dialog"><form method="dialog" class="dialog-form"><header><h3 id="confirmDialogTitle">Delete</h3><button type="button" class="icon-button" data-close="confirmDeleteDialog">x</button></header><p id="confirmDeleteMessage" class="confirm-message"></p><menu><button id="cancelConfirmBtn" type="button">Cancel</button><button id="runConfirmBtn" type="button" class="danger">Delete</button></menu></form></dialog>
   <dialog id="startupSummaryDialog" class="confirm-dialog startup-summary-dialog"><form method="dialog" class="dialog-form"><header><h3>Startup Summary</h3><button type="button" class="icon-button" data-close="startupSummaryDialog">x</button></header><div id="startupSummaryList" class="startup-summary-list"></div><menu><button id="startupSummaryActionBtn" type="button" class="primary" hidden>Update</button><button type="button" data-close="startupSummaryDialog" class="primary">OK</button></menu></form></dialog>
   <dialog id="avatarUpdateHistoryDialog" class="confirm-dialog"><form method="dialog" class="dialog-form"><header><h3>Update History</h3><button type="button" class="icon-button" data-close="avatarUpdateHistoryDialog">x</button></header><div id="avatarUpdateHistoryList" class="update-history-list"></div><menu><button type="button" data-close="avatarUpdateHistoryDialog" class="primary">OK</button></menu></form></dialog>
+  <dialog id="playerHistoryDialog" class="wide-dialog player-history-dialog"><form method="dialog" class="dialog-form wide"><header><h3 id="playerHistoryTitle">Player History</h3><button type="button" class="icon-button" data-close="playerHistoryDialog">x</button></header><div id="playerHistoryContent" class="player-history-content"></div><menu><button type="button" data-close="playerHistoryDialog" class="primary">OK</button></menu></form></dialog>
   <dialog id="importDialog" class="wide-dialog"><form method="dialog" class="dialog-form wide"><header><h3>Import Library</h3><button type="button" class="icon-button" data-close="importDialog">x</button></header><label id="importDropZone" class="import-drop-zone">JSON<textarea id="importJsonInput" rows="12" spellcheck="false"></textarea></label><menu><button type="button" data-close="importDialog">Cancel</button><button id="runImportBtn" class="primary">Import</button></menu></form></dialog>
   <div id="toast" role="status" aria-live="polite"></div>
   <div id="zoomIndicator" class="zoom-indicator" role="status" aria-live="polite" hidden>100%</div>
