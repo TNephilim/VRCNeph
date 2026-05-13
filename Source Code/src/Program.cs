@@ -323,6 +323,7 @@ internal static class Program
                 "vrchatFavoriteFriends" => await VrChat.GetFavoriteFriendsAsync(GetPayload<PageInput>(request)),
                 "vrchatUserCurrentAvatar" => await VrChat.GetUserCurrentAvatarAsync(GetPayload<IdInput>(request).Id),
                 "vrchatFriendGroups" => await VrChat.GetUserGroupsAsync(GetPayload<IdInput>(request).Id),
+                "vrchatGroupDetail" => await VrChat.GetGroupDetailAsync(GetPayload<IdInput>(request).Id),
                 "vrchatUserUploadedAvatars" => await VrChat.GetUserUploadedAvatarsAsync(GetPayload<IdInput>(request).Id),
                 "vrchatUserWorlds" => await VrChat.GetUserWorldsAsync(GetPayload<IdInput>(request).Id),
                 "vrchatMutualFriends" => await VrChat.GetMutualFriendsAsync(GetPayload<IdInput>(request).Id),
@@ -4049,6 +4050,28 @@ internal sealed class VrChatClient
         }
         return new VrChatUserGroupsResult(groups.Where(x => !string.IsNullOrWhiteSpace(x.Id) || !string.IsNullOrWhiteSpace(x.Name)).ToList());
     }
+    public async Task<VrChatGroupDetail> GetGroupDetailAsync(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id)) throw new InvalidOperationException("Group not found.");
+        using var response = await _client.GetAsync($"groups/{WebUtility.UrlEncode(id.Trim())}");
+        var json = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat group returned {(int)response.StatusCode}.");
+        using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
+        var root = doc.RootElement;
+        return new VrChatGroupDetail(
+            ReadString(root, "id") ?? ReadString(root, "groupId") ?? id,
+            ReadString(root, "name") ?? "",
+            ReadString(root, "shortCode") ?? "",
+            ReadString(root, "memberCount") ?? ReadValueString(root, "memberCount"),
+            ReadString(root, "description") ?? "",
+            ReadString(root, "iconUrl") ?? "",
+            ReadString(root, "bannerUrl") ?? "",
+            ReadString(root, "ownerId") ?? "",
+            ReadString(root, "privacy") ?? "",
+            ReadString(root, "joinState") ?? "",
+            ReadString(root, "created_at") ?? ReadString(root, "createdAt") ?? "",
+            json);
+    }
     public async Task<AvatarListResult> GetUserUploadedAvatarsAsync(string id)
     {
         id = id.Trim();
@@ -5105,7 +5128,8 @@ internal sealed class VrChatClient
         ReadString(root, "updated_at") ?? ReadString(root, "updatedAt") ?? "",
         JsonSerializer.Serialize(root, ProgramJson.Options),
         "",
-        ReadWorldInstances(root, worldId));
+        ReadWorldInstances(root, worldId),
+        ReadString(root, "authorId") ?? "");
     }
     private static List<VrChatWorldInstanceSummary> ReadWorldInstances(JsonElement root, string worldId)
     {
@@ -7641,7 +7665,8 @@ internal sealed record VrChatFriendSummary(string Id, string DisplayName, string
 internal sealed record VrChatFriendListResult(List<VrChatFriendSummary> Friends, bool HasMore);
 internal sealed record VrChatUserGroupSummary(string Id, string Name, string ShortCode, string MemberCount, string Description, string ImageUrl);
 internal sealed record VrChatUserGroupsResult(List<VrChatUserGroupSummary> Groups);
-internal sealed record VrChatWorldSummary(string Id, string Name, string AuthorName, string Description, string ImageUrl, int Occupants, int Favorites, string ReleaseStatus, int Capacity = 0, int Visits = 0, int PublicOccupants = 0, int PrivateOccupants = 0, string CreatedAt = "", string UpdatedAt = "", string RawJson = "", string FavoriteTags = "", List<VrChatWorldInstanceSummary>? Instances = null);
+internal sealed record VrChatGroupDetail(string Id, string Name, string ShortCode, string MemberCount, string Description, string IconUrl, string BannerUrl, string OwnerId, string Privacy, string JoinState, string CreatedAt, string RawJson);
+internal sealed record VrChatWorldSummary(string Id, string Name, string AuthorName, string Description, string ImageUrl, int Occupants, int Favorites, string ReleaseStatus, int Capacity = 0, int Visits = 0, int PublicOccupants = 0, int PrivateOccupants = 0, string CreatedAt = "", string UpdatedAt = "", string RawJson = "", string FavoriteTags = "", List<VrChatWorldInstanceSummary>? Instances = null, string AuthorId = "");
 internal sealed record VrChatWorldInstanceSummary(string Id, string Location, int Occupants, string Type, string Region, bool IsLocked, bool IsAgeRestricted, string GroupId = "", string GroupName = "");
 internal sealed record VrChatWorldSearchResult(List<VrChatWorldSummary> Worlds, bool HasMore);
 internal sealed record VrChatFavoriteGroupSummary(string Id, string Name, string DisplayName, string Type, string Visibility = "", string RawJson = "");

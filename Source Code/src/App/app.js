@@ -95,7 +95,7 @@ const state = {
   worldDeletedWorlds: [],
   worldUpdatedWorlds: [],
   vrchat: { isLoggedIn: false, requiresTwoFactor: false, twoFactorMethods: [], user: null },
-  social: { loaded: false, friendsLoaded: false, worldsLoaded: false, busy: false, friends: [], favoriteFriends: [], worlds: [], worldSections: [], favoriteWorlds: [], favoriteWorldGroups: [], selectedWorldGroup: "", location: null, selectedType: "", selectedItem: null, selectToken: 0, friendTab: "info", sidebarTab: "friends" },
+  social: { loaded: false, friendsLoaded: false, worldsLoaded: false, busy: false, friends: [], favoriteFriends: [], worlds: [], worldSections: [], favoriteWorlds: [], favoriteWorldGroups: [], selectedWorldGroup: "", location: null, selectedType: "", selectedItem: null, selectToken: 0, friendTab: "info", worldTab: "info", sidebarTab: "friends" },
   worldInstanceFilter: { enabled: false, minPlayers: 1, hideLocked: false, hideFull: false },
   notifications: { loaded: false, busy: false, items: [], filter: "all" },
   playerActivityLog: { loaded: false, busy: false, items: [], page: 0, pageSize: 50 },
@@ -125,6 +125,7 @@ const INLINE_MESSAGE_RESIZE_MIN = { width: 360, height: 360, margin: 12 };
 const BASE_DEVICE_PIXEL_RATIO = window.devicePixelRatio || 1;
 let updatePromptShown = false;
 let confirmDialogQueue = Promise.resolve();
+let userDetailPopupClosedAt = 0;
 const startupSummary = { items: [], pasStatus: null, shown: false };
 const AVATAR_DETAIL_FIELD_IDS = [
   "avatarIdInput",
@@ -189,6 +190,7 @@ async function copyTextToClipboard(text) {
 }
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[c]));
 const escapeAttr = (value) => escapeHtml(value).replace(/`/g, "&#096;");
+const classToken = (value) => String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
 
 async function loadLibrary() {
   state.library = await api("list");
@@ -496,7 +498,9 @@ function renderPageTabs() {
   $("messagesTabBtn").classList.toggle("active", state.activePage === "messages");
   $("notificationsTabBtn").classList.toggle("active", state.activePage === "notifications");
   updateTabBadge("messagesTabBadge", unreadMessageCount());
-  updateTabBadge("notificationsTabBadge", unreadImportantNotificationCount());
+  const notificationCount = unreadNotificationCount();
+  updateTabBadge("activityTabBadge", notificationCount);
+  updateTabBadge("notificationsTabBadge", notificationCount);
 }
 function isNotificationPopoverOpen() {
   return !$("notificationPopover")?.hidden;
@@ -517,7 +521,7 @@ function toggleNotificationPopover(event) {
   $("notificationBellBtn").setAttribute("aria-expanded", opening ? "true" : "false");
   if (!opening) return;
   if (!state.notifications.loaded) void loadNotifications();
-  markImportantNotificationsSeen();
+  markNotificationsSeen();
   renderNotificationsPage();
 }
 function updateTabBadge(id, count) {
@@ -529,8 +533,8 @@ function updateTabBadge(id, count) {
 function unreadMessageCount() {
   return (state.messageHistory || []).filter((item) => item.direction !== "outgoing" && !item.seen && !isLocalConversationMessage(item)).length;
 }
-function unreadImportantNotificationCount() {
-  return (state.notifications.items || []).filter((item) => !item.seen && isImportantNotification(item)).length;
+function unreadNotificationCount() {
+  return (state.notifications.items || []).filter((item) => !item.seen).length;
 }
 function isImportantNotification(item) {
   const bucket = notificationBucket(item);
@@ -549,10 +553,10 @@ function markMessagesSeen() {
   if (changed) persistMessageHistory();
   renderPageTabs();
 }
-function markImportantNotificationsSeen() {
+function markNotificationsSeen() {
   let changed = false;
   state.notifications.items = (state.notifications.items || []).map((item) => {
-    if (item.seen || !isImportantNotification(item)) return item;
+    if (item.seen) return item;
     changed = true;
     return { ...item, seen: true };
   });
@@ -1381,6 +1385,7 @@ function openAvatarDialog(avatar = null) {
   applyAvatarDetailReadOnlyMode(isAdd ? "add" : "view");
   $("deleteAvatarBtn").hidden = !isExisting || isUpdatedGroup(avatar?.groupId) || isUploadedGroup(avatar?.groupId);
   $("avatarDetailsPanel").hidden = false;
+  requestAnimationFrame(updateAvatarDetailSearchHighlightsFromForm);
   document.body.classList.add("details-open");
   requestAnimationFrame(applyGridSize);
   if (avatar?.avatarId) hydrateAvatarDetailsFromVrChat(avatar.avatarId);
@@ -1420,6 +1425,7 @@ function setAvatarForm(avatar) {
   updateAvatarAuthorAction();
   updateAvatarPreview();
   updateAvatarDetailBadges();
+  updateAvatarDetailSearchHighlights(avatar);
   maybeResolveAvatarDetailAuthor({ ...avatar, avatarId });
 }
 function mergeAvatarDetailMetadata(details) {
@@ -1442,6 +1448,7 @@ function mergeAvatarDetailMetadata(details) {
   updateAvatarPreview();
   updateAvatarDetailBadges();
   updateAvatarDetailUpdated(state.avatarDialogHistory);
+  updateAvatarDetailSearchHighlightsFromForm();
 }
 function avatarPublicId(avatar = {}) {
   const avatarId = String(avatar.avatarId || "").trim();
@@ -1521,6 +1528,7 @@ async function maybeResolveAvatarDetailAuthor(avatar = {}) {
   }
   if (resolved.authorId && !$("authorIdInput").value.trim()) $("authorIdInput").value = resolved.authorId;
   updateAvatarAuthorAction();
+  updateAvatarDetailSearchHighlightsFromForm();
 }
 async function hydrateAvatarDetailsFromVrChat(avatarId) {
   const expected = String(avatarId || "").trim();
@@ -1547,6 +1555,51 @@ function updateAvatarDetailBadges() {
   const platforms = databasePlatformBadgeLabels($("platformsInput").value).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("");
   const version = $("versionInput").value ? `<span class="badge">v${escapeHtml($("versionInput").value)}</span>` : "";
   $("avatarDetailBadges").innerHTML = `${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${platforms}${version}`;
+}
+function updateAvatarDetailSearchHighlightsFromForm() {
+  updateAvatarDetailSearchHighlights({
+    ...(state.avatarDialogHistory || {}),
+    avatarId: $("avatarIdInput").value,
+    id: $("avatarIdInput").value,
+    name: $("avatarNameInput").value,
+    authorName: $("authorNameInput").value,
+    authorId: $("authorIdInput").value,
+    tags: $("tagsInput").value,
+    sourceUrl: $("sourceUrlInput").value,
+    description: $("descriptionInput").value,
+    notes: $("notesInput").value,
+    rawJson: $("rawJsonInput").value
+  });
+}
+function updateAvatarDetailSearchHighlights(avatar = {}) {
+  clearAvatarDetailSearchHighlights();
+  const match = avatarDatabaseMatchDetail(avatar);
+  if (!match?.fieldId) return;
+  const control = $(match.fieldId);
+  if (!control) return;
+  if (control.tagName === "BUTTON") {
+    control.classList.add("avatar-detail-matched-button");
+    return;
+  }
+  const host = control.closest("label");
+  if (!host) return;
+  host.classList.add("avatar-detail-match-field");
+  control.classList.add("avatar-detail-matched-control");
+  const overlay = document.createElement("div");
+  overlay.className = `avatar-detail-field-highlight ${control.tagName === "TEXTAREA" ? "textarea" : "input"}`;
+  overlay.title = `${match.label}: ${match.text}`;
+  overlay.innerHTML = databaseHighlightText(databaseMatchExcerpt(match.text, match.terms), match.terms);
+  host.appendChild(overlay);
+  requestAnimationFrame(() => {
+    overlay.style.top = `${control.offsetTop}px`;
+    overlay.style.height = `${control.offsetHeight}px`;
+  });
+}
+function clearAvatarDetailSearchHighlights() {
+  $("avatarDetailsForm")?.querySelectorAll(".avatar-detail-field-highlight").forEach((node) => node.remove());
+  $("avatarDetailsForm")?.querySelectorAll(".avatar-detail-match-field").forEach((node) => node.classList.remove("avatar-detail-match-field"));
+  $("avatarDetailsForm")?.querySelectorAll(".avatar-detail-matched-control").forEach((node) => node.classList.remove("avatar-detail-matched-control"));
+  $("avatarDetailsForm")?.querySelectorAll(".avatar-detail-matched-button").forEach((node) => node.classList.remove("avatar-detail-matched-button"));
 }
 
 function formatAvatarUpdatedAt(avatar) {
@@ -1617,9 +1670,10 @@ function showAvatarAuthorSearchOptions(event) {
   const authorId = $("authorIdInput").value.trim();
   if (!authorName && !authorId) return;
   const rect = event.currentTarget.getBoundingClientRect();
-  showContextMenu(rect.left, rect.bottom + 6, [
-    { label: "Search Database by Author", action: () => searchDatabaseByAuthor(authorName || authorId, authorId) }
-  ]);
+  const actions = [];
+  if (avatarAuthorLooksLikeId(authorId)) actions.push({ label: "View User Details", action: () => openUserDetails(authorId, authorName) });
+  actions.push({ label: "Search Database by Author", action: () => searchDatabaseByAuthor(authorName || authorId, authorId) });
+  showContextMenu(rect.left, rect.bottom + 6, actions);
 }
 
 function clearAvatarDatabaseSearch() {
@@ -2314,6 +2368,68 @@ function normalizeDuplicateImageUrl(value) {
 }
 function mergeTextList(a, b, splitter) {
   return [...new Set([...(String(a || "").split(splitter)), ...(String(b || "").split(splitter))].map((x) => x.trim()).filter(Boolean))].join(", ");
+}
+function databaseHighlightTerms(query) {
+  const text = String(query || "").trim();
+  if (!text) return [];
+  const terms = [text];
+  if (/\s/.test(text)) terms.push(...text.split(/\s+/).filter((term) => term.length >= 3));
+  return [...new Set(terms.map((term) => term.trim()).filter(Boolean))].sort((a, b) => b.length - a.length);
+}
+function databaseTextMatchesTerms(value, terms) {
+  const text = String(value || "").toLowerCase();
+  return Boolean(text && terms.some((term) => text.includes(String(term || "").toLowerCase())));
+}
+function databaseRegexEscape(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function databaseMatchExcerpt(value, terms) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= 120) return text;
+  const lower = text.toLowerCase();
+  const indexes = terms.map((term) => lower.indexOf(String(term || "").toLowerCase())).filter((index) => index >= 0);
+  const first = indexes.length ? Math.min(...indexes) : 0;
+  const start = Math.max(0, first - 36);
+  const end = Math.min(text.length, first + 84);
+  return `${start > 0 ? "..." : ""}${text.slice(start, end).trim()}${end < text.length ? "..." : ""}`;
+}
+function databaseHighlightText(value, terms) {
+  const text = String(value || "");
+  const valid = [...new Set((terms || []).map((term) => String(term || "").trim()).filter(Boolean))].sort((a, b) => b.length - a.length).filter((term) => databaseTextMatchesTerms(text, [term]));
+  if (!valid.length) return escapeHtml(text);
+  const pattern = new RegExp(`(${valid.map(databaseRegexEscape).join("|")})`, "ig");
+  let cursor = 0;
+  let html = "";
+  for (const match of text.matchAll(pattern)) {
+    html += escapeHtml(text.slice(cursor, match.index));
+    html += `<mark>${escapeHtml(match[0])}</mark>`;
+    cursor = match.index + match[0].length;
+  }
+  return html + escapeHtml(text.slice(cursor));
+}
+function avatarDatabaseMatchDetail(avatar) {
+  const query = String(state.avatarDatabaseQuery || "").trim();
+  if (!query || state.avatarDatabaseMode === "random" || state.activePage !== "database") return null;
+  const title = avatar.name || avatar.avatarId || avatar.id || "";
+  if (databaseTextMatchesTerms(title, [query])) return null;
+  const terms = databaseHighlightTerms(query);
+  if (!terms.length) return null;
+  const fields = [
+    ["Description", "descriptionInput", avatar.description],
+    ["Tags", "tagsInput", mergeTextList(avatar.tags, avatar.platforms, /[,|;]/)],
+    ["Notes", "notesInput", avatar.notes],
+    ["Author", "avatarDetailAuthorBtn", [displayAvatarAuthorName(avatar), avatar.authorId].filter(Boolean).join(" - ")],
+    ["Avatar ID", "avatarIdInput", avatar.avatarId || avatar.id]
+  ];
+  for (const [label, fieldId, value] of fields) {
+    const text = String(value || "").trim();
+    if (!text) continue;
+    const exact = databaseTextMatchesTerms(text, [query]);
+    if (!exact && !databaseTextMatchesTerms(text, terms)) continue;
+    const hitTerms = exact ? [query] : terms;
+    return { label, fieldId, text, terms: hitTerms };
+  }
+  return null;
 }
 function renderAvatarDatabaseResults() {
   const allResults = sortedAvatarDatabaseResults();
@@ -4364,7 +4480,7 @@ async function loadVrchatSocial({ worldsOnly = false } = {}) {
   if (!state.vrchat?.isLoggedIn) {
     clearTimeout(state.friendDetailLoadTimer);
     state.friendDetailLoadTimer = null;
-    state.social = { ...state.social, loaded: false, friendsLoaded: false, worldsLoaded: false, busy: false, friends: [], favoriteFriends: [], worlds: [], worldSections: [], favoriteWorlds: [], favoriteWorldGroups: [], selectedWorldGroup: "", location: null, selectedType: "", selectedItem: null, friendTab: "info" };
+    state.social = { ...state.social, loaded: false, friendsLoaded: false, worldsLoaded: false, busy: false, friends: [], favoriteFriends: [], worlds: [], worldSections: [], favoriteWorlds: [], favoriteWorldGroups: [], selectedWorldGroup: "", location: null, selectedType: "", selectedItem: null, friendTab: "info", worldTab: "info" };
     setSocialHeaderStatus("friends", "Log in to load VRChat friends.");
     setSocialHeaderStatus("worlds", "Log in to search VRChat worlds.");
     renderVrchatSocial();
@@ -4528,7 +4644,7 @@ function applyPipelineNotificationEvent(type, content = {}) {
   const title = content.title || content.type || type;
   const sender = content.senderUsername || content.senderName || content.sender?.displayName || "";
   const message = notificationMessageText(content);
-  const item = normalizeNotification({ ...content, type, title, senderUsername: sender, message, seen: isNotificationPopoverOpen() && isImportantNotification({ type, id: content.id || content.notificationId || "", seen: false }) });
+  const item = normalizeNotification({ ...content, type, title, senderUsername: sender, message, seen: isNotificationPopoverOpen() });
   recordPlayerName(item.senderUserId, item.senderUsername, item.createdAt, "Notification");
   state.notifications.items = dedupeNotifications([item, ...state.notifications.items]);
   state.notifications.loaded = true;
@@ -4656,9 +4772,7 @@ async function loadNotifications() {
   try {
     const result = await api("vrchatNotifications", { limit: 100, offset: 0 }, 45000);
     state.notifications.items = dedupeNotifications((result.notifications || []).map(normalizeNotification));
-    if (isNotificationPopoverOpen()) {
-      state.notifications.items = state.notifications.items.map((item) => isImportantNotification(item) ? { ...item, seen: true } : item);
-    }
+    if (isNotificationPopoverOpen()) state.notifications.items = state.notifications.items.map((item) => ({ ...item, seen: true }));
     state.notifications.items.forEach((item) => addMessageNotification(item));
     state.notifications.loaded = true;
     $("notificationStatus").textContent = `${state.notifications.items.length} notifications loaded.`;
@@ -4773,10 +4887,11 @@ function playerNameHistoryItems(userId, currentName = "") {
   return Array.from(byName.values()).sort((a, b) => timestampMs(b.lastSeen) - timestampMs(a.lastSeen));
 }
 function playerNameHistoryHtml(friend, { limit = 6 } = {}) {
-  const names = playerNameHistoryItems(friend?.id, friend?.displayName).slice(0, limit);
+  const allNames = playerNameHistoryItems(friend?.id, friend?.displayName);
+  const names = allNames.slice(0, limit);
   if (!names.length) return `<p class="friend-info-empty">No previous names recorded yet.</p>`;
   const attrs = `data-player-name-history="${escapeAttr(friend?.id || "")}" data-player-name="${escapeAttr(friend?.displayName || "")}"`;
-  return `<div class="encounter-list name-history-list">${names.map((item, index) => `<button type="button" class="encounter-item name-history-item" ${attrs}><strong>${escapeHtml(item.name)}${index === 0 ? ` <em>current/latest</em>` : ""}</strong><span>${escapeHtml([nameChangedLabel(item, index), item.count > 1 ? `${item.count} sightings` : ""].filter(Boolean).join(" - "))}</span><small>${escapeHtml([`Last seen ${formatDateTime(item.lastSeen)}`, item.source].filter(Boolean).join(" - "))}</small></button>`).join("")}</div>`;
+  return `<div class="encounter-list name-history-list">${names.map((item, index) => `<button type="button" class="encounter-item name-history-item" ${attrs}><strong>${escapeHtml(item.name)}${index === 0 ? ` <em>current/latest</em>` : ""}</strong><span>${escapeHtml([nameChangedLabel(item, index), item.count > 1 ? `${item.count} sightings` : ""].filter(Boolean).join(" - "))}</span><small>${escapeHtml([`Last seen ${formatDateTime(item.lastSeen)}`, item.source].filter(Boolean).join(" - "))}</small></button>`).join("")}${allNames.length > limit ? `<button type="button" class="friend-info-empty history-more-button" ${attrs}>${escapeHtml(allNames.length - limit)} older names hidden here. Click to show all.</button>` : ""}</div>`;
 }
 function playerEncounterItems(userId, displayName = "", remoteItems = []) {
   const id = String(userId || "").trim();
@@ -4816,6 +4931,7 @@ function nameChangedLabel(item, index = 0) {
 function openPlayerNameHistoryDialog(userId, displayName = "") {
   const id = String(userId || "").trim();
   const names = playerNameHistoryItems(id, displayName);
+  setPlayerHistoryDialogMode("history");
   $("playerHistoryTitle").textContent = `${displayName || names[0]?.name || id || "Player"} - Username History`;
   $("playerHistoryContent").innerHTML = names.length
     ? `<div class="player-history-list">${names.map((item, index) => `<article class="player-history-row"><div><strong>${escapeHtml(item.name)}${index === 0 ? ` <em>current/latest</em>` : ""}</strong><span>${escapeHtml(nameChangedLabel(item, index))}</span><small>${escapeHtml([item.firstSeen ? `First seen ${formatDateTime(item.firstSeen)}` : "", item.lastSeen ? `Last seen ${formatDateTime(item.lastSeen)}` : "", item.count > 1 ? `${item.count} sightings` : "", item.source].filter(Boolean).join(" - "))}</small></div></article>`).join("")}</div>`
@@ -4826,6 +4942,7 @@ function openPlayerMetHistoryDialog(userId, displayName = "", remoteItems = null
   const id = String(userId || "").trim();
   const selected = state.social.selectedItem?.id === id ? state.social.selectedItem : null;
   const items = playerEncounterItems(id, displayName, remoteItems || selected?.encounters || state.playerEncounterHistory[id] || []);
+  setPlayerHistoryDialogMode("history");
   $("playerHistoryTitle").textContent = `${displayName || selected?.displayName || id || "Player"} - Met History`;
   $("playerHistoryContent").innerHTML = items.length
     ? `<div class="player-history-list">${items.map((item) => playerMetHistoryRowHtml(item)).join("")}</div>`
@@ -4846,9 +4963,21 @@ function bindPlayerHistoryDialogEvents() {
     void openPlayerLogWorld(worldId);
   }));
 }
+function handlePlayerHistoryDialogPointerDown(event) {
+  const dialog = $("playerHistoryDialog");
+  if (!dialog?.open || event.target !== dialog) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  dialog.close();
+}
 function bindPlayerHistoryTriggers(container = document) {
   container.querySelectorAll("[data-player-name-history]").forEach((button) => button.addEventListener("click", () => openPlayerNameHistoryDialog(button.dataset.playerNameHistory || "", button.dataset.playerName || "")));
   container.querySelectorAll("[data-player-met-history]").forEach((button) => button.addEventListener("click", () => openPlayerMetHistoryDialog(button.dataset.playerMetHistory || "", button.dataset.playerName || "")));
+}
+function setPlayerHistoryDialogMode(mode = "history") {
+  const isGroup = mode === "group";
+  $("playerHistoryDialog").classList.toggle("group-details-dialog", isGroup);
+  $("playerHistoryContent").classList.toggle("group-details-content", isGroup);
 }
 function localPlayerProfileFromLogs(userId, displayName = "") {
   const id = String(userId || "").trim();
@@ -5090,11 +5219,15 @@ async function openPlayerLogWorld(worldId) {
   }
 }
 function openNotificationWorldDetails(world) {
+  const content = $("notificationDetailsContent");
   $("notificationDetailsPanel").hidden = false;
   $("notificationDetailsTitle").textContent = world?.name || "World Details";
-  $("notificationDetailsContent").classList.remove("friend-detail-host");
-  $("notificationDetailsContent").innerHTML = worldDetailsHtml(world || {});
-  bindWorldDetailsPanelEvents($("notificationDetailsContent"), world);
+  $("notificationDetailsPanel").classList.remove("user-detail-popup");
+  document.body.classList.remove("user-detail-popup-open");
+  content.classList.remove("friend-detail-host");
+  content.classList.add("world-detail-host", "notification-world-detail-host");
+  content.innerHTML = worldDetailsHtml(world || {}, { compact: true });
+  bindWorldDetailsPanelEvents(content, world);
 }
 function messageConversations() {
   const byUser = new Map();
@@ -5555,19 +5688,26 @@ async function openNotificationSender(element) {
 function openNotificationDetailsLoading(title) {
   $("notificationDetailsPanel").hidden = false;
   $("notificationDetailsTitle").textContent = title || "Notification Details";
-  $("notificationDetailsContent").classList.remove("friend-detail-host");
+  $("notificationDetailsPanel").classList.remove("user-detail-popup");
+  document.body.classList.remove("user-detail-popup-open");
+  $("notificationDetailsContent").classList.remove("friend-detail-host", "world-detail-host", "notification-world-detail-host");
   $("notificationDetailsContent").innerHTML = `<div class="settings-empty"><h4>Loading user details</h4></div>`;
 }
-function openNotificationFriendDetails(friend, notification = null, { resetTab = true } = {}) {
+function openNotificationFriendDetails(friend, notification = null, { resetTab = true, popup = false } = {}) {
   if (resetTab) state.social.friendTab = "info";
   $("notificationDetailsPanel").hidden = false;
   $("notificationDetailsTitle").textContent = friend.displayName || "User Details";
+  $("notificationDetailsPanel").classList.toggle("user-detail-popup", popup);
+  document.body.classList.toggle("user-detail-popup-open", popup);
+  $("notificationDetailsContent").classList.remove("world-detail-host", "notification-world-detail-host");
   $("notificationDetailsContent").classList.add("friend-detail-host");
-  $("notificationDetailsContent").innerHTML = notificationFriendDetailsHtml(friend, notification);
+  $("notificationDetailsContent").innerHTML = popup && (state.social.friendTab || "info") === "info"
+    ? userPopupFriendDetailsHtml(friend, notification)
+    : notificationFriendDetailsHtml(friend, notification);
   $("notificationDetailsContent").querySelectorAll("[data-social-action]").forEach((button) => button.addEventListener("click", handleSocialAction));
   $("notificationDetailsContent").querySelectorAll("[data-friend-tab]").forEach((button) => button.addEventListener("click", () => {
     state.social.friendTab = button.dataset.friendTab || "info";
-    openNotificationFriendDetails(friend, notification, { resetTab: false });
+    openNotificationFriendDetails(friend, notification, { resetTab: false, popup });
   }));
   $("notificationDetailsContent").querySelectorAll("[data-avatar-detail-id], [data-avatar-detail-kind]").forEach((button) => button.addEventListener("click", () => openSocialAvatarDetails(button.dataset.avatarDetailId, button.dataset.avatarDetailKind)));
   $("notificationDetailsContent").querySelectorAll("[data-world-id]").forEach((button) => button.addEventListener("click", () => selectSocialWorld(button.dataset.worldId)));
@@ -5608,6 +5748,90 @@ function notificationFriendDetailsHtml(friend, notification) {
   const buttons = `<button type="button" data-social-action="acceptFriendRequest" data-notification-id="${escapeAttr(notification.id)}" data-user-id="${escapeAttr(friend.id)}" class="primary">Accept Request</button><button type="button" data-social-action="declineNotification" data-notification-id="${escapeAttr(notification.id)}" data-user-id="${escapeAttr(friend.id)}" class="danger">Decline Request</button>`;
   return html.replace('<div class="social-detail-actions">', `<div class="social-detail-actions">${buttons}`);
 }
+function userPopupFriendDetailsHtml(friend, notification = null) {
+  friend = applyFriendPresenceAuthority(friend || {});
+  const presence = friendPresence(friend);
+  const available = presence !== "offline";
+  const location = available ? (friend.worldId || friend.location || "Private location") : "Offline";
+  const liveAvatar = friend.currentAvatar || {};
+  const avatarId = avatarPublicId(liveAvatar) || (avatarIdLooksValid(friend.currentAvatarId) ? friend.currentAvatarId : "");
+  const avatarImage = liveAvatar.thumbnailImageUrl || liveAvatar.imageUrl || friend.currentAvatarThumbnailImageUrl || friend.currentAvatarImageUrl || friend.imageUrl || "";
+  const avatarName = liveAvatar.name || friend.currentAvatarName || (avatarId ? avatarId : avatarImage ? "Current Avatar" : "Unknown Avatar");
+  const header = friendHeaderImage(friend);
+  const headerImageAttrs = header.image
+    ? `src="${escapeAttr(header.image)}" data-image-fallbacks="${escapeAttr(JSON.stringify(header.candidates || []))}" title="${escapeAttr(header.image)}"`
+    : "";
+  const status = presence === "offline" ? "Offline" : [friend.status, friend.statusDescription].filter(Boolean).join(" - ") || presenceLabel(presence);
+  const bioLinks = splitCsv(friend.bioLinks);
+  const represented = friend.representedGroupName || friend.representedGroupId
+    ? `<div class="friend-info-represented">${friend.representedGroupImageUrl ? `<img src="${escapeAttr(friend.representedGroupImageUrl)}" alt="">` : ""}<div><strong>${escapeHtml(friend.representedGroupName || friend.representedGroupId)}</strong><span>${escapeHtml([friend.representedGroupShortCode ? `#${friend.representedGroupShortCode}` : "", friend.representedGroupMemberCount ? `${friend.representedGroupMemberCount} members` : ""].filter(Boolean).join(" - "))}</span></div></div>`
+    : `<p class="friend-info-empty">-</p>`;
+  const note = state.friendNotes[friend.id] || "";
+  const joinCount = playerEncounterItems(friend.id, friend.displayName, friend.encounters || []).filter((item) => String(item.action || "").toLowerCase().includes("join")).length;
+  const nameHistoryAttrs = `data-player-name-history="${escapeAttr(friend.id || "")}" data-player-name="${escapeAttr(friend.displayName || "")}"`;
+  const avatarInfo = friendAvatarInfoButton(avatarName, avatarId, avatarImage, displayAvatarAuthorName(liveAvatar), liveAvatar);
+  const actionButtons = [
+    `<button type="button" data-social-action="messageUser" data-user-id="${escapeAttr(friend.id)}">Message</button>`,
+    `<button type="button" data-social-action="invite" data-user-id="${escapeAttr(friend.id)}">Invite</button>`,
+    `<button type="button" data-social-action="requestInvite" data-user-id="${escapeAttr(friend.id)}">Request Invite</button>`,
+    friend.isFriend === false && friend.isBlocked !== true ? `<button type="button" data-social-action="friend" data-user-id="${escapeAttr(friend.id)}">Friend</button>` : "",
+    friend.isFriend !== false ? `<button type="button" data-social-action="unfriend" data-user-id="${escapeAttr(friend.id)}" class="danger">Unfriend</button>` : "",
+    friend.isBlocked === true ? `<button type="button" data-social-action="unblock" data-user-id="${escapeAttr(friend.id)}">Unblock</button>` : `<button type="button" data-social-action="block" data-user-id="${escapeAttr(friend.id)}" class="danger">Block</button>`
+  ].filter(Boolean).join("");
+  const requestButtons = isFriendRequestNotification(notification)
+    ? `<button type="button" data-social-action="acceptFriendRequest" data-notification-id="${escapeAttr(notification.id)}" data-user-id="${escapeAttr(friend.id)}" class="primary">Accept Request</button><button type="button" data-social-action="declineNotification" data-notification-id="${escapeAttr(notification.id)}" data-user-id="${escapeAttr(friend.id)}" class="danger">Decline Request</button>`
+    : "";
+  return `<div class="social-detail friend-detail user-popup-detail">
+    <div class="friend-profile-header">
+      <div class="friend-profile-avatar ${header.hasProfileImage ? "profile-picture" : ""}">${header.image ? `<img ${headerImageAttrs} alt="">` : ""}</div>
+      <div class="friend-profile-main">
+        <div class="friend-profile-title"><button type="button" class="user-popup-name-button" ${nameHistoryAttrs}>${escapeHtml(friend.displayName || friend.id)}</button>${userStatusBadgeHtml(friend.status, presence, friendStatusLimited(friend, presence))}</div>
+        ${friendTagsHtml(friend)}
+        ${friend.statusDescription ? `<p class="friend-status-line">${escapeHtml(friend.statusDescription)}</p>` : ""}
+      </div>
+    </div>
+    <div class="social-detail-actions">${requestButtons}${actionButtons}</div>
+    ${friendDetailTabsHtml()}
+    <div class="friend-tab-content info-tab-active user-popup-info">
+      <h4 class="user-popup-status">${escapeHtml(presenceLabel(presence))}</h4>
+      <div class="friend-info-divider"></div>
+      <section class="user-popup-note"><h5>Note</h5><p>${note ? escapeHtml(note) : "-"}</p></section>
+      <section class="user-popup-memo"><h5>Memo</h5><p class="friend-info-empty">-</p></section>
+      <section class="user-popup-avatar"><h5>Avatar Info</h5>${avatarInfo}</section>
+      <section class="user-popup-represented"><h5>Represented Group</h5>${represented}</section>
+      <section class="user-popup-bio"><h5>Bio</h5>${friend.bio ? `<p>${escapeHtml(friend.bio)}</p>` : `<p class="friend-info-empty">No bio available.</p>`}${bioLinks.length ? `<div class="friend-link-list">${bioLinks.map((link) => `<span>${escapeHtml(link)}</span>`).join("")}</div>` : ""}</section>
+      <section class="friend-info-metrics-section user-popup-metrics"><h5>Details</h5><div class="friend-info-metrics">
+        ${friendInfoMetric("Last Seen", friend.lastLogin || "-")}
+        ${friendInfoMetric("Join Count", joinCount || "-")}
+        ${friendInfoMetric("...", "-")}
+        ${friendInfoMetric("Time Together", "-")}
+        ${friendInfoMetric("Offline For", presence === "offline" ? "-" : "")}
+        ${friendInfoMetric("Last Activity", "-")}
+        ${friendInfoMetric("Date Joined", friend.dateJoined || "-")}
+        ${friendInfoMetric("Friended", "-")}
+        ${friendInfoMetric("Avatar Cloning", readableBool(friend.allowAvatarCopying) || "-")}
+        ${friendInfoMetric("User ID", friend.id)}
+      </div></section>
+    </div>
+  </div>`;
+}
+function userPopupNameHistoryCompactHtml(friend, limit = 2) {
+  const allNames = playerNameHistoryItems(friend?.id, friend?.displayName);
+  const names = allNames.slice(0, limit);
+  if (!names.length) return `<p class="friend-info-empty">-</p>`;
+  const attrs = `data-player-name-history="${escapeAttr(friend?.id || "")}" data-player-name="${escapeAttr(friend?.displayName || "")}"`;
+  return `<div class="user-popup-name-history">${names.map((item, index) => `<button type="button" class="user-popup-text-link history" ${attrs}>${escapeHtml(item.name)}${index === 0 ? ` (current/latest)` : ""}${item.count > 1 ? ` - ${escapeHtml(`${item.count} sightings`)}` : ""}</button>`).join("")}${allNames.length > limit ? `<button type="button" class="user-popup-text-link history muted" ${attrs}>${escapeHtml(allNames.length - limit)} older names hidden. Click for all.</button>` : ""}</div>`;
+}
+function userPopupMetHistoryCompactHtml(friend, limit = 2) {
+  const items = playerEncounterItems(friend?.id, friend?.displayName, friend?.encounters || []);
+  if (friend?.id && items.length) state.playerEncounterHistory[friend.id] = items;
+  if (!items.length) return `<p class="friend-info-empty">No shared world history found in local VRChat logs.</p>`;
+  return `<div class="user-popup-mini-list">${items.slice(0, limit).map((item) => {
+    const world = item.worldName || worldIdFromLocation(item.location) || "Unknown world";
+    const detail = [formatDateTime(item.timestamp), item.action].filter(Boolean).join(" - ");
+    return `<button type="button" class="user-popup-mini-row" data-player-met-history="${escapeAttr(friend?.id || "")}" data-player-name="${escapeAttr(friend?.displayName || "")}"><strong>${escapeHtml(world)}</strong><span>${escapeHtml(detail)}</span></button>`;
+  }).join("")}${items.length > limit ? `<button type="button" class="user-popup-mini-row muted" data-player-met-history="${escapeAttr(friend?.id || "")}" data-player-name="${escapeAttr(friend?.displayName || "")}">${escapeHtml(items.length - limit)} older entries hidden. Click for all.</button>` : ""}</div>`;
+}
 function isFriendRequestNotification(notification) {
   const type = String(notification?.type || "").toLowerCase();
   const id = String(notification?.id || "").toLowerCase();
@@ -5615,8 +5839,36 @@ function isFriendRequestNotification(notification) {
 }
 function closeNotificationDetails() {
   $("notificationDetailsPanel").hidden = true;
-  $("notificationDetailsContent").classList.remove("friend-detail-host");
+  $("notificationDetailsPanel").classList.remove("user-detail-popup");
+  document.body.classList.remove("user-detail-popup-open");
+  $("notificationDetailsContent").classList.remove("friend-detail-host", "world-detail-host", "notification-world-detail-host");
   $("notificationDetailsContent").innerHTML = "";
+}
+function isUserDetailPopupOpen() {
+  const panel = $("notificationDetailsPanel");
+  return Boolean(panel && !panel.hidden && panel.classList.contains("user-detail-popup"));
+}
+function handleUserDetailPopupPointerDown(event) {
+  if (!isUserDetailPopupOpen()) return;
+  if ($("playerHistoryDialog")?.open) return;
+  const panel = $("notificationDetailsPanel");
+  if (panel.contains(event.target)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  userDetailPopupClosedAt = Date.now();
+  closeNotificationDetails();
+}
+function suppressUserDetailBackdropClick(event) {
+  if (Date.now() - userDetailPopupClosedAt > 350) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+function containUserDetailPopupWheel(event) {
+  if (!isUserDetailPopupOpen()) return;
+  const panel = $("notificationDetailsPanel");
+  if (panel.contains(event.target)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
 }
 function renderVrchatSocial() {
   renderWorldDiscoveryFilter();
@@ -5624,6 +5876,7 @@ function renderVrchatSocial() {
   const worlds = $("worldResults");
   const details = $("socialDetailsPanel");
   const worldDetails = $("worldDetailsPanel");
+  worldDetails.classList.toggle("world-detail-host", state.social.selectedType === "world");
   if (!state.vrchat?.isLoggedIn) {
     const html = `<div class="settings-empty"><h4>Log in to VRChat</h4><p>Friends, worlds, and location need VRChat login.</p></div>`;
     details.classList.remove("friend-detail-host");
@@ -5690,6 +5943,20 @@ function bindImageFallbacks(container = document) {
 }
 function bindWorldDetailsPanelEvents(container, world) {
   container.querySelectorAll("[data-social-action]").forEach((button) => button.addEventListener("click", handleSocialAction));
+  container.querySelectorAll("[data-world-detail-tab]").forEach((button) => button.addEventListener("click", () => {
+    state.social.worldTab = button.dataset.worldDetailTab || "info";
+    renderVrchatSocial();
+  }));
+  container.querySelectorAll("[data-user-detail-id]").forEach((button) => button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openUserDetails(button.dataset.userDetailId || "", button.dataset.userDetailName || button.textContent || "");
+  }));
+  container.querySelectorAll("[data-world-instance-group]").forEach((button) => button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openVrchatGroupDetailsDialog(button.dataset.worldInstanceGroup || "", button.dataset.worldInstanceGroupName || "");
+  }));
   container.querySelectorAll("button[data-world-instance-filter]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.preventDefault();
@@ -5728,7 +5995,20 @@ function renderWorldInstancesSection(container, world) {
   const minPlayersInput = section.querySelector("input[data-world-instance-filter='minPlayers']");
   if (minPlayersInput && document.activeElement !== minPlayersInput) minPlayersInput.value = String(Math.max(0, Number(filter.minPlayers) || 0));
   const results = section.querySelector(".world-instance-results");
-  if (results) results.innerHTML = worldInstanceListHtml(world, Array.isArray(world.instances) ? world.instances : []);
+  if (results) {
+    results.innerHTML = worldInstanceListHtml(world, Array.isArray(world.instances) ? world.instances : []);
+    results.querySelectorAll("[data-social-action]").forEach((button) => button.addEventListener("click", handleSocialAction));
+    results.querySelectorAll("[data-user-detail-id]").forEach((button) => button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openUserDetails(button.dataset.userDetailId || "", button.dataset.userDetailName || button.textContent || "");
+    }));
+    results.querySelectorAll("[data-world-instance-group]").forEach((button) => button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openVrchatGroupDetailsDialog(button.dataset.worldInstanceGroup || "", button.dataset.worldInstanceGroupName || "");
+    }));
+  }
 }
 function saveFriendNote(userId, value) {
   if (!userId) return;
@@ -6479,10 +6759,30 @@ function queueSocialFriendDetailsLoad(id, options = {}) {
 function shouldRenderFriendDetailRefresh(tab = state.social.friendTab || "info") {
   return tab !== "info";
 }
+async function openUserDetails(userId, displayName = "") {
+  const id = String(userId || "").trim();
+  const name = String(displayName || "").trim();
+  if (!avatarAuthorLooksLikeId(id)) {
+    toast("This item does not include a VRChat user ID.");
+    return;
+  }
+  if (!state.vrchat?.isLoggedIn) {
+    toast("Log in to VRChat to view user details.");
+    return;
+  }
+  openNotificationDetailsLoading(name || id);
+  $("notificationDetailsPanel").classList.add("user-detail-popup");
+  document.body.classList.add("user-detail-popup-open");
+  const token = ++state.social.selectToken;
+  const friend = await loadSocialFriendDetails(id, { token, clickedPresence: findSocialFriend(id, name)?.presence });
+  if (token !== state.social.selectToken) return;
+  openNotificationFriendDetails(friend || localPlayerProfileFromLogs(id, name), null, { popup: true });
+}
 async function selectSocialWorld(id) {
   if (!id) return;
   const token = ++state.social.selectToken;
   state.social.selectedType = "world";
+  state.social.worldTab = "info";
   state.social.selectedItem = allLoadedWorlds().find((item) => item.id === id) || state.social.location?.world || null;
   renderVrchatSocial();
   try {
@@ -6608,10 +6908,24 @@ function myProfileDetailsHtml(profile) {
   const statusText = [profile.status, profile.statusDescription].filter(Boolean).join(" - ") || "Unknown";
   const image = avatar.thumbnailImageUrl || avatar.imageUrl || profile.currentAvatarThumbnailImageUrl || profile.currentAvatarImageUrl || "";
   const tagChips = friendTagsHtml(profile);
+  const profileFriend = applyFriendPresenceAuthority({
+    ...profile,
+    currentAvatar: avatar,
+    currentAvatarThumbnailImageUrl: image,
+    currentAvatarImageUrl: image,
+    presence: "active",
+    isOnline: true,
+    representedGroupName: profile.representedGroupName,
+    representedGroupId: profile.representedGroupId,
+    representedGroupImageUrl: profile.representedGroupImageUrl,
+    representedGroupShortCode: profile.representedGroupShortCode,
+    representedGroupMemberCount: profile.representedGroupMemberCount
+  });
+  const nameHistoryAttrs = `data-player-name-history="${escapeAttr(profile.id || "")}" data-player-name="${escapeAttr(profile.displayName || "")}"`;
   const hero = `<div class="friend-profile-header">
     <div class="friend-profile-avatar">${image ? `<img src="${escapeAttr(image)}" alt="">` : ""}</div>
     <div class="friend-profile-main">
-      <div class="friend-profile-title"><h4>${escapeHtml(profile.displayName || profile.id)}</h4>${presenceBadgeHtml("online", "My Profile")}</div>
+      <div class="friend-profile-title"><button type="button" class="user-history-name-button" ${nameHistoryAttrs}>${escapeHtml(profile.displayName || profile.id)}</button>${presenceBadgeHtml("online", "My Profile")}</div>
       ${tagChips}
       ${profile.statusDescription ? `<p class="friend-status-line">${escapeHtml(profile.statusDescription)}</p>` : ""}
     </div>
@@ -6628,6 +6942,13 @@ function myProfileDetailsHtml(profile) {
   const avatarTab = profileAvatarsTabHtml(profile);
   const activity = `<section class="social-detail-section"><h5>Activity</h5><div class="friend-metric-grid"><span><strong>${escapeHtml(profile.lastLogin || "-")}</strong>Last Seen</span><span><strong>${escapeHtml(profile.dateJoined || "-")}</strong>Date Joined</span><span><strong>${escapeHtml(statusText || "-")}</strong>Status</span><span><strong>${escapeHtml(profile.developerType || "-")}</strong>Developer Type</span></div></section>`;
   const more = `<section class="social-detail-section"><h5>More</h5><dl>${detailRow("Developer type", profile.developerType)}${detailRow("Tags", profile.tags)}</dl></section>`;
+  const info = friendInfoTabHtml(profileFriend, {
+    location,
+    avatarName: profileAvatarName,
+    avatarId: profileAvatarId,
+    avatarImage: image,
+    liveAvatar: avatar
+  });
   const tab = state.social.friendTab || "info";
   const tabContent = tab === "groups"
     ? groupSection
@@ -6641,7 +6962,7 @@ function myProfileDetailsHtml(profile) {
             ? activity
             : tab === "json"
               ? (profile.rawJson ? `<details class="friend-json-tab" open><summary>Raw JSON</summary><pre>${escapeHtml(profile.rawJson)}</pre></details>` : emptyFriendTab("JSON", "No raw JSON is available for your profile."))
-              : `${overview}${avatarSection}${groupSection}${more}`;
+              : info;
   const tabLayoutClass = tab === "groups" ? " group-tab-active" : tab === "info" ? " info-tab-active" : "";
   return `<div class="social-detail friend-detail${tabLayoutClass}">${hero}${tabs}<div class="friend-tab-content${tabLayoutClass}">${tabContent}</div></div>`;
 }
@@ -6662,6 +6983,7 @@ function friendDetailsHtml(friend) {
     : "";
   const bioLinks = splitCsv(friend.bioLinks);
   const tagChips = friendTagsHtml(friend);
+  const nameHistoryAttrs = `data-player-name-history="${escapeAttr(friend.id || "")}" data-player-name="${escapeAttr(friend.displayName || "")}"`;
   const isFriend = friend.isFriend !== false;
   const isBlocked = friend.isBlocked === true;
   const actionButtons = [
@@ -6680,7 +7002,7 @@ function friendDetailsHtml(friend) {
   const hero = `<div class="friend-profile-header">
     <div class="friend-profile-avatar ${header.hasProfileImage ? "profile-picture" : ""}">${header.image ? `<img ${headerImageAttrs} alt="">` : ""}</div>
     <div class="friend-profile-main">
-      <div class="friend-profile-title"><h4>${escapeHtml(friend.displayName || friend.id)}</h4>${userStatusBadgeHtml(friend.status, presence, friendStatusLimited(friend, presence))}</div>
+      <div class="friend-profile-title"><button type="button" class="user-history-name-button" ${nameHistoryAttrs}>${escapeHtml(friend.displayName || friend.id)}</button>${userStatusBadgeHtml(friend.status, presence, friendStatusLimited(friend, presence))}</div>
       ${tagChips}
       ${friend.statusDescription ? `<p class="friend-status-line">${escapeHtml(friend.statusDescription)}</p>` : ""}
     </div>
@@ -6709,7 +7031,7 @@ function friendDetailsHtml(friend) {
     groups
   });
   const activeTab = state.social.friendTab || "info";
-  const tabLayoutClass = activeTab === "groups" ? " group-tab-active" : activeTab === "info" ? " info-tab-active" : activeTab === "mutual" ? " mutual-tab-active" : "";
+  const tabLayoutClass = activeTab === "groups" ? " group-tab-active" : activeTab === "info" ? " info-tab-active" : activeTab === "mutual" ? " mutual-tab-active" : activeTab === "activity" ? " activity-tab-active" : "";
   return `<div class="social-detail friend-detail${tabLayoutClass}">${hero}${actions}${tabs}<div class="friend-tab-content${tabLayoutClass}">${tabContent}</div></div>`;
 }
 function friendDetailTabsHtml() {
@@ -6752,39 +7074,37 @@ function friendTabContentHtml(friend, parts) {
 }
 function friendInfoTabHtml(friend, parts) {
   const currentPresence = friendPresence(friend);
-  const status = currentPresence === "offline" ? "Offline" : [friend.status, friend.statusDescription].filter(Boolean).join(" - ") || presenceLabel(currentPresence);
   const represented = friend.representedGroupName || friend.representedGroupId
     ? `<div class="friend-info-represented">${friend.representedGroupImageUrl ? `<img src="${escapeAttr(friend.representedGroupImageUrl)}" alt="">` : ""}<div><strong>${escapeHtml(friend.representedGroupName || friend.representedGroupId)}</strong><span>${escapeHtml([friend.representedGroupShortCode ? `#${friend.representedGroupShortCode}` : "", friend.representedGroupMemberCount ? `${friend.representedGroupMemberCount} members` : ""].filter(Boolean).join(" - "))}</span></div></div>`
     : `<span class="friend-info-empty">-</span>`;
   const bioLinks = splitCsv(friend.bioLinks);
   const note = state.friendNotes[friend.id] || "";
-  const nameHistory = playerNameHistoryHtml(friend, { limit: 4 });
-  const encounters = playerMetHistoryHtml(friend, { limit: 5 });
   const joinCount = playerEncounterItems(friend.id, friend.displayName, friend.encounters || []).filter((item) => String(item.action || "").toLowerCase().includes("join")).length;
   return `<div class="friend-info-vrcx">
     <h4>${escapeHtml(presenceLabel(currentPresence))}</h4>
     <div class="friend-info-divider"></div>
     <div class="friend-info-stack">
-      <section><h5>Note</h5><textarea class="friend-note-input" data-friend-note="${escapeAttr(friend.id)}" placeholder="Click to add a note">${escapeHtml(note)}</textarea></section>
+      <section><h5>Note</h5><p>${note ? escapeHtml(note) : "-"}</p></section>
       <section><h5>Memo</h5><p class="friend-info-empty">-</p></section>
       <section><h5>Avatar Info</h5>${friendAvatarInfoButton(parts.avatarName, parts.avatarId, parts.avatarImage, displayAvatarAuthorName(parts.liveAvatar), parts.liveAvatar)}</section>
       <section><h5>Represented Group</h5>${represented}</section>
-      <section><h5>Username History</h5>${nameHistory}</section>
-      <section><h5>Met History</h5>${encounters}</section>
       <section class="friend-info-bio"><h5>Bio</h5>${friend.bio ? `<p>${escapeHtml(friend.bio)}</p>` : `<p class="friend-info-empty">No bio available.</p>`}${bioLinks.length ? `<div class="friend-link-list">${bioLinks.map((link) => `<span>${escapeHtml(link)}</span>`).join("")}</div>` : ""}</section>
     </div>
-    <div class="friend-info-metrics">
-      ${friendInfoMetric("Status", status)}
-      ${friendInfoMetric("Location", parts.location)}
-      ${friendInfoMetric("Last Seen", friend.lastLogin || "-")}
-      ${friendInfoMetric("Join Count", joinCount || "-")}
-      ${friendInfoMetric("Time Together", "-")}
-      ${friendInfoMetric("Date Joined", friend.dateJoined || "-")}
-      ${friendInfoMetric("Friended", "-")}
-      ${friendInfoMetric("Avatar Cloning", readableBool(friend.allowAvatarCopying) || "-")}
-      ${friendInfoMetric("Platform", platformLabel(friend.lastPlatform) || "-")}
-      ${friendInfoMetric("User ID", friend.id)}
-    </div>
+    <section class="friend-info-metrics-section">
+      <h5>Details</h5>
+      <div class="friend-info-metrics">
+        ${friendInfoMetric("Last Seen", friend.lastLogin || "-")}
+        ${friendInfoMetric("Join Count", joinCount || "-")}
+        ${friendInfoMetric("...", "-")}
+        ${friendInfoMetric("Time Together", "-")}
+        ${friendInfoMetric("Offline For", currentPresence === "offline" ? "-" : "")}
+        ${friendInfoMetric("Last Activity", "-")}
+        ${friendInfoMetric("Date Joined", friend.dateJoined || "-")}
+        ${friendInfoMetric("Friended", "-")}
+        ${friendInfoMetric("Avatar Cloning", readableBool(friend.allowAvatarCopying) || "-")}
+        ${friendInfoMetric("User ID", friend.id)}
+      </div>
+    </section>
   </div>`;
 }
 function friendActivityTabHtml(friend, parts) {
@@ -6792,7 +7112,7 @@ function friendActivityTabHtml(friend, parts) {
   const latestMet = metItems[0]?.timestamp || "";
   const joinCount = metItems.filter((item) => String(item.action || "").toLowerCase().includes("join")).length;
   const metSummary = `<section class="social-detail-section"><h5>Local History Summary</h5><div class="friend-metric-grid"><span><strong>${escapeHtml(joinCount || "-")}</strong>Join Count</span><span><strong>${escapeHtml(metItems.length || "-")}</strong>Logged Events</span><span><strong>${escapeHtml(latestMet ? formatDateTime(latestMet) : "-")}</strong>Last Met</span><span><strong>${escapeHtml(playerNameHistoryItems(friend.id, friend.displayName).length || "-")}</strong>Recorded Names</span></div></section>`;
-  return `${parts.activity}${metSummary}<section class="social-detail-section"><h5>Username History</h5>${playerNameHistoryHtml(friend, { limit: 20 })}</section><section class="social-detail-section"><h5>Player Met History</h5>${playerMetHistoryHtml(friend, { limit: 40 })}</section>`;
+  return `<div class="friend-activity-tab">${parts.activity}${metSummary}<section class="social-detail-section"><h5>Username History</h5>${playerNameHistoryHtml(friend, { limit: 5 })}</section><section class="social-detail-section"><h5>Player Met History</h5>${playerMetHistoryHtml(friend, { limit: 8 })}</section></div>`;
 }
 function friendMutualTabHtml(friend) {
   if (friend.mutualFriendsLoading) return loadingFriendTab("Mutual Friends");
@@ -6811,7 +7131,7 @@ function friendEncountersHtml(items) {
   }).join("")}</div>`;
 }
 function friendInfoMetric(label, value) {
-  return `<span><strong>${escapeHtml(label)}</strong>${escapeHtml(value || "-")}</span>`;
+  return `<span><strong>${escapeHtml(label)}</strong><em>${escapeHtml(value || "-")}</em></span>`;
 }
 function friendAvatarInfoButton(name, avatarId, image = "", subtitle = "", avatar = {}) {
   const title = name || avatarId || "Unknown Avatar";
@@ -6863,16 +7183,92 @@ function loadingFriendTab(title) {
 function emptyFriendTab(title, message) {
   return `<section class="social-detail-section"><h5>${escapeHtml(title)}</h5><p class="social-muted">${escapeHtml(message)}</p></section>`;
 }
-function worldDetailsHtml(world) {
+function worldDetailsHtml(world, options = {}) {
+  if (options.compact) return compactWorldDetailsHtml(world);
   const instances = Array.isArray(world.instances) ? world.instances : [];
   const firstInstance = instances.find((item) => item?.location) || null;
   const launchLocation = state.social.location?.worldId === world.id ? state.social.location.location : (firstInstance?.location || "");
   const favorite = isFavoriteWorld(world.id);
-  const actions = `<div class="social-detail-actions"><button type="button" data-social-action="joinWorld" data-world-id="${escapeAttr(world.id)}" data-location="${escapeAttr(launchLocation)}" class="primary" ${launchLocation ? "" : "disabled"}>Join World</button><button type="button" data-social-action="favoriteWorld" data-world-id="${escapeAttr(world.id)}" ${favorite ? "hidden" : ""}>Favorite</button><button type="button" data-social-action="unfavoriteWorld" data-world-id="${escapeAttr(world.id)}" class="danger" ${favorite ? "" : "hidden"}>Unfavorite</button></div>`;
-  const hero = `<div class="social-world-hero">${world.imageUrl ? `<img class="social-detail-image" src="${escapeAttr(world.imageUrl)}" alt="">` : ""}<div class="social-detail-heading"><h4>${escapeHtml(world.name || world.id)}</h4><span>${escapeHtml(world.releaseStatus || "World")}</span><p>${escapeHtml(world.description || "")}</p></div></div>`;
+  const tab = state.social.worldTab === "json" ? "json" : "info";
+  const hero = worldDetailHeroHtml(world, favorite);
+  const tabs = worldDetailTabsHtml(tab);
+  const actions = `<section class="social-detail-section world-actions-section"><h5>Actions</h5><div class="world-action-grid">${worldActionButtonsHtml(world, launchLocation, favorite)}</div></section>`;
   const stats = `<div class="social-stat-grid"><span><strong>${Number(world.occupants || 0)}</strong>Users</span><span><strong>${Number(world.capacity || 0)}</strong>Capacity</span><span><strong>${Number(world.visits || 0)}</strong>Visits</span><span><strong>${Number(world.favorites || 0)}</strong>Favorites</span></div>`;
-  const overview = `<section class="social-detail-section"><h5>Overview</h5><dl>${detailRow("Author", world.authorName)}${detailRow("World ID", world.id)}${detailRow("Status", world.releaseStatus)}${detailRow("Occupants", `${Number(world.occupants || 0)} total, ${Number(world.publicOccupants || 0)} public, ${Number(world.privateOccupants || 0)} private`)}${detailRow("Updated", world.updatedAt)}${detailRow("Created", world.createdAt)}</dl></section>`;
-  return `<div class="social-detail world-detail">${hero}${actions}${stats}${worldInstancesHtml(world, instances)}${overview}${world.rawJson ? `<details><summary>Raw JSON</summary><pre>${escapeHtml(world.rawJson)}</pre></details>` : ""}</div>`;
+  const about = worldAboutHtml(world);
+  const overview = `<section class="social-detail-section world-overview-section"><h5>Overview</h5><dl>${detailRowHtml("Author", userDetailButtonHtml(world.authorId, world.authorName))}${detailRow("World ID", world.id)}${detailRow("Status", world.releaseStatus)}${detailRow("Occupants", `${Number(world.occupants || 0)} total, ${Number(world.publicOccupants || 0)} public, ${Number(world.privateOccupants || 0)} private`)}${detailRow("Updated", world.updatedAt)}${detailRow("Created", world.createdAt)}</dl></section>`;
+  const summary = `<div class="world-detail-summary"><div class="world-detail-media-stack">${worldDetailImageHtml(world)}${actions}</div>${about}</div>`;
+  const content = tab === "json"
+    ? `<section class="social-detail-section world-json-details world-json-tab"><h5>Raw JSON</h5>${world.rawJson ? `<pre>${escapeHtml(world.rawJson)}</pre>` : `<p class="social-muted">No raw JSON is available for this world.</p>`}</section>`
+    : `<div class="world-info-tab-content">${stats}${overview}</div>`;
+  return `<div class="social-detail world-detail">${hero}<div class="world-detail-body"><div class="world-detail-primary">${summary}${tabs}<div class="world-detail-tab-content">${content}</div></div><aside class="world-detail-sidebar">${worldInstancesHtml(world, instances)}</aside></div></div>`;
+}
+function worldDetailTabsHtml(active = "info") {
+  const tabs = [["info", "Info"], ["json", "JSON"]];
+  return `<div class="social-detail-tabs world-detail-tabs">${tabs.map(([id, label]) => `<button type="button" data-world-detail-tab="${escapeAttr(id)}" class="${active === id ? "active" : ""}">${escapeHtml(label)}</button>`).join("")}</div>`;
+}
+function compactWorldDetailsHtml(world) {
+  const instances = Array.isArray(world.instances) ? world.instances : [];
+  const firstInstance = instances.find((item) => item?.location) || null;
+  const launchLocation = state.social.location?.worldId === world.id ? state.social.location.location : (firstInstance?.location || "");
+  const favorite = isFavoriteWorld(world.id);
+  const selectedInstance = firstInstance || (launchLocation ? { id: worldInstanceIdFromLocation(launchLocation), location: launchLocation, occupants: world.occupants, type: "Instance", region: "", isLocked: false, isAgeRestricted: false } : null);
+  const hero = worldDetailHeroHtml(world, favorite);
+  const selected = worldSelectedInstanceHtml(world, selectedInstance, launchLocation);
+  const actions = `<section class="social-detail-section world-actions-section"><h5>Actions</h5><div class="world-action-grid">${worldActionButtonsHtml(world, launchLocation, favorite)}</div></section>`;
+  const stats = `<div class="social-stat-grid"><span><strong>${Number(world.occupants || 0)}</strong>Users</span><span><strong>${Number(world.capacity || 0)}</strong>Capacity</span><span><strong>${Number(world.visits || 0)}</strong>Visits</span><span><strong>${Number(world.favorites || 0)}</strong>Favorites</span></div>`;
+  const about = worldAboutHtml(world);
+  const overview = `<section class="social-detail-section world-overview-section"><h5>Overview</h5><dl>${detailRowHtml("Author", userDetailButtonHtml(world.authorId, world.authorName))}${detailRow("World ID", world.id)}${detailRow("Status", world.releaseStatus)}${detailRow("Occupants", `${Number(world.occupants || 0)} total, ${Number(world.publicOccupants || 0)} public, ${Number(world.privateOccupants || 0)} private`)}${detailRow("Updated", world.updatedAt)}${detailRow("Created", world.createdAt)}</dl></section>`;
+  return `<div class="social-detail world-detail compact-world-detail">${hero}<div class="compact-world-detail-content">${worldDetailImageHtml(world)}${selected}${worldInstancesHtml(world, instances)}${about}${stats}${overview}${actions}${worldRawJsonHtml(world)}</div></div>`;
+}
+function worldDetailHeroHtml(world, favorite) {
+  const status = world.releaseStatus || "World";
+  const favoriteChip = favorite ? `<span class="world-detail-chip favorite">Favorite</span>` : "";
+  const author = userDetailButtonHtml(world.authorId, world.authorName, { className: "world-author-link", prefix: "By " }) || `By ${escapeHtml(world.authorName || "Unknown author")}`;
+  return `<section class="world-detail-hero">
+    <div class="world-detail-hero-copy">
+      <div><h4>${escapeHtml(world.name || world.id || "World Details")}</h4><span>${author}</span></div>
+      <div class="world-detail-chips"><span class="world-detail-chip">${escapeHtml(status)}</span>${favoriteChip}</div>
+    </div>
+  </section>`;
+}
+function worldDetailImageHtml(world) {
+  return `<div class="world-detail-image-card">${world.imageUrl ? `<img src="${escapeAttr(world.imageUrl)}" alt="">` : `<span>No image</span>`}</div>`;
+}
+function worldAboutHtml(world) {
+  const description = world.description || "No world description is available.";
+  return `<section class="social-detail-section world-about-section"><h5>About This World</h5><p class="vrchat-formatted-text">${escapeHtml(description)}</p></section>`;
+}
+function worldActionButtonsHtml(world, launchLocation, favorite) {
+  return `<button type="button" data-social-action="favoriteWorld" data-world-id="${escapeAttr(world.id)}" ${favorite ? "hidden" : ""}>Add to Favorites</button><button type="button" data-social-action="unfavoriteWorld" data-world-id="${escapeAttr(world.id)}" class="danger" ${favorite ? "" : "hidden"}>Unfavorite</button><button type="button" data-social-action="copyWorldId" data-world-id="${escapeAttr(world.id)}">Copy World ID</button>`;
+}
+function worldRawJsonHtml(world) {
+  return world.rawJson ? `<section class="social-detail-section world-json-details"><h5>Raw JSON</h5><pre>${escapeHtml(world.rawJson)}</pre></section>` : "";
+}
+function worldSelectedInstanceHtml(world, instance, launchLocation) {
+  const location = instance?.location || launchLocation || "";
+  const current = String(state.social.location?.location || "").toLowerCase() === String(location || "").toLowerCase();
+  const label = worldInstanceDisplayLabel(instance, location);
+  const type = instance?.type || (location ? "Instance" : "No instance selected");
+  const groupLabel = instance?.groupName || instance?.groupId || "";
+  const count = `${Number(instance?.occupants ?? world.occupants ?? 0)} / ${Number(world.capacity || 0) || "?"}`;
+  const meta = [type, instance?.region, groupLabel ? `Group: ${groupLabel}` : "", current ? "You are here" : ""].filter(Boolean).join(" - ");
+  return `<section class="social-detail-section world-selected-instance-section"><h5>Selected Instance</h5><div class="world-selected-instance-card">
+    <div class="world-selected-instance-main"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(meta || "Choose an instance from the list.")}</span><small>${escapeHtml(count)} users</small></div>
+    <button type="button" class="primary" data-social-action="joinWorld" data-world-id="${escapeAttr(world.id)}" data-location="${escapeAttr(location)}" ${location ? "" : "disabled"}>Join</button>
+  </div></section>`;
+}
+function worldInstanceDisplayLabel(instance, location = "") {
+  const id = instance?.id || worldInstanceIdFromLocation(location);
+  if (!id) return "No selected instance";
+  const shortId = String(id).split("~")[0].trim();
+  if (/^\d+$/.test(shortId)) return `#${shortId}`;
+  if (shortId.toLowerCase().startsWith("hidden(")) return "Private instance";
+  if (shortId.toLowerCase().startsWith("friends(")) return "Friends instance";
+  return shortId;
+}
+function worldInstanceIdFromLocation(location = "") {
+  const parts = String(location || "").split(":");
+  return parts.length > 1 ? parts.slice(1).join(":") : "";
 }
 function worldInstancesHtml(world, instances = []) {
   const filter = state.worldInstanceFilter || { enabled: false, minPlayers: 1, hideLocked: false, hideFull: false };
@@ -6896,34 +7292,104 @@ function worldInstanceListHtml(world, instances = []) {
 function worldInstanceHtml(world, instance) {
   const location = instance.location || `${world.id}:${instance.id}`;
   const current = String(state.social.location?.location || "").toLowerCase() === String(location || "").toLowerCase();
-  const visit = latestWorldVisitForInstance(world, instance);
+  const visit = latestWorldLeaveForInstance(world, instance);
+  const label = worldInstanceDisplayLabel(instance, location);
   const groupLabel = instance.groupName || instance.groupId || "";
+  const groupLine = groupLabel
+    ? instance.groupId
+      ? `<button type="button" class="world-instance-group-link" data-world-instance-group="${escapeAttr(instance.groupId)}" data-world-instance-group-name="${escapeAttr(groupLabel)}">${escapeHtml(groupLabel)}</button>`
+      : `<span>${escapeHtml(groupLabel)}</span>`
+    : instance.id
+      ? `<span>${escapeHtml(instance.id)}</span>`
+      : "";
   const tags = [
-    instance.type || "Public",
-    instance.region,
+    instance.type ? worldInstanceTagHtml(instance.type, "type") : worldInstanceTagHtml("Public", "type"),
+    instance.region ? worldInstanceTagHtml(instance.region, "region") : "",
     instance.isLocked ? lockIconHtml() : "",
-    instance.isAgeRestricted ? "18+" : ""
+    instance.isAgeRestricted ? worldInstanceTagHtml("18+", "age") : ""
   ].filter(Boolean);
-  const timer = current ? "You are here now" : visit ? `${visit.action || "Seen"} ${relativeTime(visit.timestamp) || formatDateTime(visit.timestamp)}` : "Last visit unknown";
+  const timer = visit ? `Left ${relativeTime(visit.timestamp) || formatDateTime(visit.timestamp)}` : "";
   const count = `${Number(instance.occupants || 0)}/${Number(world.capacity || 0) || "?"}`;
   return `<div class="world-instance-row ${current ? "current" : ""}">
-    <div><strong>${escapeHtml(instance.type || "Instance")} ${escapeHtml(instance.region || "")}</strong><span>${escapeHtml(groupLabel ? `Group: ${groupLabel}` : instance.id || "")}</span><small>${escapeHtml(timer)}</small></div>
-    <div class="world-instance-tags">${tags.map((tag) => String(tag).startsWith("<") ? tag : `<em>${escapeHtml(tag)}</em>`).join("")}</div>
-    <strong class="world-instance-count">${escapeHtml(count)}</strong>
-    <button type="button" class="primary" data-social-action="joinWorld" data-world-id="${escapeAttr(world.id)}" data-location="${escapeAttr(location)}">Join</button>
+    <div class="world-instance-main">
+      <div class="world-instance-copy">
+        <div class="world-instance-heading"><strong class="world-instance-label">${escapeHtml(label)}</strong><span>${escapeHtml([instance.type || "Instance", instance.region || ""].filter(Boolean).join(" - "))}</span></div>
+        <div class="world-instance-meta">${groupLine}</div>
+        <div class="world-instance-footer"><div class="world-instance-tags">${tags.join("")}</div>${timer ? `<small class="world-instance-visit-time">${escapeHtml(timer)}</small>` : ""}</div>
+      </div>
+      <div class="world-instance-action"><strong class="world-instance-count">${escapeHtml(count)}</strong><button type="button" class="primary" data-social-action="joinWorld" data-world-id="${escapeAttr(world.id)}" data-location="${escapeAttr(location)}">Join</button></div>
+    </div>
   </div>`;
 }
-function lockIconHtml() {
-  return `<em class="lock-tag" title="Locked" aria-label="Locked"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V8a5 5 0 0 1 10 0v2"></path><rect x="5" y="10" width="14" height="10" rx="2"></rect></svg></em>`;
+function worldInstanceTagHtml(label, kind) {
+  return `<em class="world-instance-tag ${escapeAttr(kind)} ${escapeAttr(`${kind}-${classToken(label)}`)}">${escapeHtml(label)}</em>`;
 }
-function latestWorldVisitForInstance(world, instance) {
+function lockIconHtml() {
+  return `<em class="world-instance-tag lock-tag" title="Locked" aria-label="Locked"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 7V5.75a3 3 0 0 1 6 0V7"></path><rect x="4" y="7" width="8" height="6" rx="1.25"></rect></svg></em>`;
+}
+function latestWorldLeaveForInstance(world, instance) {
   const visits = Array.isArray(world.visitHistory) ? world.visitHistory : [];
   const instanceId = String(instance?.id || "").toLowerCase();
   const location = String(instance?.location || "").toLowerCase();
   return visits.find((item) => {
+    if (!String(item.action || "").toLowerCase().includes("left")) return false;
     const visitLocation = String(item.location || "").toLowerCase();
     return (location && visitLocation === location) || (instanceId && visitLocation.includes(instanceId));
   }) || null;
+}
+async function openVrchatGroupDetailsDialog(groupId, fallbackName = "") {
+  const id = String(groupId || "").trim();
+  if (!id) return;
+  setPlayerHistoryDialogMode("group");
+  $("playerHistoryTitle").textContent = fallbackName || "Group Details";
+  $("playerHistoryContent").innerHTML = `<div class="settings-empty compact"><h4>Loading group details</h4></div>`;
+  $("playerHistoryDialog").showModal();
+  try {
+    const group = await api("vrchatGroupDetail", { id }, 45000);
+    $("playerHistoryTitle").textContent = group.name || fallbackName || "Group Details";
+    $("playerHistoryContent").innerHTML = vrchatGroupDetailsHtml(group, fallbackName);
+  } catch (e) {
+    $("playerHistoryContent").innerHTML = `<div class="settings-empty compact"><h4>Could not load group</h4><p>${escapeHtml(e.message)}</p></div>`;
+  }
+}
+function vrchatGroupDetailsHtml(group, fallbackName = "") {
+  const title = group.name || fallbackName || group.id || "VRChat Group";
+  const icon = group.iconUrl || group.bannerUrl || "";
+  const banner = group.bannerUrl && group.bannerUrl !== group.iconUrl ? group.bannerUrl : "";
+  const mainImage = banner || icon;
+  const privacy = String(group.privacy || "").trim();
+  const joinState = String(group.joinState || "").trim();
+  const shortCode = group.shortCode ? `#${group.shortCode}` : "";
+  const subtitle = [shortCode, group.memberCount ? `${group.memberCount} members` : ""].filter(Boolean).join(" - ");
+  const chips = [
+    privacy ? groupDetailChipHtml(privacy, `privacy-${classToken(privacy)}`) : "",
+    joinState ? groupDetailChipHtml(joinState, `join-${classToken(joinState)}`) : "",
+    shortCode ? groupDetailChipHtml(shortCode, "short-code") : ""
+  ].filter(Boolean).join("");
+  const stats = `<div class="social-stat-grid vrchat-group-stats">
+    <span><strong>${escapeHtml(group.memberCount || "-")}</strong>Members</span>
+    <span><strong>${escapeHtml(privacy || "-")}</strong>Privacy</span>
+    <span><strong>${escapeHtml(joinState || "-")}</strong>Join state</span>
+    <span><strong>${escapeHtml(group.shortCode || "-")}</strong>Short code</span>
+  </div>`;
+  const raw = group.rawJson ? `<details class="social-detail-section vrchat-group-json"><summary>Raw JSON</summary><pre>${escapeHtml(group.rawJson)}</pre></details>` : "";
+  return `<div class="social-detail vrchat-group-detail">
+    <section class="vrchat-group-hero">
+      <div class="vrchat-group-image-card">${mainImage ? `<img src="${escapeAttr(mainImage)}" alt="">` : `<span>No group image</span>`}</div>
+      <div class="vrchat-group-identity">
+        ${icon ? `<img class="vrchat-group-icon" src="${escapeAttr(icon)}" alt="">` : `<div class="vrchat-group-icon placeholder">${escapeHtml(title.slice(0, 1).toUpperCase() || "G")}</div>`}
+        <div class="vrchat-group-title-block"><h4>${escapeHtml(title)}</h4>${subtitle ? `<span>${escapeHtml(subtitle)}</span>` : ""}${chips ? `<div class="world-detail-chips vrchat-group-chips">${chips}</div>` : ""}</div>
+        ${stats}
+      </div>
+    </section>
+    <div class="vrchat-group-detail-grid">
+      <section class="social-detail-section vrchat-group-about"><h5>About</h5><p class="vrchat-formatted-text">${escapeHtml(group.description || "No group description is available.")}</p></section>
+      <div class="vrchat-group-side-stack"><section class="social-detail-section vrchat-group-overview"><h5>Details</h5><dl>${detailRow("Group ID", group.id)}${detailRow("Owner", group.ownerId)}${detailRow("Privacy", group.privacy)}${detailRow("Join State", group.joinState)}${detailRow("Created", group.createdAt)}</dl></section>${raw}</div>
+    </div>
+  </div>`;
+}
+function groupDetailChipHtml(label, className = "") {
+  return `<span class="world-detail-chip group-detail-chip ${escapeAttr(className)}">${escapeHtml(label)}</span>`;
 }
 function socialGroupHtml(group) {
   const label = [group.name, group.shortCode ? `#${group.shortCode}` : ""].filter(Boolean).join(" ");
@@ -6937,6 +7403,20 @@ function detailRow(label, value) {
   const text = value === 0 ? "0" : String(value || "").trim();
   if (!text) return "";
   return `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(text)}</dd>`;
+}
+function detailRowHtml(label, html) {
+  const content = String(html || "").trim();
+  if (!content) return "";
+  return `<dt>${escapeHtml(label)}</dt><dd>${content}</dd>`;
+}
+function userDetailButtonHtml(userId, displayName = "", options = {}) {
+  const id = String(userId || "").trim();
+  const name = String(displayName || "").trim();
+  const label = `${options.prefix || ""}${name || id}`.trim();
+  if (!label) return "";
+  if (!avatarAuthorLooksLikeId(id)) return escapeHtml(label);
+  const className = options.className ? ` class="${escapeAttr(options.className)}"` : "";
+  return `<button type="button"${className} data-user-detail-id="${escapeAttr(id)}" data-user-detail-name="${escapeAttr(name)}">${escapeHtml(label)}</button>`;
 }
 function splitCsv(value) {
   return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
@@ -7102,6 +7582,10 @@ async function handleSocialAction(event) {
       await api("vrchatFavoriteWorldRemove", { id: worldId }, 45000);
       await refreshFavoriteWorlds();
       toast("World unfavorited.");
+      return;
+    }
+    if (action === "copyWorldId") {
+      if (await copyTextToClipboard(worldId)) toast("World ID copied.");
       return;
     }
     if (action === "invite") {
@@ -8518,12 +9002,26 @@ $("settingsLogFilterMenuBtn").addEventListener("click", (event) => toggleSortMen
 $("settingsLogFilterMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "settingsLogFilterSelect", "settingsLogFilterMenuBtn", () => { state.settingsLogFilter = $("settingsLogFilterSelect").value; loadSettingsLogs(); }), { passive: false });
 document.addEventListener("click", hideContextMenu);
 document.addEventListener("click", hideNotificationPopover);
+$("playerHistoryDialog").addEventListener("pointerdown", handlePlayerHistoryDialogPointerDown);
+document.addEventListener("pointerdown", handleUserDetailPopupPointerDown, { capture: true });
+document.addEventListener("click", suppressUserDetailBackdropClick, { capture: true });
 document.addEventListener("dragover", autoScrollDrag);
+document.addEventListener("wheel", containUserDetailPopupWheel, { passive: false, capture: true });
 document.addEventListener("wheel", wheelScrollDuringDrag, { passive: false, capture: true });
 document.addEventListener("wheel", trackZoomWheel, { passive: true, capture: true });
 document.addEventListener("keydown", (event) => {
   if (keyScrollDuringDrag(event)) return;
-  if (event.key === "Escape") hideContextMenu();
+  if (event.key === "Escape") {
+    if ($("playerHistoryDialog")?.open) {
+      $("playerHistoryDialog").close();
+      return;
+    }
+    if (isUserDetailPopupOpen()) {
+      closeNotificationDetails();
+      return;
+    }
+    hideContextMenu();
+  }
   if (event.key !== "Tab" || document.querySelector("dialog[open]")) return;
   event.preventDefault();
     const pages = ["favorites", "database", "worlds", "friends", "messages", "notifications"];
@@ -8697,10 +9195,11 @@ $("editGroupBackgroundBtn").addEventListener("click", (event) => {
 });
 ["thumbnailInput", "imageInput"].forEach((id) => $(id).addEventListener("input", updateAvatarPreview));
 ["tagsInput"].forEach((id) => $(id).addEventListener("input", updateAvatarDetailBadges));
+["avatarIdInput", "tagsInput", "descriptionInput", "notesInput", "sourceUrlInput"].forEach((id) => $(id).addEventListener("input", updateAvatarDetailSearchHighlightsFromForm));
 $("avatarDetailThumbnailButton").addEventListener("click", () => { const image = $("imageInput").value.trim() || $("thumbnailInput").value.trim(); if (!image) return; $("imagePreviewFull").src = image; $("imagePreviewDialog").showModal(); });
 $("avatarDetailAuthorBtn").addEventListener("click", showAvatarAuthorSearchOptions);
 $("avatarDetailUpdated").addEventListener("click", showAvatarUpdateHistory);
-["avatarNameInput", "avatarIdInput", "authorNameInput", "authorIdInput"].forEach((id) => $(id).addEventListener("input", updateAvatarAuthorAction));
+["avatarNameInput", "avatarIdInput", "authorNameInput", "authorIdInput"].forEach((id) => $(id).addEventListener("input", () => { updateAvatarAuthorAction(); updateAvatarDetailSearchHighlightsFromForm(); }));
 $("copyAvatarIdBtn").addEventListener("click", async () => {
   const avatarId = $("avatarIdInput").value.trim();
   if (!avatarId) { toast("No avatar ID to copy."); return; }
