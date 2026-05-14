@@ -324,6 +324,7 @@ internal static class Program
                 "vrchatUserCurrentAvatar" => await VrChat.GetUserCurrentAvatarAsync(GetPayload<IdInput>(request).Id),
                 "vrchatFriendGroups" => await VrChat.GetUserGroupsAsync(GetPayload<IdInput>(request).Id),
                 "vrchatGroupDetail" => await VrChat.GetGroupDetailAsync(GetPayload<IdInput>(request).Id),
+                "vrchatGroupMembers" => await VrChat.GetGroupMembersAsync(GetPayload<IdInput>(request).Id),
                 "vrchatUserUploadedAvatars" => await VrChat.GetUserUploadedAvatarsAsync(GetPayload<IdInput>(request).Id),
                 "vrchatUserWorlds" => await VrChat.GetUserWorldsAsync(GetPayload<IdInput>(request).Id),
                 "vrchatMutualFriends" => await VrChat.GetMutualFriendsAsync(GetPayload<IdInput>(request).Id),
@@ -4039,13 +4040,15 @@ internal sealed class VrChatClient
         {
             foreach (var item in doc.RootElement.EnumerateArray())
             {
+                var nested = item.TryGetProperty("group", out var groupElement) && groupElement.ValueKind == JsonValueKind.Object ? groupElement : default;
+                var hasNested = nested.ValueKind == JsonValueKind.Object;
                 groups.Add(new VrChatUserGroupSummary(
-                    ReadString(item, "id") ?? ReadString(item, "groupId") ?? "",
-                    ReadString(item, "name") ?? ReadString(item, "groupName") ?? "",
-                    ReadString(item, "shortCode") ?? "",
-                    ReadString(item, "memberCount") ?? ReadValueString(item, "memberCount"),
-                    ReadString(item, "description") ?? "",
-                    ReadString(item, "iconUrl") ?? ReadString(item, "bannerUrl") ?? ""));
+                    ReadString(item, "groupId") ?? (hasNested ? ReadString(nested, "id") ?? ReadString(nested, "groupId") : null) ?? ReadString(item, "id") ?? "",
+                    (hasNested ? ReadString(nested, "name") ?? ReadString(nested, "groupName") : null) ?? ReadString(item, "name") ?? ReadString(item, "groupName") ?? "",
+                    (hasNested ? ReadFullGroupShortCode(nested) : "") is { Length: > 0 } nestedShortCode ? nestedShortCode : ReadFullGroupShortCode(item),
+                    (hasNested ? ReadString(nested, "memberCount") ?? ReadValueString(nested, "memberCount") : null) ?? ReadString(item, "memberCount") ?? ReadValueString(item, "memberCount"),
+                    (hasNested ? ReadString(nested, "description") : null) ?? ReadString(item, "description") ?? "",
+                    (hasNested ? ReadString(nested, "iconUrl") ?? ReadString(nested, "bannerUrl") : null) ?? ReadString(item, "iconUrl") ?? ReadString(item, "bannerUrl") ?? ""));
             }
         }
         return new VrChatUserGroupsResult(groups.Where(x => !string.IsNullOrWhiteSpace(x.Id) || !string.IsNullOrWhiteSpace(x.Name)).ToList());
@@ -4053,24 +4056,110 @@ internal sealed class VrChatClient
     public async Task<VrChatGroupDetail> GetGroupDetailAsync(string id)
     {
         if (string.IsNullOrWhiteSpace(id)) throw new InvalidOperationException("Group not found.");
-        using var response = await _client.GetAsync($"groups/{WebUtility.UrlEncode(id.Trim())}");
+        id = id.Trim();
+        using var response = await _client.GetAsync($"groups/{WebUtility.UrlEncode(id)}");
         var json = await response.Content.ReadAsStringAsync();
-        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat group returned {(int)response.StatusCode}.");
+        if (!response.IsSuccessStatusCode)
+        {
+            var searched = await TryFindGroupDetailByQueryAsync(id);
+            if (searched is not null) return searched;
+            throw new InvalidOperationException($"VRChat group returned {(int)response.StatusCode}.");
+        }
+        return ReadGroupDetailJson(json, id);
+    }
+    private async Task<VrChatGroupDetail?> TryFindGroupDetailByQueryAsync(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return null;
+        using var response = await _client.GetAsync($"groups?query={WebUtility.UrlEncode(query)}&n=20&offset=0");
+        var json = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode) return null;
+        using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
+        if (doc.RootElement.ValueKind != JsonValueKind.Array) return null;
+        var normalized = query.Trim().TrimStart('#');
+        JsonElement? selected = null;
+        foreach (var item in doc.RootElement.EnumerateArray())
+        {
+            var id = ReadString(item, "id") ?? ReadString(item, "groupId") ?? "";
+            var shortCode = ReadFullGroupShortCode(item);
+            var name = ReadString(item, "name") ?? "";
+            if (id.Equals(normalized, StringComparison.OrdinalIgnoreCase) ||
+                shortCode.Equals(normalized, StringComparison.OrdinalIgnoreCase) ||
+                name.Equals(normalized, StringComparison.OrdinalIgnoreCase))
+            {
+                selected = item;
+                break;
+            }
+            selected ??= item;
+        }
+        if (selected is not JsonElement match) return null;
+        var matchedId = ReadString(match, "id") ?? ReadString(match, "groupId") ?? "";
+        if (matchedId.StartsWith("grp_", StringComparison.OrdinalIgnoreCase))
+        {
+            using var detailResponse = await _client.GetAsync($"groups/{WebUtility.UrlEncode(matchedId)}");
+            var detailJson = await detailResponse.Content.ReadAsStringAsync();
+            if (detailResponse.IsSuccessStatusCode) return ReadGroupDetailJson(detailJson, matchedId);
+        }
+        return ReadGroupDetailElement(match, matchedId);
+    }
+    private static VrChatGroupDetail ReadGroupDetailJson(string json, string fallbackId)
+    {
         using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
-        var root = doc.RootElement;
+        return ReadGroupDetailElement(doc.RootElement, fallbackId, json);
+    }
+    private static VrChatGroupDetail ReadGroupDetailElement(JsonElement root, string fallbackId, string? rawJson = null)
+    {
         return new VrChatGroupDetail(
-            ReadString(root, "id") ?? ReadString(root, "groupId") ?? id,
+            ReadString(root, "id") ?? ReadString(root, "groupId") ?? fallbackId,
             ReadString(root, "name") ?? "",
-            ReadString(root, "shortCode") ?? "",
+            ReadFullGroupShortCode(root),
             ReadString(root, "memberCount") ?? ReadValueString(root, "memberCount"),
             ReadString(root, "description") ?? "",
             ReadString(root, "iconUrl") ?? "",
             ReadString(root, "bannerUrl") ?? "",
             ReadString(root, "ownerId") ?? "",
+            ReadString(root, "ownerDisplayName") ?? ReadString(root, "ownerName") ?? ReadString(root, "authorName") ?? "",
             ReadString(root, "privacy") ?? "",
             ReadString(root, "joinState") ?? "",
             ReadString(root, "created_at") ?? ReadString(root, "createdAt") ?? "",
-            json);
+            rawJson ?? JsonSerializer.Serialize(root, ProgramJson.Options));
+    }
+    public async Task<VrChatGroupMembersResult> GetGroupMembersAsync(string id)
+    {
+        id = id.Trim();
+        if (string.IsNullOrWhiteSpace(id)) throw new InvalidOperationException("Group not found.");
+        var members = new List<VrChatGroupMemberSummary>();
+        var limit = 100;
+        var offset = 0;
+        while (members.Count < 500)
+        {
+            using var response = await _client.GetAsync($"groups/{WebUtility.UrlEncode(id)}/members?n={limit}&offset={offset}");
+            var json = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+            {
+                if (members.Count > 0) break;
+                throw new InvalidOperationException($"VRChat group members returned {(int)response.StatusCode}.");
+            }
+            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) break;
+            var count = doc.RootElement.GetArrayLength();
+            if (count == 0) break;
+            foreach (var item in doc.RootElement.EnumerateArray())
+            {
+                var user = item.TryGetProperty("user", out var userElement) && userElement.ValueKind == JsonValueKind.Object ? userElement : default;
+                var hasUser = user.ValueKind == JsonValueKind.Object;
+                members.Add(new VrChatGroupMemberSummary(
+                    ReadString(item, "userId") ?? (hasUser ? ReadString(user, "id") : null) ?? ReadString(item, "id") ?? "",
+                    ReadString(item, "displayName") ?? ReadString(item, "name") ?? (hasUser ? ReadString(user, "displayName") : null) ?? "",
+                    ReadString(item, "roleName") ?? ReadStringArray(item, "roleNames") ?? ReadStringArray(item, "roleIds"),
+                    ReadString(item, "membershipStatus") ?? ReadString(item, "status") ?? "",
+                    ReadString(item, "joinedAt") ?? ReadString(item, "created_at") ?? ReadString(item, "createdAt") ?? "",
+                    ReadString(item, "iconUrl") ?? ReadString(item, "imageUrl") ?? (hasUser ? ReadProfileImage(user) : null) ?? "",
+                    JsonSerializer.Serialize(item, ProgramJson.Options)));
+            }
+            if (count < limit) break;
+            offset += count;
+        }
+        return new VrChatGroupMembersResult(members);
     }
     public async Task<AvatarListResult> GetUserUploadedAvatarsAsync(string id)
     {
@@ -5246,6 +5335,14 @@ internal sealed class VrChatClient
     private static bool ReadBool(JsonElement e, string name) => e.TryGetProperty(name, out var v) && (v.ValueKind == JsonValueKind.True || (v.ValueKind == JsonValueKind.String && bool.TryParse(v.GetString(), out var parsed) && parsed));
     private static string ReadValueString(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.String or JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False ? v.ToString() : "";
     private static string ReadStringArray(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Array ? string.Join(", ", v.EnumerateArray().Select(x => x.GetString()).Where(x => !string.IsNullOrWhiteSpace(x))) : "";
+    private static string ReadFullGroupShortCode(JsonElement e)
+    {
+        var shortCode = ReadString(e, "shortCode") ?? "";
+        var discriminator = ReadString(e, "discriminator") ?? "";
+        return !string.IsNullOrWhiteSpace(shortCode) && !string.IsNullOrWhiteSpace(discriminator) && !shortCode.Contains('.', StringComparison.Ordinal)
+            ? $"{shortCode}.{discriminator}"
+            : shortCode;
+    }
     private static string SyncTagFromGroupId(string groupId) => groupId.StartsWith("vrc_", StringComparison.OrdinalIgnoreCase) ? groupId[4..] : "";
     private static string SummarizePackages(JsonElement packages) => packages.ValueKind == JsonValueKind.Array ? string.Join(", ", packages.EnumerateArray().Select(p => $"{ReadString(p, "platform") ?? "unknown"} / Unity {ReadString(p, "unityVersion") ?? ""}".Trim())) : "";
     private void SaveCookies()
@@ -7665,7 +7762,9 @@ internal sealed record VrChatFriendSummary(string Id, string DisplayName, string
 internal sealed record VrChatFriendListResult(List<VrChatFriendSummary> Friends, bool HasMore);
 internal sealed record VrChatUserGroupSummary(string Id, string Name, string ShortCode, string MemberCount, string Description, string ImageUrl);
 internal sealed record VrChatUserGroupsResult(List<VrChatUserGroupSummary> Groups);
-internal sealed record VrChatGroupDetail(string Id, string Name, string ShortCode, string MemberCount, string Description, string IconUrl, string BannerUrl, string OwnerId, string Privacy, string JoinState, string CreatedAt, string RawJson);
+internal sealed record VrChatGroupDetail(string Id, string Name, string ShortCode, string MemberCount, string Description, string IconUrl, string BannerUrl, string OwnerId, string OwnerName, string Privacy, string JoinState, string CreatedAt, string RawJson);
+internal sealed record VrChatGroupMemberSummary(string UserId, string DisplayName, string Roles, string Status, string JoinedAt, string ImageUrl, string RawJson);
+internal sealed record VrChatGroupMembersResult(List<VrChatGroupMemberSummary> Members);
 internal sealed record VrChatWorldSummary(string Id, string Name, string AuthorName, string Description, string ImageUrl, int Occupants, int Favorites, string ReleaseStatus, int Capacity = 0, int Visits = 0, int PublicOccupants = 0, int PrivateOccupants = 0, string CreatedAt = "", string UpdatedAt = "", string RawJson = "", string FavoriteTags = "", List<VrChatWorldInstanceSummary>? Instances = null, string AuthorId = "");
 internal sealed record VrChatWorldInstanceSummary(string Id, string Location, int Occupants, string Type, string Region, bool IsLocked, bool IsAgeRestricted, string GroupId = "", string GroupName = "");
 internal sealed record VrChatWorldSearchResult(List<VrChatWorldSummary> Worlds, bool HasMore);

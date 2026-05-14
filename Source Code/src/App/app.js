@@ -190,6 +190,75 @@ async function copyTextToClipboard(text) {
 }
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[c]));
 const escapeAttr = (value) => escapeHtml(value).replace(/`/g, "&#096;");
+const URL_PATTERN = /(https?:\/\/[^\s<>"']+|(?:discord\.gg|discord\.com|youtube\.com|youtu\.be|twitch\.tv|x\.com|twitter\.com|github\.com|patreon\.com|instagram\.com|tiktok\.com|ko-fi\.com|gumroad\.com|steamcommunity\.com|store\.steampowered\.com|spotify\.com)\/[^\s<>"']+)/ig;
+function normalizeUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return /^https?:\/\//i.test(text) ? text : `https://${text}`;
+}
+function linkServiceLabel(value) {
+  let host = "";
+  try { host = new URL(normalizeUrl(value)).hostname.toLowerCase().replace(/^www\./, ""); } catch { host = String(value || "").toLowerCase(); }
+  if (host.includes("discord")) return "Discord";
+  if (host.includes("youtube") || host.includes("youtu.be")) return "YouTube";
+  if (host.includes("twitch")) return "Twitch";
+  if (host.includes("patreon")) return "Patreon";
+  if (host.includes("instagram")) return "Instagram";
+  if (host.includes("tiktok")) return "TikTok";
+  if (host.includes("ko-fi")) return "Ko-fi";
+  if (host.includes("gumroad")) return "Gumroad";
+  if (host.includes("steamcommunity") || host.includes("steampowered")) return "Steam";
+  if (host.includes("spotify")) return "Spotify";
+  if (host === "x.com" || host.includes("twitter")) return "X";
+  if (host.includes("github")) return "GitHub";
+  if (host.includes("vrchat") || host.includes("vrc.group")) return "VRChat";
+  return host ? host.split(".")[0].replace(/[-_]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase()) : "Link";
+}
+function linkIconText(value) {
+  const label = linkServiceLabel(value);
+  return label === "Discord" ? "DC" : label === "YouTube" ? "YT" : label === "Twitch" ? "TW" : label === "GitHub" ? "GH" : label === "VRChat" ? "VR" : label;
+}
+function linkIconSvg(value) {
+  const label = linkServiceLabel(value);
+  if (label === "Discord") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 5.6A16.2 16.2 0 0 0 15.4 4l-.2.4a14.9 14.9 0 0 1 3.6 1.8 12.2 12.2 0 0 0-4.7-1.4 13 13 0 0 0-4.2 0 12.2 12.2 0 0 0-4.7 1.4 14.9 14.9 0 0 1 3.6-1.8L8.6 4a16.2 16.2 0 0 0-4.1 1.6C1.9 9.5 1.2 13.3 1.5 17.1A16.4 16.4 0 0 0 6.6 20l.9-1.2a10.7 10.7 0 0 1-1.4-.7l.3-.2a11.6 11.6 0 0 0 11.2 0l.3.2a10.7 10.7 0 0 1-1.4.7l.9 1.2a16.4 16.4 0 0 0 5.1-2.9c.4-4.4-.7-8.1-3-11.5ZM8.4 14.8c-1 0-1.8-.9-1.8-2s.8-2 1.8-2 1.8.9 1.8 2-.8 2-1.8 2Zm7.2 0c-1 0-1.8-.9-1.8-2s.8-2 1.8-2 1.8.9 1.8 2-.8 2-1.8 2Z"/></svg>`;
+  if (label === "YouTube") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23 7.2a3 3 0 0 0-2.1-2.1C19 4.6 12 4.6 12 4.6s-7 0-8.9.5A3 3 0 0 0 1 7.2 31.2 31.2 0 0 0 .5 12 31.2 31.2 0 0 0 1 16.8a3 3 0 0 0 2.1 2.1c1.9.5 8.9.5 8.9.5s7 0 8.9-.5a3 3 0 0 0 2.1-2.1 31.2 31.2 0 0 0 .5-4.8 31.2 31.2 0 0 0-.5-4.8ZM9.7 15.4V8.6L15.7 12l-6 3.4Z"/></svg>`;
+  if (label === "Twitch") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h17v11.7l-4.8 4.8h-3.7L10 22H7v-2.5H3V6l1-3Zm2 2v12h4v2.5l2.5-2.5h4.2L19 14.7V5H6Zm5 3h2v5h-2V8Zm5 0h2v5h-2V8Z"/></svg>`;
+  if (label === "Patreon") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h4v18H5V3Zm10.2 0a6.8 6.8 0 1 0 0 13.6 6.8 6.8 0 0 0 0-13.6Z"/></svg>`;
+  if (label === "Instagram") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.3 2h9.4A5.3 5.3 0 0 1 22 7.3v9.4a5.3 5.3 0 0 1-5.3 5.3H7.3A5.3 5.3 0 0 1 2 16.7V7.3A5.3 5.3 0 0 1 7.3 2Zm0 2A3.3 3.3 0 0 0 4 7.3v9.4A3.3 3.3 0 0 0 7.3 20h9.4a3.3 3.3 0 0 0 3.3-3.3V7.3A3.3 3.3 0 0 0 16.7 4H7.3ZM12 7a5 5 0 1 1 0 10 5 5 0 0 1 0-10Zm0 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6Zm5.4-2.4a1.1 1.1 0 1 1 0 2.2 1.1 1.1 0 0 1 0-2.2Z"/></svg>`;
+  if (label === "TikTok") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3c.4 3 2.1 4.8 5 5v3.7a8.7 8.7 0 0 1-5-1.6v5.8A6.1 6.1 0 1 1 8.9 9.8c.4 0 .8 0 1.1.1v3.9a2.4 2.4 0 1 0 1.8 2.3V3H15Z"/></svg>`;
+  if (label === "Ko-fi") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h14a4 4 0 0 1 0 8h-1.1A7 7 0 0 1 9 20H7a4 4 0 0 1-4-4V6Zm14 2v4a2 2 0 0 0 0-4ZM8.2 9.1c-.8-.8-2.2-.2-2.2 1 0 1.8 3 3.4 3 3.4s3-1.6 3-3.4c0-1.2-1.4-1.8-2.2-1L9 10l-.8-.9Z"/></svg>`;
+  if (label === "Gumroad") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm1.1 15.2c-3 0-5.1-2.1-5.1-5.1C8 9 10.1 6.8 13.2 6.8c2 0 3.5.8 4.4 2.3l-2.4 1.4c-.4-.7-1.1-1.1-2-1.1-1.4 0-2.4 1-2.4 2.7 0 1.6.9 2.6 2.4 2.6 1 0 1.8-.4 2.1-1.2h-2.5v-2.2h5.2v5.7h-2.1l-.2-1.1c-.7.8-1.5 1.3-2.6 1.3Z"/></svg>`;
+  if (label === "Steam") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-9.9 8.7l5.4 2.2a3 3 0 0 1 1.7-.5l2.4-3.5v-.1a3.8 3.8 0 1 1 3.8 3.8h-.1l-3.4 2.5a3 3 0 1 1-5.6 1.8l-4-1.7A10 10 0 1 0 12 2Zm-3.5 14.2 1.5.6a1.3 1.3 0 1 0-1.7 1.7 1.3 1.3 0 0 0 .2-2.3Zm6.9-8.8a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8Zm0-.9a2.3 2.3 0 1 1 0 4.6 2.3 2.3 0 0 1 0-4.6Z"/></svg>`;
+  if (label === "Spotify") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm4.6 14.4c-.2.3-.5.4-.8.2-2.2-1.3-4.9-1.6-8.1-.9-.3.1-.6-.1-.7-.5-.1-.3.1-.6.5-.7 3.5-.8 6.6-.4 9.1 1 .3.2.4.6.2.9Zm1.2-2.7c-.2.4-.7.5-1 .3-2.5-1.5-6.3-1.9-9.2-1-.4.1-.8-.1-.9-.5-.1-.4.1-.8.5-.9 3.4-1 7.6-.5 10.5 1.1.3.2.5.7.1 1Zm.1-2.8C15 9.2 10 9 7.2 9.8c-.5.1-1-.1-1.1-.6-.1-.5.1-1 .6-1.1 3.3-1 8.8-.7 12.1 1.2.4.2.6.8.3 1.2-.2.4-.8.6-1.2.4Z"/></svg>`;
+  if (label === "X") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.4 10.5 22.8 1h-2l-7.3 8.3L7.7 1H1l8.8 12.6L1 23h2l7.7-8.7 6.1 8.7h6.7l-9.1-12.5Zm-2.7 3.1-.9-1.2L3.7 2.5h3l5.7 8 .9 1.2 7.4 10.3h-3l-6-8.4Z"/></svg>`;
+  if (label === "GitHub") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .8a11.2 11.2 0 0 0-3.5 21.8c.6.1.8-.2.8-.6v-2.1c-3.3.7-4-1.4-4-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 .1.6 2.7 3.5 1.9.1-.8.4-1.3.7-1.6-2.6-.3-5.4-1.3-5.4-5.6 0-1.2.4-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.9 1.2 3.1 0 4.4-2.8 5.3-5.4 5.6.4.4.8 1.1.8 2.2V22c0 .4.2.7.8.6A11.2 11.2 0 0 0 12 .8Z"/></svg>`;
+  if (label === "VRChat") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8l-5 4v-4H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Zm2.5 4.5 2.1 4h1.8l2.1-4h-1.8l-1.2 2.5-1.2-2.5H6.5Zm7 0v4h1.6v-1.2h.9l.8 1.2h1.9l-1.1-1.5a1.4 1.4 0 0 0 .8-1.3c0-.9-.7-1.2-1.7-1.2h-3.2Zm1.6 1.1h1.2c.3 0 .5.1.5.4s-.2.5-.5.5h-1.2v-.9Z"/></svg>`;
+  return "";
+}
+function linkChipHtml(value) {
+  const url = normalizeUrl(value);
+  if (!url) return "";
+  const label = linkServiceLabel(url);
+  const icon = linkIconSvg(url);
+  return `<a class="service-link-chip ${escapeAttr(classToken(label))}" href="${escapeAttr(url)}" target="_blank" rel="noreferrer">${icon ? `<span>${icon}</span>` : ""}${escapeHtml(label)}</a>`;
+}
+function linkChipsHtml(values) {
+  return values.map(linkChipHtml).filter(Boolean).join("");
+}
+function formatRichTextHtml(value) {
+  const text = String(value || "");
+  if (!text) return "";
+  let html = "";
+  let lastIndex = 0;
+  text.replace(URL_PATTERN, (match, _capture, offset) => {
+    html += escapeHtml(text.slice(lastIndex, offset));
+    html += linkChipHtml(match) || escapeHtml(match);
+    lastIndex = offset + match.length;
+    return match;
+  });
+  html += escapeHtml(text.slice(lastIndex));
+  return html.replace(/\r?\n/g, "<br>");
+}
 const classToken = (value) => String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
 
 async function loadLibrary() {
@@ -1579,6 +1648,8 @@ function updateAvatarDetailSearchHighlights(avatar = {}) {
   if (!control) return;
   if (control.tagName === "BUTTON") {
     control.classList.add("avatar-detail-matched-button");
+    const visibleText = control.textContent || match.text || "";
+    control.innerHTML = databaseHighlightText(visibleText, match.terms);
     return;
   }
   const host = control.closest("label");
@@ -1600,6 +1671,7 @@ function clearAvatarDetailSearchHighlights() {
   $("avatarDetailsForm")?.querySelectorAll(".avatar-detail-match-field").forEach((node) => node.classList.remove("avatar-detail-match-field"));
   $("avatarDetailsForm")?.querySelectorAll(".avatar-detail-matched-control").forEach((node) => node.classList.remove("avatar-detail-matched-control"));
   $("avatarDetailsForm")?.querySelectorAll(".avatar-detail-matched-button").forEach((node) => node.classList.remove("avatar-detail-matched-button"));
+  resetAvatarAuthorButtonText();
 }
 
 function formatAvatarUpdatedAt(avatar) {
@@ -1661,6 +1733,13 @@ function updateAvatarAuthorAction() {
   button.hidden = !authorName && !authorId;
   button.textContent = authorName || authorId;
   button.title = authorId ? `Author ID: ${authorId}` : "Search by avatar author";
+}
+function resetAvatarAuthorButtonText() {
+  const button = $("avatarDetailAuthorBtn");
+  if (!button) return;
+  const authorName = $("authorNameInput").value.trim();
+  const authorId = $("authorIdInput").value.trim();
+  button.textContent = authorName || authorId;
 }
 
 function showAvatarAuthorSearchOptions(event) {
@@ -2414,11 +2493,12 @@ function avatarDatabaseMatchDetail(avatar) {
   if (databaseTextMatchesTerms(title, [query])) return null;
   const terms = databaseHighlightTerms(query);
   if (!terms.length) return null;
+  const authorDisplay = displayAvatarAuthorName(avatar);
   const fields = [
     ["Description", "descriptionInput", avatar.description],
     ["Tags", "tagsInput", mergeTextList(avatar.tags, avatar.platforms, /[,|;]/)],
     ["Notes", "notesInput", avatar.notes],
-    ["Author", "avatarDetailAuthorBtn", [displayAvatarAuthorName(avatar), avatar.authorId].filter(Boolean).join(" - ")],
+    ["Author", "avatarDetailAuthorBtn", authorDisplay || avatar.authorId],
     ["Avatar ID", "avatarIdInput", avatar.avatarId || avatar.id]
   ];
   for (const [label, fieldId, value] of fields) {
@@ -4936,7 +5016,7 @@ function openPlayerNameHistoryDialog(userId, displayName = "") {
   $("playerHistoryContent").innerHTML = names.length
     ? `<div class="player-history-list">${names.map((item, index) => `<article class="player-history-row"><div><strong>${escapeHtml(item.name)}${index === 0 ? ` <em>current/latest</em>` : ""}</strong><span>${escapeHtml(nameChangedLabel(item, index))}</span><small>${escapeHtml([item.firstSeen ? `First seen ${formatDateTime(item.firstSeen)}` : "", item.lastSeen ? `Last seen ${formatDateTime(item.lastSeen)}` : "", item.count > 1 ? `${item.count} sightings` : "", item.source].filter(Boolean).join(" - "))}</small></div></article>`).join("")}</div>`
     : `<div class="settings-empty compact"><h4>No username history</h4><p>This app has not logged another name for this user yet.</p></div>`;
-  $("playerHistoryDialog").showModal();
+  if (!$("playerHistoryDialog").open) $("playerHistoryDialog").show();
 }
 function openPlayerMetHistoryDialog(userId, displayName = "", remoteItems = null) {
   const id = String(userId || "").trim();
@@ -4970,6 +5050,18 @@ function handlePlayerHistoryDialogPointerDown(event) {
   event.stopImmediatePropagation();
   dialog.close();
 }
+function isGroupDetailsPopupOpen() {
+  const dialog = $("playerHistoryDialog");
+  return Boolean(dialog?.open && dialog.classList.contains("group-details-dialog"));
+}
+function handleGroupDetailsPopupPointerDown(event) {
+  if (!isGroupDetailsPopupOpen() || isUserDetailPopupOpen()) return;
+  const dialog = $("playerHistoryDialog");
+  if (dialog.contains(event.target)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  dialog.close();
+}
 function bindPlayerHistoryTriggers(container = document) {
   container.querySelectorAll("[data-player-name-history]").forEach((button) => button.addEventListener("click", () => openPlayerNameHistoryDialog(button.dataset.playerNameHistory || "", button.dataset.playerName || "")));
   container.querySelectorAll("[data-player-met-history]").forEach((button) => button.addEventListener("click", () => openPlayerMetHistoryDialog(button.dataset.playerMetHistory || "", button.dataset.playerName || "")));
@@ -4978,6 +5070,17 @@ function setPlayerHistoryDialogMode(mode = "history") {
   const isGroup = mode === "group";
   $("playerHistoryDialog").classList.toggle("group-details-dialog", isGroup);
   $("playerHistoryContent").classList.toggle("group-details-content", isGroup);
+  if (!isGroup) document.body.classList.remove("group-details-popup-open");
+}
+function openGroupDetailsPanelDialog() {
+  const dialog = $("playerHistoryDialog");
+  if (!dialog) return;
+  if (dialog.open) {
+    try { dialog.close(); } catch { dialog.removeAttribute("open"); }
+  }
+  dialog.setAttribute("open", "");
+  dialog.removeAttribute("aria-modal");
+  document.body.classList.add("group-details-popup-open");
 }
 function localPlayerProfileFromLogs(userId, displayName = "") {
   const id = String(userId || "").trim();
@@ -5713,6 +5816,7 @@ function openNotificationFriendDetails(friend, notification = null, { resetTab =
   $("notificationDetailsContent").querySelectorAll("[data-world-id]").forEach((button) => button.addEventListener("click", () => selectSocialWorld(button.dataset.worldId)));
   $("notificationDetailsContent").querySelectorAll("[data-friend-note]").forEach((field) => field.addEventListener("change", () => saveFriendNote(field.dataset.friendNote || "", field.value)));
   bindPlayerHistoryTriggers($("notificationDetailsContent"));
+  bindVrchatGroupLinks($("notificationDetailsContent"));
 }
 function renderMessagePopup() {
   const popup = $("messagePopup");
@@ -5799,7 +5903,7 @@ function userPopupFriendDetailsHtml(friend, notification = null) {
       <section class="user-popup-memo"><h5>Memo</h5><p class="friend-info-empty">-</p></section>
       <section class="user-popup-avatar"><h5>Avatar Info</h5>${avatarInfo}</section>
       <section class="user-popup-represented"><h5>Represented Group</h5>${represented}</section>
-      <section class="user-popup-bio"><h5>Bio</h5>${friend.bio ? `<p>${escapeHtml(friend.bio)}</p>` : `<p class="friend-info-empty">No bio available.</p>`}${bioLinks.length ? `<div class="friend-link-list">${bioLinks.map((link) => `<span>${escapeHtml(link)}</span>`).join("")}</div>` : ""}</section>
+      <section class="user-popup-bio"><h5>Bio</h5>${friend.bio ? `<p class="vrcx-rich-text">${formatRichTextHtml(friend.bio)}</p>` : `<p class="friend-info-empty">No bio available.</p>`}${bioLinks.length ? `<div class="friend-link-list">${linkChipsHtml(bioLinks)}</div>` : ""}</section>
       <section class="friend-info-metrics-section user-popup-metrics"><h5>Details</h5><div class="friend-info-metrics">
         ${friendInfoMetric("Last Seen", friend.lastLogin || "-")}
         ${friendInfoMetric("Join Count", joinCount || "-")}
@@ -5850,7 +5954,6 @@ function isUserDetailPopupOpen() {
 }
 function handleUserDetailPopupPointerDown(event) {
   if (!isUserDetailPopupOpen()) return;
-  if ($("playerHistoryDialog")?.open) return;
   const panel = $("notificationDetailsPanel");
   if (panel.contains(event.target)) return;
   event.preventDefault();
@@ -5867,6 +5970,13 @@ function containUserDetailPopupWheel(event) {
   if (!isUserDetailPopupOpen()) return;
   const panel = $("notificationDetailsPanel");
   if (panel.contains(event.target)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+function containGroupDetailsPopupWheel(event) {
+  if (!isGroupDetailsPopupOpen() || isUserDetailPopupOpen()) return;
+  const dialog = $("playerHistoryDialog");
+  if (dialog.contains(event.target)) return;
   event.preventDefault();
   event.stopImmediatePropagation();
 }
@@ -5912,6 +6022,7 @@ function renderVrchatSocial() {
   details.querySelectorAll("[data-friend-id]").forEach((button) => button.addEventListener("click", () => selectSocialFriend(button.dataset.friendId, { clickedPresence: button.dataset.presence })));
   details.querySelectorAll("[data-avatar-detail-id], [data-avatar-detail-kind]").forEach((button) => button.addEventListener("click", () => openSocialAvatarDetails(button.dataset.avatarDetailId, button.dataset.avatarDetailKind)));
   bindPlayerHistoryTriggers(details);
+  bindVrchatGroupLinks(details);
   bindImageFallbacks(details);
   hydrateInlineAvatarAuthors(details);
   details.querySelectorAll("[data-friend-tab]").forEach((button) => button.addEventListener("click", () => {
@@ -7011,7 +7122,7 @@ function friendDetailsHtml(friend) {
   const overviewStatus = presence === "offline" ? "Offline" : [friend.status, friend.statusDescription].filter(Boolean).join(" - ") || presenceLabel(presence);
   const overview = `<section class="social-detail-section friend-info-section"><h5>${escapeHtml(presenceLabel(presence))}</h5><dl>${detailRow("Status", overviewStatus)}${detailRow("Location", location)}${detailRow("World ID", friend.worldId)}${detailRow("State", presence === "offline" ? "offline" : friend.state)}${detailRow("Last platform", friend.lastPlatform)}${detailRow("User ID", friend.id)}</dl></section>`;
   const avatarBlock = `<section class="social-detail-section"><h5>Avatar Info</h5><dl>${detailRow("Name", avatarName)}${detailRow("Avatar ID", avatarId)}${detailRow("Author", displayAvatarAuthorName(liveAvatar))}${detailRow("Status", liveAvatar.releaseStatus)}${detailRow("Platforms", liveAvatar.platforms)}${detailRow("Avatar Cloning", readableBool(friend.allowAvatarCopying))}</dl></section>`;
-  const bioBlock = `<section class="social-detail-section"><h5>Bio</h5>${friend.bio ? `<p class="friend-bio">${escapeHtml(friend.bio)}</p>` : `<p class="social-muted">No bio available.</p>`}${bioLinks.length ? `<div class="friend-link-list">${bioLinks.map((link) => `<span>${escapeHtml(link)}</span>`).join("")}</div>` : ""}</section>`;
+  const bioBlock = `<section class="social-detail-section"><h5>Bio</h5>${friend.bio ? `<p class="friend-bio vrcx-rich-text">${formatRichTextHtml(friend.bio)}</p>` : `<p class="social-muted">No bio available.</p>`}${bioLinks.length ? `<div class="friend-link-list">${linkChipsHtml(bioLinks)}</div>` : ""}</section>`;
   const groupsBlock = `<section class="social-detail-section group-scroll-section"><h5>Groups</h5>${groups.length ? `<div class="social-group-list scroll-contained">${groups.map(socialGroupHtml).join("")}</div>` : `<p class="social-muted">No public groups found.</p>`}</section>`;
   const activity = `<section class="social-detail-section"><h5>Activity</h5><div class="friend-metric-grid"><span><strong>${escapeHtml(friend.lastLogin || "-")}</strong>Last Seen</span><span><strong>${escapeHtml(friend.dateJoined || "-")}</strong>Date Joined</span><span><strong>${escapeHtml(readableBool(friend.allowAvatarCopying) || "-")}</strong>Avatar Cloning</span><span><strong>${escapeHtml(friend.ageVerificationStatus || "-")}</strong>Age Verification</span></div></section>`;
   const more = `<section class="social-detail-section"><h5>More</h5><dl>${detailRow("Pronouns", friend.pronouns)}${detailRow("Developer type", friend.developerType)}${detailRow("Tags", friend.tags)}</dl></section>`;
@@ -7088,7 +7199,7 @@ function friendInfoTabHtml(friend, parts) {
       <section><h5>Memo</h5><p class="friend-info-empty">-</p></section>
       <section><h5>Avatar Info</h5>${friendAvatarInfoButton(parts.avatarName, parts.avatarId, parts.avatarImage, displayAvatarAuthorName(parts.liveAvatar), parts.liveAvatar)}</section>
       <section><h5>Represented Group</h5>${represented}</section>
-      <section class="friend-info-bio"><h5>Bio</h5>${friend.bio ? `<p>${escapeHtml(friend.bio)}</p>` : `<p class="friend-info-empty">No bio available.</p>`}${bioLinks.length ? `<div class="friend-link-list">${bioLinks.map((link) => `<span>${escapeHtml(link)}</span>`).join("")}</div>` : ""}</section>
+      <section class="friend-info-bio"><h5>Bio</h5>${friend.bio ? `<p class="vrcx-rich-text">${formatRichTextHtml(friend.bio)}</p>` : `<p class="friend-info-empty">No bio available.</p>`}${bioLinks.length ? `<div class="friend-link-list">${linkChipsHtml(bioLinks)}</div>` : ""}</section>
     </div>
     <section class="friend-info-metrics-section">
       <h5>Details</h5>
@@ -7340,60 +7451,262 @@ function latestWorldLeaveForInstance(world, instance) {
 async function openVrchatGroupDetailsDialog(groupId, fallbackName = "") {
   const id = String(groupId || "").trim();
   if (!id) return;
+  state.social.groupTab = "info";
   setPlayerHistoryDialogMode("group");
   $("playerHistoryTitle").textContent = fallbackName || "Group Details";
   $("playerHistoryContent").innerHTML = `<div class="settings-empty compact"><h4>Loading group details</h4></div>`;
-  $("playerHistoryDialog").showModal();
+  openGroupDetailsPanelDialog();
   try {
     const group = await api("vrchatGroupDetail", { id }, 45000);
-    $("playerHistoryTitle").textContent = group.name || fallbackName || "Group Details";
-    $("playerHistoryContent").innerHTML = vrchatGroupDetailsHtml(group, fallbackName);
+    const resolvedId = String(group.id || id || "").trim();
+    if (group.ownerId && !group.ownerName) {
+      try {
+        const owner = await api("vrchatFriendDetail", { id: group.ownerId }, 45000);
+        group.ownerName = owner.displayName || "";
+      } catch { }
+    }
+    try {
+      const members = await api("vrchatGroupMembers", { id: resolvedId }, 45000);
+      group.members = Array.isArray(members?.members) ? members.members : [];
+    } catch (membersError) {
+      group.members = [];
+      group.membersError = membersError.message || "Could not load members.";
+    }
+    renderVrchatGroupDetailsDialog(group, fallbackName);
   } catch (e) {
     $("playerHistoryContent").innerHTML = `<div class="settings-empty compact"><h4>Could not load group</h4><p>${escapeHtml(e.message)}</p></div>`;
   }
 }
+function renderVrchatGroupDetailsDialog(group, fallbackName = "") {
+  $("playerHistoryTitle").textContent = group.name || fallbackName || "Group Details";
+  $("playerHistoryContent").innerHTML = vrchatGroupDetailsHtml(group, fallbackName);
+  bindVrchatGroupDetailsDialogEvents(group, fallbackName);
+}
+function bindVrchatGroupDetailsDialogEvents(group, fallbackName = "") {
+  const content = $("playerHistoryContent");
+  content.querySelectorAll("[data-group-tab]").forEach((button) => button.addEventListener("click", () => {
+    state.social.groupTab = button.dataset.groupTab || "info";
+    renderVrchatGroupDetailsDialog(group, fallbackName);
+  }));
+  content.querySelectorAll("[data-copy-text]").forEach((button) => button.addEventListener("click", async () => {
+    if (await copyTextToClipboard(button.dataset.copyText || "")) toast("Copied.");
+  }));
+  content.querySelectorAll("[data-user-detail-id]").forEach((button) => button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openUserDetails(button.dataset.userDetailId || "", button.dataset.userDetailName || button.textContent || "");
+  }));
+  bindImageFallbacks(content);
+}
+function bindVrchatGroupLinks(container = document) {
+  container.querySelectorAll("[data-vrchat-group]").forEach((button) => button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = button.dataset.vrchatGroup || "";
+    const shortCode = button.dataset.vrchatGroupShortCode || "";
+    openVrchatGroupDetailsDialog(id.startsWith("grp_") ? id : shortCode || id, button.dataset.vrchatGroupName || button.textContent || "");
+  }));
+  container.querySelectorAll("[data-vrchat-group]").forEach((button) => button.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    button.click();
+  }));
+}
 function vrchatGroupDetailsHtml(group, fallbackName = "") {
+  const raw = parseJsonSafe(group.rawJson) || {};
   const title = group.name || fallbackName || group.id || "VRChat Group";
   const icon = group.iconUrl || group.bannerUrl || "";
   const banner = group.bannerUrl && group.bannerUrl !== group.iconUrl ? group.bannerUrl : "";
-  const mainImage = banner || icon;
+  const bannerFallbacks = [banner, icon].filter(Boolean);
   const privacy = String(group.privacy || "").trim();
   const joinState = String(group.joinState || "").trim();
-  const shortCode = group.shortCode ? `#${group.shortCode}` : "";
-  const subtitle = [shortCode, group.memberCount ? `${group.memberCount} members` : ""].filter(Boolean).join(" - ");
-  const chips = [
-    privacy ? groupDetailChipHtml(privacy, `privacy-${classToken(privacy)}`) : "",
-    joinState ? groupDetailChipHtml(joinState, `join-${classToken(joinState)}`) : "",
-    shortCode ? groupDetailChipHtml(shortCode, "short-code") : ""
-  ].filter(Boolean).join("");
-  const stats = `<div class="social-stat-grid vrchat-group-stats">
-    <span><strong>${escapeHtml(group.memberCount || "-")}</strong>Members</span>
-    <span><strong>${escapeHtml(privacy || "-")}</strong>Privacy</span>
-    <span><strong>${escapeHtml(joinState || "-")}</strong>Join state</span>
-    <span><strong>${escapeHtml(group.shortCode || "-")}</strong>Short code</span>
-  </div>`;
-  const raw = group.rawJson ? `<details class="social-detail-section vrchat-group-json"><summary>Raw JSON</summary><pre>${escapeHtml(group.rawJson)}</pre></details>` : "";
-  return `<div class="social-detail vrchat-group-detail">
-    <section class="vrchat-group-hero">
-      <div class="vrchat-group-image-card">${mainImage ? `<img src="${escapeAttr(mainImage)}" alt="">` : `<span>No group image</span>`}</div>
-      <div class="vrchat-group-identity">
-        ${icon ? `<img class="vrchat-group-icon" src="${escapeAttr(icon)}" alt="">` : `<div class="vrchat-group-icon placeholder">${escapeHtml(title.slice(0, 1).toUpperCase() || "G")}</div>`}
-        <div class="vrchat-group-title-block"><h4>${escapeHtml(title)}</h4>${subtitle ? `<span>${escapeHtml(subtitle)}</span>` : ""}${chips ? `<div class="world-detail-chips vrchat-group-chips">${chips}</div>` : ""}</div>
-        ${stats}
+  const shortCode = group.shortCode || "";
+  const groupUrl = shortCode ? `https://vrc.group/${shortCode}` : "";
+  const descriptionText = String(group.description || "").trim();
+  const explicitTagline = firstText(raw, ["tagline", "summary", "shortDescription"]);
+  const chips = groupDisplayChips(group, raw);
+  const joinLabel = groupJoinButtonLabel(group, raw);
+  const active = groupDetailActiveTab();
+  return `<div class="social-detail vrchat-group-detail vrcx-group-detail">
+    <section class="vrcx-group-header">
+      <div class="vrcx-group-icon-wrap">${icon ? `<img class="vrcx-group-icon" src="${escapeAttr(icon)}" alt="">` : `<div class="vrcx-group-icon placeholder">${escapeHtml(title.slice(0, 1).toUpperCase() || "G")}</div>`}</div>
+      <div class="vrcx-group-main">
+        <div class="vrcx-group-title-row"><h4>${escapeHtml(title)}</h4>${shortCode ? `<span>${escapeHtml(shortCode)}</span>` : ""}</div>
+        ${group.ownerId ? userDetailButtonHtml(group.ownerId, group.ownerName || group.ownerId, { className: "vrcx-group-owner" }) : ""}
+        ${chips ? `<div class="world-detail-chips vrchat-group-chips">${chips}</div>` : ""}
+        ${explicitTagline ? `<p class="vrcx-rich-text">${formatRichTextHtml(explicitTagline)}</p>` : ""}
+        ${descriptionText ? `<p class="vrcx-group-description vrcx-rich-text">${formatRichTextHtml(descriptionText)}</p>` : ""}
       </div>
+      <div class="vrcx-group-actions"><button type="button" title="${escapeAttr(joinLabel)}">${escapeHtml(joinLabel)}</button></div>
     </section>
-    <div class="vrchat-group-detail-grid">
-      <section class="social-detail-section vrchat-group-about"><h5>About</h5><p class="vrchat-formatted-text">${escapeHtml(group.description || "No group description is available.")}</p></section>
-      <div class="vrchat-group-side-stack"><section class="social-detail-section vrchat-group-overview"><h5>Details</h5><dl>${detailRow("Group ID", group.id)}${detailRow("Owner", group.ownerId)}${detailRow("Privacy", group.privacy)}${detailRow("Join State", group.joinState)}${detailRow("Created", group.createdAt)}</dl></section>${raw}</div>
-    </div>
+    ${groupDetailTabsHtml(active)}
+    <div class="group-tab-content ${escapeAttr(active)}-tab-active">${groupDetailTabContentHtml(group, raw, active, { banner, icon, groupUrl, bannerFallbacks })}</div>
   </div>`;
+}
+function groupDisplayChips(group, raw) {
+  const chips = [];
+  const privacy = readableGroupPrivacy(group.privacy);
+  const join = readableGroupJoinState(group.joinState);
+  const age = groupAgeChipLabel(group, raw);
+  if (privacy) chips.push(groupDetailChipHtml(privacy, `privacy-${classToken(privacy)}`));
+  if (join) chips.push(groupDetailChipHtml(join, `join-${classToken(join)}`));
+  if (age) chips.push(groupDetailChipHtml(age, "age-tag"));
+  return chips.join("");
+}
+function readableGroupPrivacy(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "";
+  if (text === "default" || text === "public") return "Public";
+  if (text === "private") return "Private";
+  return titleCaseWords(text);
+}
+function readableGroupJoinState(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "";
+  if (text === "open") return "Open";
+  if (text === "request" || text === "requested") return "Request";
+  if (text === "closed" || text === "invite") return "Invite";
+  return titleCaseWords(text);
+}
+function groupAgeChipLabel(group, raw) {
+  const candidates = [group.shortCode, group.name, firstText(raw, ["ageGate", "ageVerification", "ageVerificationStatus"]), ...(Array.isArray(raw.tags) ? raw.tags : [])].map((value) => String(value || "").toLowerCase());
+  return candidates.some((value) => value.includes("18+") || value.includes("18plus") || value.includes("age")) ? "18+" : "";
+}
+function readableGroupShortCode(value) {
+  const text = String(value || "").trim();
+  return text.toLowerCase().startsWith("18plus") ? "18+" : text;
+}
+function groupJoinButtonLabel(group, raw) {
+  const membership = firstText(raw, ["membershipStatus", "memberStatus", "myMemberStatus", "userMembershipStatus"]).toLowerCase();
+  if (["member", "joined", "active"].includes(membership) || raw.myMember === true || raw.isMember === true) return "Leave Group";
+  const join = String(group.joinState || "").trim().toLowerCase();
+  if (join === "request" || join === "requested") return "Request to Join";
+  if (join === "open") return "Join Group";
+  return "Request to Join";
+}
+function titleCaseWords(value) {
+  return String(value || "").replace(/[-_]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+function groupDetailActiveTab() {
+  const tab = state.social.groupTab || "info";
+  return ["info", "posts", "members", "photos", "json"].includes(tab) ? tab : "info";
+}
+function groupDetailTabsHtml(active = "info") {
+  const tabs = [["info", "Info"], ["posts", "Posts"], ["members", "Members"], ["photos", "Photos"], ["json", "JSON"]];
+  return `<div class="social-detail-tabs group-detail-tabs">${tabs.map(([id, label]) => `<button type="button" data-group-tab="${escapeAttr(id)}" class="${active === id ? "active" : ""}">${escapeHtml(label)}</button>`).join("")}</div>`;
+}
+function groupDetailTabContentHtml(group, raw, tab, assets = {}) {
+  if (tab === "json") return `<section class="social-detail-section vrchat-group-json"><h5>Raw JSON</h5>${group.rawJson ? `<pre>${escapeHtml(group.rawJson)}</pre>` : `<p class="social-muted">No raw JSON is available for this group.</p>`}</section>`;
+  if (tab === "posts") return groupPostsHtml(raw);
+  if (tab === "members") return groupMembersHtml(group, raw);
+  if (tab === "photos") return groupPhotosHtml(raw, assets);
+  return groupInfoHtml(group, raw, assets);
+}
+function groupInfoHtml(group, raw, { banner = "", icon = "", groupUrl = "", bannerFallbacks = [] } = {}) {
+  const announcement = firstText(raw, ["announcement", "announcementText", "currentAnnouncement"]);
+  const rules = firstText(raw, ["rules", "rulesText"]);
+  const upcoming = groupEventsHtml(firstArray(raw, ["upcomingEvents", "futureEvents", "events"]));
+  const past = groupEventsHtml(firstArray(raw, ["pastEvents"]));
+  const links = groupLinksHtml(raw);
+  return `<section class="vrcx-group-info">
+    ${banner || icon ? `<img class="vrcx-group-banner" src="${escapeAttr(banner || icon)}" data-image-fallbacks="${escapeAttr(JSON.stringify(bannerFallbacks.filter((url) => url !== (banner || icon))))}" alt="">` : ""}
+    <div class="vrcx-group-block announcement"><h5>Announcement</h5><p class="vrcx-rich-text">${announcement ? formatRichTextHtml(announcement) : "-"}</p></div>
+    <div class="vrcx-group-block rules"><h5>Rules</h5><p class="vrcx-rich-text">${rules ? formatRichTextHtml(rules) : "-"}</p></div>
+    <div class="vrcx-group-block"><h5>Upcoming Events</h5>${upcoming}</div>
+    <div class="vrcx-group-block"><h5>Past Events</h5>${past}</div>
+    <div class="vrcx-group-metrics">
+      ${groupMetricHtml("Members", [group.memberCount || "-", memberOnlineText(raw)].filter(Boolean).join(" "))}
+      ${groupMetricHtml("Created At", group.createdAt || "-")}
+      ${groupMetricHtml("Last Visited", "-")}
+      ${groupMetricHtml("...", "-")}
+      ${groupMetricHtml("Links", links || "-", { html: true })}
+      ${groupMetricHtml("Privacy", group.privacy || "-")}
+      ${groupMetricHtml("Join State", group.joinState || "-")}
+      ${groupMetricHtml("Short Code", readableGroupShortCode(group.shortCode) || "-")}
+    </div>
+    <div class="vrcx-group-ids">
+      ${groupUrl ? groupCopyValueHtml("Group URL", groupUrl) : ""}
+      ${groupCopyValueHtml("Group ID", group.id || "-")}
+      ${group.ownerId ? groupCopyValueHtml("Owner ID", group.ownerId) : ""}
+    </div>
+  </section>`;
+}
+function groupPostsHtml(raw) {
+  const posts = firstArray(raw, ["posts", "news", "announcements"]);
+  if (!posts.length) return `<section class="settings-empty compact"><h4>No posts</h4><p>No group posts were returned by VRChat.</p></section>`;
+  return `<section class="vrcx-group-list">${posts.map((post) => {
+    const title = firstText(post, ["title", "name", "subject"]) || "Post";
+    const body = firstText(post, ["text", "body", "description", "content"]) || "";
+    const date = firstText(post, ["created_at", "createdAt", "updated_at", "updatedAt"]);
+    return `<article><strong>${escapeHtml(title)}</strong>${date ? `<span>${escapeHtml(date)}</span>` : ""}${body ? `<p>${escapeHtml(body)}</p>` : ""}</article>`;
+  }).join("")}</section>`;
+}
+function groupMembersHtml(group, raw) {
+  const members = Array.isArray(group.members) ? group.members : [];
+  const roles = firstArray(raw, ["roles"]);
+  const memberList = members.length ? `<div class="vrcx-group-member-list">${members.map(groupMemberRowHtml).join("")}</div>` : "";
+  const roleList = !memberList && roles.length ? `<div class="vrcx-group-list">${roles.map((role) => `<article><strong>${escapeHtml(firstText(role, ["name", "displayName"]) || "Role")}</strong><span>${escapeHtml(firstText(role, ["description"]) || firstText(role, ["id"]) || "")}</span></article>`).join("")}</div>` : "";
+  return `<section class="vrcx-group-members">
+    <div class="vrcx-group-metrics">${groupMetricHtml("Members", group.memberCount || "-")}${groupMetricHtml("Loaded", members.length || "-")}${groupMetricHtml("Online", memberOnlineText(raw) || "-")}${groupMetricHtml("Roles", roles.length || "-")}</div>
+    ${memberList || roleList || `<div class="settings-empty compact"><h4>No member list</h4><p>${escapeHtml(group.membersError || "VRChat did not return public member details for this group.")}</p></div>`}
+  </section>`;
+}
+function groupMemberRowHtml(member = {}) {
+  const name = member.displayName || member.userId || "Unknown member";
+  const detail = [member.roles, member.status, member.joinedAt].filter(Boolean).join(" - ");
+  return `<article class="vrcx-group-member-row">${member.imageUrl ? `<img src="${escapeAttr(member.imageUrl)}" alt="">` : `<span class="vrcx-group-member-placeholder"></span>`}<div><strong>${escapeHtml(name)}</strong><span>${escapeHtml(detail || member.userId || "")}</span></div></article>`;
+}
+function groupPhotosHtml(raw, { banner = "", icon = "" } = {}) {
+  const images = [banner, icon, ...firstArray(raw, ["galleries", "gallery", "images", "photos"]).flatMap(groupGalleryImages)].filter(Boolean);
+  const unique = [...new Set(images)];
+  if (!unique.length) return `<section class="settings-empty compact"><h4>No photos</h4><p>No group photos were returned by VRChat.</p></section>`;
+  return `<section class="vrcx-group-photo-grid">${unique.map((url) => `<img src="${escapeAttr(url)}" alt="">`).join("")}</section>`;
 }
 function groupDetailChipHtml(label, className = "") {
   return `<span class="world-detail-chip group-detail-chip ${escapeAttr(className)}">${escapeHtml(label)}</span>`;
 }
+function groupMetricHtml(label, value, options = {}) {
+  return `<div><h5>${escapeHtml(label)}</h5><p>${options.html ? String(value || "-") : escapeHtml(String(value || "-"))}</p></div>`;
+}
+function groupCopyValueHtml(label, value) {
+  const text = String(value || "").trim();
+  return `<div><h5>${escapeHtml(label)}</h5><p>${escapeHtml(text || "-")}${text && text !== "-" ? ` <button type="button" class="inline-copy-button" data-copy-text="${escapeAttr(text)}" title="Copy ${escapeAttr(label)}">Copy</button>` : ""}</p></div>`;
+}
+function firstText(source, keys) {
+  if (!source || typeof source !== "object") return "";
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number") return String(value);
+  }
+  return "";
+}
+function firstArray(source, keys) {
+  if (!source || typeof source !== "object") return [];
+  for (const key of keys) if (Array.isArray(source[key])) return source[key];
+  return [];
+}
+function memberOnlineText(raw) {
+  const value = firstText(raw, ["onlineMemberCount", "onlineMembers", "memberCountOnline"]);
+  return value ? `(${value})` : "";
+}
+function groupLinksHtml(raw) {
+  const links = firstArray(raw, ["links", "socialLinks"]);
+  if (!links.length) return "";
+  return linkChipsHtml(links.map((link) => typeof link === "string" ? link : firstText(link, ["url", "link", "name"])).filter(Boolean));
+}
+function groupEventsHtml(events) {
+  if (!events.length) return `<p>-</p>`;
+  return `<div class="vrcx-group-list compact">${events.slice(0, 4).map((event) => `<article><strong>${escapeHtml(firstText(event, ["title", "name"]) || "Event")}</strong><span>${escapeHtml(firstText(event, ["startsAt", "startTime", "created_at", "createdAt"]) || "")}</span></article>`).join("")}</div>`;
+}
+function groupGalleryImages(item) {
+  if (typeof item === "string") return [item];
+  if (!item || typeof item !== "object") return [];
+  return [firstText(item, ["imageUrl", "thumbnailUrl", "url"]), ...firstArray(item, ["images", "photos"]).flatMap(groupGalleryImages)].filter(Boolean);
+}
 function socialGroupHtml(group) {
   const label = [group.name, group.shortCode ? `#${group.shortCode}` : ""].filter(Boolean).join(" ");
-  return `<div class="social-group-item">${group.imageUrl ? `<img src="${escapeAttr(group.imageUrl)}" alt="">` : ""}<div><strong>${escapeHtml(label || group.id)}</strong><span>${escapeHtml(group.description || "")}</span></div></div>`;
+  return `<div class="social-group-item" role="button" tabindex="0" data-vrchat-group="${escapeAttr(group.id || "")}" data-vrchat-group-short-code="${escapeAttr(group.shortCode || "")}" data-vrchat-group-name="${escapeAttr(group.name || group.id || "")}">${group.imageUrl ? `<img src="${escapeAttr(group.imageUrl)}" alt="">` : ""}<div><strong>${escapeHtml(label || group.id)}</strong><span>${escapeHtml(group.description || "")}</span></div></div>`;
 }
 function isFavoriteWorld(worldId) {
   const id = String(worldId || "").toLowerCase();
@@ -9003,21 +9316,24 @@ $("settingsLogFilterMenuBtn").addEventListener("wheel", (event) => cycleSortOpti
 document.addEventListener("click", hideContextMenu);
 document.addEventListener("click", hideNotificationPopover);
 $("playerHistoryDialog").addEventListener("pointerdown", handlePlayerHistoryDialogPointerDown);
+$("playerHistoryDialog").addEventListener("close", () => document.body.classList.remove("group-details-popup-open"));
+document.addEventListener("pointerdown", handleGroupDetailsPopupPointerDown, { capture: true });
 document.addEventListener("pointerdown", handleUserDetailPopupPointerDown, { capture: true });
 document.addEventListener("click", suppressUserDetailBackdropClick, { capture: true });
 document.addEventListener("dragover", autoScrollDrag);
 document.addEventListener("wheel", containUserDetailPopupWheel, { passive: false, capture: true });
+document.addEventListener("wheel", containGroupDetailsPopupWheel, { passive: false, capture: true });
 document.addEventListener("wheel", wheelScrollDuringDrag, { passive: false, capture: true });
 document.addEventListener("wheel", trackZoomWheel, { passive: true, capture: true });
 document.addEventListener("keydown", (event) => {
   if (keyScrollDuringDrag(event)) return;
   if (event.key === "Escape") {
-    if ($("playerHistoryDialog")?.open) {
-      $("playerHistoryDialog").close();
-      return;
-    }
     if (isUserDetailPopupOpen()) {
       closeNotificationDetails();
+      return;
+    }
+    if ($("playerHistoryDialog")?.open) {
+      $("playerHistoryDialog").close();
       return;
     }
     hideContextMenu();
