@@ -148,6 +148,9 @@ internal static class Program
     private static readonly object SyncedOrderProgressGate = new();
     private static SyncedAvatarOrderProgress SyncedOrderProgress = new("", "idle", "", 0, 0);
     private static VrChatPipelineClient? Pipeline;
+    private static PhotinoWindow? AppWindow;
+    private static volatile bool AppCloseConfirmed;
+    private static volatile bool SyncedOrderCloseBlocked;
 
     [STAThread]
     private static void Main()
@@ -164,7 +167,8 @@ internal static class Program
             appPath = ExtractAppFiles();
         }
 
-        var window = new PhotinoWindow
+        PhotinoWindow? window = null;
+        window = new PhotinoWindow
         {
             Title = "VRCNeph",
             UseOsDefaultSize = false,
@@ -186,7 +190,23 @@ internal static class Program
                 photino.SendWebMessage(JsonSerializer.Serialize(response, ProgramJson.Options));
             });
         })
+        .RegisterWindowClosingHandler((sender, _) =>
+        {
+            var syncedOrderProgress = GetSyncedOrderProgress();
+            var syncedOrderApplying = SyncedOrderCloseBlocked || IsSyncedOrderApplying(syncedOrderProgress);
+            if (AppCloseConfirmed && !syncedOrderApplying) return false;
+            if (sender is PhotinoWindow photino)
+            {
+                photino.SendWebMessage(JsonSerializer.Serialize(AppEvent.Push("appCloseRequested", new
+                {
+                    syncedOrderApplying,
+                    syncedOrderMessage = syncedOrderProgress.Message
+                }), ProgramJson.Options));
+            }
+            return true;
+        })
         .Load(appPath);
+        AppWindow = window;
         Pipeline = new VrChatPipelineClient(VrChat, async evt =>
         {
             try
@@ -235,6 +255,14 @@ internal static class Program
     private static SyncedAvatarOrderProgress GetSyncedOrderProgress()
     {
         lock (SyncedOrderProgressGate) return SyncedOrderProgress;
+    }
+
+    private static bool IsSyncedOrderApplying(SyncedAvatarOrderProgress progress)
+    {
+        return !string.IsNullOrWhiteSpace(progress.GroupId)
+            && !progress.Stage.Equals("idle", StringComparison.OrdinalIgnoreCase)
+            && !progress.Stage.Equals("complete", StringComparison.OrdinalIgnoreCase)
+            && !progress.Stage.Equals("failed", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ExtractAppFiles()
@@ -290,11 +318,12 @@ internal static class Program
                 "moveAvatar" => Store.MoveAvatar(GetPayload<MoveAvatarInput>(request)),
                 "copyAvatar" => Store.CopyAvatar(GetPayload<MoveAvatarInput>(request)),
                 "reorderAvatar" => Store.ReorderAvatar(GetPayload<ReorderInput>(request)),
+                "reorderAvatars" => Store.ReorderAvatars(GetPayload<AvatarOrderInput>(request)),
                 "backupGroup" => Store.BackupGroup(GetPayload<IdInput>(request).Id),
                 "accountBackupCreate" => Store.CreateAccountBackup("manual"),
                 "accountBackupList" => Store.ListAccountBackups(),
                 "accountBackupFolder" => new { path = AppPaths.AccountBackupsDirectory },
-                "applySyncedAvatarOrder" => await Store.ApplySyncedGroupAvatarOrderAsync(GetPayload<SyncedAvatarOrderInput>(request), VrChat, UpdateSyncedOrderProgress),
+                "applySyncedAvatarOrder" => await ApplySyncedAvatarOrderWithCloseBlock(GetPayload<SyncedAvatarOrderInput>(request)),
                 "syncedAvatarOrderProgress" => GetSyncedOrderProgress(),
                 "clearGroupAvatars" => await Store.ClearGroupAvatarsAsync(GetPayload<IdInput>(request).Id, VrChat),
                 "importLibrary" => Store.Import(request.Payload),
@@ -374,6 +403,7 @@ internal static class Program
                 "appVersion" => AppUpdateClient.CurrentVersionInfo(UpdateRepositoryOwner, UpdateRepositoryName),
                 "updateCheck" => await Updater.CheckAsync(),
                 "updateInstall" => await Updater.InstallAsync(),
+                "appCloseConfirmed" => CloseApp(),
                 _ => throw new InvalidOperationException($"Unknown command '{request.Command}'.")
             };
             LogCommandSuccess(request.Command, result);
@@ -450,6 +480,28 @@ internal static class Program
     {
         Pipeline?.Stop();
         return Pipeline?.Status() ?? new VrChatPipelineStatus(false, "Stopped", 0, "");
+    }
+
+    private static async Task<SyncedAvatarOrderApplyResult> ApplySyncedAvatarOrderWithCloseBlock(SyncedAvatarOrderInput input)
+    {
+        AppCloseConfirmed = false;
+        SyncedOrderCloseBlocked = true;
+        UpdateSyncedOrderProgress(new SyncedAvatarOrderProgress(input.GroupId, "starting", "Starting synced order save...", 0, input.AvatarIds?.Count ?? 0));
+        try
+        {
+            return await Store.ApplySyncedGroupAvatarOrderAsync(input, VrChat, UpdateSyncedOrderProgress);
+        }
+        finally
+        {
+            SyncedOrderCloseBlocked = false;
+        }
+    }
+
+    private static object CloseApp()
+    {
+        AppCloseConfirmed = true;
+        AppWindow?.Close();
+        return new { closing = true };
     }
 
     private static object OpenFolder(string path)
@@ -556,13 +608,7 @@ internal static class Program
 
     private static object ListBackups()
     {
-        Directory.CreateDirectory(AppPaths.BackupsDirectory);
-        var files = Directory.EnumerateFiles(AppPaths.BackupsDirectory, "*", SearchOption.TopDirectoryOnly)
-            .Select(path => new FileInfo(path))
-            .OrderByDescending(file => file.LastWriteTimeUtc)
-            .Select(file => new BackupFileInfo(file.Name, BackupDisplayName(file.FullName), file.FullName, file.Length, file.LastWriteTime, BackupReason(file.Name)))
-            .ToList();
-        return new BackupListResult(AppPaths.BackupsDirectory, files);
+        return Store.ListGroupBackups();
     }
 
     private static string BackupDisplayName(string path)
@@ -582,6 +628,7 @@ internal static class Program
     {
         var name = Path.GetFileNameWithoutExtension(fileName);
         if (name.EndsWith("-pre-save", StringComparison.OrdinalIgnoreCase)) return "Edit mode";
+        if (name.EndsWith("-pre-replace", StringComparison.OrdinalIgnoreCase)) return "Replace synced group";
         if (name.EndsWith("-edit", StringComparison.OrdinalIgnoreCase)) return "Edit mode";
         if (name.EndsWith("-unfavorited", StringComparison.OrdinalIgnoreCase)) return "Unfavorite All";
         if (name.EndsWith("-deleted", StringComparison.OrdinalIgnoreCase)) return "Deleted group";
@@ -743,16 +790,25 @@ internal sealed class AppUpdateClient(string owner, string repository)
 internal sealed record AppVersionInfo(string CurrentVersion, string ReleaseUrl);
 internal sealed record AppUpdateInfo(bool UpdateAvailable, string CurrentVersion, string LatestVersion, string ReleaseUrl, string AssetUrl, string Notes);
 internal sealed record AppUpdateInstallResult(bool Restarting, string Message);
-internal sealed record BackupFileInfo(string Name, string DisplayName, string Path, long Size, DateTime LastModified, string Reason);
+internal sealed record BackupFileInfo(string Name, string DisplayName, string Path, long Size, DateTime LastModified, string Reason, string GroupId, string BackupType);
 internal sealed record BackupListResult(string Folder, List<BackupFileInfo> Files);
 internal sealed record AccountBackupFileInfo(string Name, string Path, long Size, DateTime LastModified, DateTimeOffset CreatedAt, string Reason, int GroupCount, int AvatarCount);
 internal sealed record AccountBackupListResult(string Folder, int Retention, List<AccountBackupFileInfo> Files);
 internal sealed record AccountBackupResult(string Path, DateTimeOffset CreatedAt, int GroupCount, int AvatarCount, string Reason, int Retention);
+internal sealed record GroupBackupFile(string Path, string Name, string GroupId, string DisplayName, string Reason, string BackupType, DateTime LastWriteTimeUtc, long Size);
 
 internal sealed class AvatarStore
 {
     private readonly AppDataStore _appData = AppDataStore.Shared;
     private const int AccountBackupRetention = 5;
+    private const int SyncedGroupBackupRetention = 5;
+    private const int LocalGroupBackupRetention = 5;
+    private const int SystemGroupBackupRetention = 5;
+    private const int BackupMaxAgeDays = 60;
+    private const string SyncedBackupFolderName = "Synced Groups";
+    private const string LocalBackupFolderName = "Local Groups";
+    private const string DeletedBackupFolderName = "Deleted Groups";
+    private const string SystemBackupFolderName = "System Groups";
     private const int DefaultSyncedGroupCount = 1;
     private const int SyncedGroupAvatarLimit = 50;
     private const string RecentAvatarGroupId = "recent_avatars";
@@ -777,6 +833,7 @@ internal sealed class AvatarStore
         AppPaths.EnsureInitialized();
         Directory.CreateDirectory(_dataDirectory);
         Directory.CreateDirectory(_exportDirectory);
+        Directory.CreateDirectory(_backupDirectory);
         Directory.CreateDirectory(_accountBackupDirectory);
         _libraryPath = Path.Combine(_dataDirectory, "library.json");
         if (!File.Exists(_libraryPath))
@@ -787,6 +844,9 @@ internal sealed class AvatarStore
         {
             Save(Load());
         }
+        MigrateGroupBackupsToTypeFolders();
+        PruneGroupBackups();
+        PruneAccountBackups();
     }
 
     public LibraryData GetLibrary() { lock (_gate) return Load(); }
@@ -918,12 +978,38 @@ internal sealed class AvatarStore
             var source = lib.Groups.FirstOrDefault(x => x.Id == input.Id) ?? throw new InvalidOperationException("Source group not found.");
             var target = lib.Groups.FirstOrDefault(x => x.Id == input.TargetGroupId) ?? throw new InvalidOperationException("Target group not found.");
             if (IsPinnedSystemGroupId(source.Id)) throw new InvalidOperationException("That system group cannot be copied.");
-            if (IsSyncedGroupId(target.Id) || IsPinnedSystemGroupId(target.Id)) throw new InvalidOperationException("Choose a local group.");
             if (source.Id.Equals(target.Id, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Choose a different target group.");
+            var replaceSynced = input.Replace && IsSyncedGroupId(target.Id) && !IsPinnedSystemGroupId(target.Id);
+            if (!replaceSynced && (IsSyncedGroupId(target.Id) || IsPinnedSystemGroupId(target.Id))) throw new InvalidOperationException("Choose a local group.");
 
             var now = DateTimeOffset.UtcNow;
+            var sourceAvatars = lib.Avatars
+                .Where(x => x.GroupId.Equals(source.Id, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(x => x.Order)
+                .ThenBy(x => x.CreatedAt)
+                .ToList();
+            if (replaceSynced)
+            {
+                var uniqueAvatarIds = sourceAvatars
+                    .Select(x => x.AvatarId)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Count();
+                if (uniqueAvatarIds > SyncedGroupAvatarLimit) throw new InvalidOperationException($"Synced VRChat favorite groups can only contain {SyncedGroupAvatarLimit} avatars.");
+                WriteGroupBackup(lib, target, "pre-replace");
+                lib.Avatars.RemoveAll(x => x.GroupId.Equals(target.Id, StringComparison.OrdinalIgnoreCase));
+                var replaceOrder = 0;
+                foreach (var avatar in sourceAvatars)
+                {
+                    lib.Avatars.Add(CloneAvatar(avatar, target.Id, now, replaceOrder++));
+                }
+                target.UpdatedAt = now;
+                Save(lib);
+                return lib;
+            }
+
             var copied = 0;
-            foreach (var avatar in lib.Avatars.Where(x => x.GroupId == source.Id).OrderBy(x => x.Order).ThenBy(x => x.CreatedAt).ToList())
+            foreach (var avatar in sourceAvatars)
             {
                 if (AvatarExistsInGroup(lib, target.Id, avatar.AvatarId, avatar.Id)) continue;
                 lib.Avatars.Add(CloneAvatar(avatar, target.Id, now, NextAvatarOrder(lib, target.Id)));
@@ -973,6 +1059,7 @@ internal sealed class AvatarStore
             if (lib.Groups.All(x => x.Id != input.GroupId)) throw new InvalidOperationException("Choose a valid group.");
             var now = DateTimeOffset.UtcNow;
             var avatar = !string.IsNullOrWhiteSpace(input.Id) ? lib.Avatars.FirstOrDefault(x => x.Id == input.Id) : null;
+            var oldGroupId = avatar?.GroupId ?? "";
             if ((avatar is null || !avatar.GroupId.Equals(input.GroupId, StringComparison.OrdinalIgnoreCase)) && IsPinnedSystemGroupId(input.GroupId))
             {
                 throw new InvalidOperationException("Recent and Deleted groups are managed automatically.");
@@ -980,8 +1067,13 @@ internal sealed class AvatarStore
             EnsureSyncedGroupCapacity(lib, input.GroupId, input.Id, input.AvatarId);
             if (avatar is null)
             {
-                avatar = new AvatarFavorite { Id = NewId("local"), CreatedAt = now, Order = NextAvatarOrder(lib, input.GroupId), Source = input.Source?.Trim() ?? "" };
+                avatar = new AvatarFavorite { Id = NewId("local"), CreatedAt = now, Order = 0, Source = input.Source?.Trim() ?? "" };
                 lib.Avatars.Add(avatar);
+                PlaceAvatarAtTop(lib, avatar, input.GroupId);
+            }
+            else if (!oldGroupId.Equals(input.GroupId, StringComparison.OrdinalIgnoreCase))
+            {
+                PlaceAvatarAtTop(lib, avatar, input.GroupId);
             }
             FillAvatar(avatar, input, now);
             Save(lib);
@@ -1018,6 +1110,40 @@ internal sealed class AvatarStore
             return lib;
         }
     }
+    public LibraryData ReorderAvatars(AvatarOrderInput input)
+    {
+        lock (_gate)
+        {
+            var lib = Load();
+            if (string.IsNullOrWhiteSpace(input.GroupId)) throw new InvalidOperationException("Group not found.");
+            var group = lib.Groups.FirstOrDefault(x => x.Id.Equals(input.GroupId, StringComparison.OrdinalIgnoreCase)) ?? throw new InvalidOperationException("Group not found.");
+            if (IsSyncedGroupId(group.Id)) throw new InvalidOperationException("Use synced edit mode to reorder synced groups.");
+            var current = lib.Avatars
+                .Where(x => x.GroupId.Equals(group.Id, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(x => x.Order)
+                .ThenBy(x => x.CreatedAt)
+                .ToList();
+            var byId = current.ToDictionary(x => x.Id, StringComparer.OrdinalIgnoreCase);
+            var orderedIds = (input.AvatarIds ?? [])
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (orderedIds.Count != current.Count || orderedIds.Any(id => !byId.ContainsKey(id)))
+            {
+                throw new InvalidOperationException("Avatar order did not match the current group.");
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            for (var i = 0; i < orderedIds.Count; i++)
+            {
+                var avatar = byId[orderedIds[i]];
+                avatar.Order = i;
+                avatar.UpdatedAt = now;
+            }
+            Save(lib);
+            return lib;
+        }
+    }
     public LibraryData MoveAvatar(MoveAvatarInput input)
     {
         lock (_gate)
@@ -1028,8 +1154,7 @@ internal sealed class AvatarStore
             if (IsPinnedSystemGroupId(input.GroupId)) throw new InvalidOperationException("Recent and Deleted groups are managed automatically.");
             if (AvatarExistsInGroup(lib, input.GroupId, avatar.AvatarId, avatar.Id)) throw new InvalidOperationException("That avatar is already in the group.");
             EnsureSyncedGroupCapacity(lib, input.GroupId, avatar.Id, avatar.AvatarId);
-            avatar.GroupId = input.GroupId;
-            avatar.Order = NextAvatarOrder(lib, input.GroupId);
+            PlaceAvatarAtTop(lib, avatar, input.GroupId);
             avatar.UpdatedAt = DateTimeOffset.UtcNow;
             Save(lib);
             return lib;
@@ -1046,7 +1171,8 @@ internal sealed class AvatarStore
             if (AvatarExistsInGroup(lib, input.GroupId, avatar.AvatarId, avatar.Id)) throw new InvalidOperationException("That avatar is already in the group.");
             EnsureSyncedGroupCapacity(lib, input.GroupId, "", avatar.AvatarId);
             var now = DateTimeOffset.UtcNow;
-            lib.Avatars.Add(CloneAvatar(avatar, input.GroupId, now, NextAvatarOrder(lib, input.GroupId)));
+            ShiftAvatarOrdersDown(lib, input.GroupId);
+            lib.Avatars.Add(CloneAvatar(avatar, input.GroupId, now, 0));
             Save(lib);
             return lib;
         }
@@ -1072,11 +1198,24 @@ internal sealed class AvatarStore
     public AccountBackupListResult ListAccountBackups()
     {
         Directory.CreateDirectory(_accountBackupDirectory);
-        var files = Directory.EnumerateFiles(_accountBackupDirectory, "account-avatars-backup-*.json", SearchOption.TopDirectoryOnly)
+        PruneAccountBackups();
+        var files = AccountBackupFiles()
             .Select(AccountBackupFileInfo)
             .OrderByDescending(x => x.LastModified)
             .ToList();
         return new AccountBackupListResult(_accountBackupDirectory, AccountBackupRetention, files);
+    }
+    public BackupListResult ListGroupBackups()
+    {
+        Directory.CreateDirectory(_backupDirectory);
+        MigrateGroupBackupsToTypeFolders();
+        PruneGroupBackups();
+        var files = GroupBackupFiles()
+            .OrderByDescending(file => file.LastWriteTimeUtc)
+            .ThenByDescending(file => file.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(file => new BackupFileInfo(file.Name, file.DisplayName, file.Path, file.Size, file.LastWriteTimeUtc.ToLocalTime(), GroupBackupReasonDisplay(file.Name), file.GroupId, file.BackupType))
+            .ToList();
+        return new BackupListResult(_backupDirectory, files);
     }
     public LibraryData RestoreBackup(BackupRestoreInput input)
     {
@@ -1152,7 +1291,16 @@ internal sealed class AvatarStore
             backupPath = WriteGroupBackup(lib, group, "pre-save").Path;
         }
 
-        var remoteResult = await client.RecompileFavoriteAvatarGroupAsync(input.GroupId, avatarIds, progress);
+        VrChatFavoriteRecompileResult remoteResult;
+        try
+        {
+            remoteResult = await client.RecompileFavoriteAvatarGroupAsync(input.GroupId, avatarIds, progress);
+        }
+        catch
+        {
+            progress?.Invoke(new SyncedAvatarOrderProgress(input.GroupId, "failed", "Refavoriting failed.", 0, avatarIds.Count));
+            throw;
+        }
 
         lock (_gate)
         {
@@ -1750,12 +1898,14 @@ internal sealed class AvatarStore
     private static bool IsSyncedOrSystemGroupFile(string groupId) => IsSyncedGroupId(groupId) || IsPinnedSystemGroupId(groupId);
     private ExportResult WriteGroupBackup(LibraryData lib, AvatarGroup group, string reason)
     {
-        Directory.CreateDirectory(_backupDirectory);
+        var backupDirectory = GroupBackupDirectory(group.Id, reason);
+        Directory.CreateDirectory(backupDirectory);
         var timestamp = DateTimeOffset.Now.ToString("yyyyMMdd-HHmmss");
         var fileName = $"{timestamp}-{SafeFileNameOrDefault(group.Name, "Group")}-{reason}.json";
-        var path = UniqueBackupPath(_backupDirectory, fileName);
+        var path = UniqueBackupPath(backupDirectory, fileName);
         File.WriteAllText(path, JsonSerializer.Serialize(GroupSummary(group, lib.Avatars.Where(x => x.GroupId == group.Id).OrderBy(x => x.Order)), ProgramJson.Options));
         BackgroundStore.CopyGroupBackgroundToBackup(group.Id, group.Name, path);
+        PruneGroupBackups();
         return new ExportResult(path);
     }
     private AccountBackupResult WriteAccountBackup(LibraryData lib, string reason)
@@ -1771,7 +1921,14 @@ internal sealed class AvatarStore
     private void PruneAccountBackups()
     {
         Directory.CreateDirectory(_accountBackupDirectory);
-        var files = Directory.EnumerateFiles(_accountBackupDirectory, "account-avatars-backup-*.json", SearchOption.TopDirectoryOnly)
+        var cutoff = DateTime.UtcNow.AddDays(-BackupMaxAgeDays);
+        foreach (var oldFile in AccountBackupFiles().Select(path => new FileInfo(path)).Where(file => file.LastWriteTimeUtc < cutoff))
+        {
+            try { oldFile.Delete(); }
+            catch { }
+        }
+
+        var files = AccountBackupFiles()
             .Select(path => new FileInfo(path))
             .OrderByDescending(x => x.LastWriteTimeUtc)
             .ThenByDescending(x => x.Name, StringComparer.OrdinalIgnoreCase)
@@ -1780,6 +1937,129 @@ internal sealed class AvatarStore
         {
             try { file.Delete(); }
             catch { }
+        }
+    }
+    private IEnumerable<string> AccountBackupFiles()
+    {
+        Directory.CreateDirectory(_accountBackupDirectory);
+        foreach (var path in Directory.EnumerateFiles(_accountBackupDirectory, "account-avatars-backup-*.json", SearchOption.TopDirectoryOnly)) yield return path;
+        foreach (var path in Directory.EnumerateFiles(_accountBackupDirectory, "account-backup-*.json", SearchOption.TopDirectoryOnly)) yield return path;
+    }
+    public void PruneGroupBackups()
+    {
+        MigrateGroupBackupsToTypeFolders();
+        var cutoff = DateTime.UtcNow.AddDays(-BackupMaxAgeDays);
+        foreach (var file in GroupBackupFiles().Where(file => file.LastWriteTimeUtc < cutoff))
+        {
+            DeleteBackupFile(file.Path);
+        }
+
+        var files = GroupBackupFiles().ToList();
+        DeleteOlderBackups(files
+            .Where(file => IsSyncedGroupId(file.GroupId))
+            .OrderByDescending(file => file.LastWriteTimeUtc)
+            .ThenByDescending(file => file.Name, StringComparer.OrdinalIgnoreCase)
+            .Skip(SyncedGroupBackupRetention));
+
+        foreach (var group in files
+            .Where(file => IsLimitedSystemBackupGroupId(file.GroupId))
+            .GroupBy(file => file.GroupId, StringComparer.OrdinalIgnoreCase))
+        {
+            DeleteOlderBackups(group
+                .OrderByDescending(file => file.LastWriteTimeUtc)
+                .ThenByDescending(file => file.Name, StringComparer.OrdinalIgnoreCase)
+                .Skip(SystemGroupBackupRetention));
+        }
+
+        DeleteOlderBackups(files
+            .Where(file => !IsSyncedGroupId(file.GroupId)
+                && !IsLimitedSystemBackupGroupId(file.GroupId)
+                && file.Reason.Equals("deleted", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(file => file.LastWriteTimeUtc)
+            .ThenByDescending(file => file.Name, StringComparer.OrdinalIgnoreCase)
+            .Skip(LocalGroupBackupRetention));
+
+        foreach (var group in files
+            .Where(file => !IsSyncedGroupId(file.GroupId)
+                && !IsLimitedSystemBackupGroupId(file.GroupId)
+                && !file.Reason.Equals("deleted", StringComparison.OrdinalIgnoreCase))
+            .GroupBy(file => file.GroupId, StringComparer.OrdinalIgnoreCase))
+        {
+            DeleteOlderBackups(group
+                .OrderByDescending(file => file.LastWriteTimeUtc)
+                .ThenByDescending(file => file.Name, StringComparer.OrdinalIgnoreCase)
+                .Skip(LocalGroupBackupRetention));
+        }
+    }
+    private static void DeleteOlderBackups(IEnumerable<GroupBackupFile> files)
+    {
+        foreach (var file in files) DeleteBackupFile(file.Path);
+    }
+    private void MigrateGroupBackupsToTypeFolders()
+    {
+        Directory.CreateDirectory(_backupDirectory);
+        foreach (var path in Directory.EnumerateFiles(_backupDirectory, "*.json", SearchOption.TopDirectoryOnly).ToList())
+        {
+            var summary = TryReadGroupBackupSummary(path);
+            if (summary is null || string.IsNullOrWhiteSpace(summary.Id)) continue;
+            var reason = BackupReasonFromName(Path.GetFileName(path));
+            if (string.IsNullOrWhiteSpace(reason)) continue;
+
+            var targetDirectory = GroupBackupDirectory(summary.Id, reason);
+            var targetPath = UniqueBackupPath(targetDirectory, Path.GetFileName(path));
+            if (Path.GetFullPath(path).Equals(Path.GetFullPath(targetPath), StringComparison.OrdinalIgnoreCase)) continue;
+            try
+            {
+                Directory.CreateDirectory(targetDirectory);
+                File.Move(path, targetPath);
+                MoveBackupBackgroundFolder(path, targetPath);
+            }
+            catch { }
+        }
+    }
+    private static void DeleteBackupFile(string path)
+    {
+        try { File.Delete(path); }
+        catch { }
+
+        var backgroundFolder = BackupBackgroundFolderPath(path);
+        try
+        {
+            if (Directory.Exists(backgroundFolder)) Directory.Delete(backgroundFolder, true);
+        }
+        catch { }
+    }
+    private static void MoveBackupBackgroundFolder(string oldBackupPath, string newBackupPath)
+    {
+        var oldBackgroundFolder = BackupBackgroundFolderPath(oldBackupPath);
+        if (!Directory.Exists(oldBackgroundFolder)) return;
+        var newBackgroundFolder = BackupBackgroundFolderPath(newBackupPath);
+        try
+        {
+            if (Directory.Exists(newBackgroundFolder)) Directory.Delete(newBackgroundFolder, true);
+            Directory.CreateDirectory(Path.GetDirectoryName(newBackgroundFolder)!);
+            Directory.Move(oldBackgroundFolder, newBackgroundFolder);
+        }
+        catch { }
+    }
+    private static string BackupBackgroundFolderPath(string backupPath) => Path.Combine(
+        Path.GetDirectoryName(backupPath) ?? "",
+        $"{Path.GetFileNameWithoutExtension(backupPath)}.background");
+    private IEnumerable<GroupBackupFile> GroupBackupFiles()
+    {
+        Directory.CreateDirectory(_backupDirectory);
+        foreach (var path in Directory.EnumerateFiles(_backupDirectory, "*.json", SearchOption.AllDirectories))
+        {
+            var summary = TryReadGroupBackupSummary(path);
+            if (summary is null || string.IsNullOrWhiteSpace(summary.Id)) continue;
+
+            var reason = BackupReasonFromName(Path.GetFileName(path));
+            if (string.IsNullOrWhiteSpace(reason)) continue;
+
+            FileInfo file;
+            try { file = new FileInfo(path); }
+            catch { continue; }
+            yield return new GroupBackupFile(file.FullName, file.Name, summary.Id, string.IsNullOrWhiteSpace(summary.Name) ? Path.GetFileNameWithoutExtension(path) : summary.Name.Trim(), reason, GroupBackupType(summary.Id, reason), file.LastWriteTimeUtc, file.Length);
         }
     }
     private static AccountBackupFileInfo AccountBackupFileInfo(string path)
@@ -1802,6 +2082,42 @@ internal sealed class AvatarStore
         }
         catch { }
         return new AccountBackupFileInfo(file.Name, file.FullName, file.Length, file.LastWriteTime, createdAt, reason, groupCount, avatarCount);
+    }
+    private static GroupFileSummary? TryReadGroupBackupSummary(string path)
+    {
+        try { return JsonSerializer.Deserialize<GroupFileSummary>(File.ReadAllText(path), ProgramJson.Options); }
+        catch { return null; }
+    }
+    private static string BackupReasonFromName(string fileName)
+    {
+        var name = Path.GetFileNameWithoutExtension(fileName);
+        foreach (var reason in new[] { "pre-replace", "pre-save", "unfavorited", "deleted", "edit" })
+        {
+            if (name.EndsWith($"-{reason}", StringComparison.OrdinalIgnoreCase)) return reason;
+        }
+        var dash = name.LastIndexOf('-');
+        return dash >= 0 && dash + 1 < name.Length ? name[(dash + 1)..] : "";
+    }
+    private string GroupBackupDirectory(string groupId, string reason) => Path.Combine(_backupDirectory, GroupBackupType(groupId, reason));
+    private static string GroupBackupType(string groupId, string reason)
+    {
+        if (IsSyncedGroupId(groupId)) return SyncedBackupFolderName;
+        if (IsLimitedSystemBackupGroupId(groupId)) return SystemBackupFolderName;
+        if (reason.Equals("deleted", StringComparison.OrdinalIgnoreCase)) return DeletedBackupFolderName;
+        return LocalBackupFolderName;
+    }
+    private static string GroupBackupReasonDisplay(string fileName)
+    {
+        var reason = BackupReasonFromName(fileName);
+        return reason.ToLowerInvariant() switch
+        {
+            "pre-save" => "Edit mode",
+            "pre-replace" => "Replace synced group",
+            "edit" => "Edit mode",
+            "unfavorited" => "Unfavorite All",
+            "deleted" => "Deleted group",
+            _ => "Cleanup backup"
+        };
     }
     private static List<string> OrderedSyncedAvatarIds(LibraryData lib, string groupId, IReadOnlyCollection<string> orderedLocalIds)
     {
@@ -1845,24 +2161,17 @@ internal sealed class AvatarStore
     private static CleanLibraryExport CleanExport(LibraryData lib) => new(lib.Groups.OrderBy(x => x.Order).Select(g => GroupSummary(g, lib.Avatars.Where(a => a.GroupId == g.Id).OrderBy(a => a.Order))).ToList());
     private static AccountBackupExport CleanAccountBackup(LibraryData lib, string reason)
     {
-        var protectedGroupIds = lib.Groups
-            .Where(IsAccountProtectedGroup)
+        var syncedGroupIds = lib.Groups
+            .Where(group => group.Id.StartsWith("vrc_", StringComparison.OrdinalIgnoreCase))
             .Select(x => x.Id)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var groups = lib.Groups
-            .Where(x => protectedGroupIds.Contains(x.Id))
+            .Where(x => syncedGroupIds.Contains(x.Id))
             .OrderBy(x => x.Order)
             .Select(g => GroupSummary(g, lib.Avatars.Where(a => a.GroupId == g.Id).OrderBy(a => a.Order)))
             .ToList();
         var avatarCount = groups.Sum(x => x.Avatars?.Count ?? 0);
         return new AccountBackupExport(DateTimeOffset.UtcNow, reason, AccountBackupRetention, groups.Count, avatarCount, groups);
-    }
-    private static bool IsAccountProtectedGroup(AvatarGroup group)
-    {
-        return group.Id.StartsWith("vrc_", StringComparison.OrdinalIgnoreCase)
-            || group.Id.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase)
-            || group.Id.Equals(RecentAvatarGroupId, StringComparison.OrdinalIgnoreCase)
-            || group.Id.Equals(DeletedAvatarGroupId, StringComparison.OrdinalIgnoreCase);
     }
     private static GroupFileSummary GroupSummary(AvatarGroup group, IEnumerable<AvatarFavorite> avatars) => new(group.Id, group.Name, group.Description, group.Icon, group.BackgroundFolder, group.BackgroundEffect, avatars.Select(ExportAvatar).ToList());
     private static AvatarInput ExportAvatar(AvatarFavorite avatar) => new()
@@ -2200,6 +2509,9 @@ internal sealed class AvatarStore
         }
     }
     private static bool IsSyncedGroupId(string groupId) => groupId.StartsWith("vrc_", StringComparison.OrdinalIgnoreCase);
+    private static bool IsLimitedSystemBackupGroupId(string groupId) =>
+        groupId.Equals(RecentAvatarGroupId, StringComparison.OrdinalIgnoreCase) ||
+        groupId.Equals(DeletedAvatarGroupId, StringComparison.OrdinalIgnoreCase);
     private static bool IsPinnedSystemGroupId(string groupId) =>
         groupId.Equals(RecentAvatarGroupId, StringComparison.OrdinalIgnoreCase) ||
         groupId.Equals(DeletedAvatarGroupId, StringComparison.OrdinalIgnoreCase) ||
@@ -2260,6 +2572,19 @@ internal sealed class AvatarStore
         group.Name.Equals("Favorites", StringComparison.OrdinalIgnoreCase);
     private static int NextGroupOrder(LibraryData lib) => lib.Groups.Count == 0 ? 0 : lib.Groups.Max(x => x.Order) + 1;
     private static int NextAvatarOrder(LibraryData lib, string groupId) => lib.Avatars.Where(x => x.GroupId == groupId).DefaultIfEmpty().Max(x => x?.Order ?? -1) + 1;
+    private static void ShiftAvatarOrdersDown(LibraryData lib, string groupId, string excludeId = "")
+    {
+        foreach (var avatar in lib.Avatars.Where(x => x.GroupId.Equals(groupId, StringComparison.OrdinalIgnoreCase) && !x.Id.Equals(excludeId, StringComparison.OrdinalIgnoreCase)))
+        {
+            avatar.Order++;
+        }
+    }
+    private static void PlaceAvatarAtTop(LibraryData lib, AvatarFavorite avatar, string groupId)
+    {
+        ShiftAvatarOrdersDown(lib, groupId, avatar.Id);
+        avatar.GroupId = groupId;
+        avatar.Order = 0;
+    }
     private static bool AvatarExistsInGroup(LibraryData lib, string groupId, string? avatarId, string? excludeId = null)
     {
         var ids = new[] { avatarId, excludeId }
@@ -5211,8 +5536,8 @@ internal sealed class VrChatClient
             ReadString(root, "profilePicOverrideThumbnail") ?? "",
             hasCurrentAvatarObject ? ReadString(currentAvatarElement, "id") ?? "" : ReadString(root, "currentAvatar") ?? ReadString(root, "currentAvatarId") ?? "",
             hasCurrentAvatarObject ? ReadString(currentAvatarElement, "name") ?? "" : ReadString(root, "currentAvatarName") ?? "",
-            hasCurrentAvatarObject ? ReadString(currentAvatarElement, "imageUrl") ?? "" : ReadString(root, "currentAvatarImageUrl") ?? "",
-            hasCurrentAvatarObject ? ReadString(currentAvatarElement, "thumbnailImageUrl") ?? ReadString(currentAvatarElement, "imageUrl") ?? "" : ReadString(root, "currentAvatarThumbnailImageUrl") ?? "",
+            hasCurrentAvatarObject ? ReadString(currentAvatarElement, "imageUrl") ?? ReadString(root, "currentAvatarImageUrl") ?? "" : ReadString(root, "currentAvatarImageUrl") ?? "",
+            hasCurrentAvatarObject ? ReadString(currentAvatarElement, "thumbnailImageUrl") ?? ReadString(currentAvatarElement, "imageUrl") ?? ReadString(root, "currentAvatarThumbnailImageUrl") ?? ReadString(root, "currentAvatarImageUrl") ?? "" : ReadString(root, "currentAvatarThumbnailImageUrl") ?? "",
             ReadValueString(root, "allowAvatarCopying"),
             ReadString(root, "pronouns") ?? "",
             ReadString(root, "ageVerificationStatus") ?? "",
@@ -7733,7 +8058,7 @@ internal sealed class AvatarGroup { public string Id { get; set; } = ""; public 
 internal sealed class AvatarFavorite : AvatarInput { public int Order { get; set; } = -1; public DateTimeOffset CreatedAt { get; set; } public DateTimeOffset UpdatedAt { get; set; } }
 internal sealed class GroupInput { public string Id { get; set; } = ""; public string Name { get; set; } = ""; public string Description { get; set; } = ""; public string Icon { get; set; } = ""; public string BackgroundFolder { get; set; } = ""; public string? BackgroundEffect { get; set; } }
 internal sealed class GroupLockInput { public string Id { get; set; } = ""; public bool ReorderLocked { get; set; } = true; }
-internal sealed class CopyGroupToExistingInput { public string Id { get; set; } = ""; public string TargetGroupId { get; set; } = ""; }
+internal sealed class CopyGroupToExistingInput { public string Id { get; set; } = ""; public string TargetGroupId { get; set; } = ""; public bool Replace { get; set; } }
 internal class AvatarInput { public string Id { get; set; } = ""; public string GroupId { get; set; } = ""; public string AvatarId { get; set; } = ""; public string Name { get; set; } = ""; public string Description { get; set; } = ""; public string AuthorId { get; set; } = ""; public string AuthorName { get; set; } = ""; public string ImageUrl { get; set; } = ""; public string ThumbnailImageUrl { get; set; } = ""; public string ReleaseStatus { get; set; } = ""; public string Version { get; set; } = ""; public string Platforms { get; set; } = ""; public string Tags { get; set; } = ""; public string SourceUrl { get; set; } = ""; public string Notes { get; set; } = ""; public string RawJson { get; set; } = ""; public string Source { get; set; } = ""; public string RemoteCreatedAt { get; set; } = ""; public string RemoteUpdatedAt { get; set; } = ""; public string RemoteFavoriteId { get; set; } = ""; }
 internal static class AvatarInputExtensions { public static string NameOrId(this AvatarInput avatar) => string.IsNullOrWhiteSpace(avatar.Name) ? avatar.AvatarId : avatar.Name; }
 internal sealed class IdInput { public string Id { get; set; } = ""; public string Path { get; set; } = ""; }
@@ -7741,6 +8066,7 @@ internal sealed class IdsInput { public List<long> Ids { get; set; } = []; }
 internal sealed class BackupRestoreInput { public string Path { get; set; } = ""; public string Mode { get; set; } = ""; }
 internal sealed class MoveAvatarInput { public string AvatarId { get; set; } = ""; public string GroupId { get; set; } = ""; }
 internal sealed class ReorderInput { public string Id { get; set; } = ""; public string GroupId { get; set; } = ""; public int Position { get; set; } = 1; }
+internal sealed record AvatarOrderInput(string GroupId, List<string> AvatarIds);
 internal sealed record SyncedAvatarOrderInput(string GroupId, List<string> AvatarIds);
 internal sealed record SyncedAvatarOrderProgress(string GroupId, string Stage, string Message, int Completed, int Total);
 internal sealed record SyncedAvatarOrderApplyResult(LibraryData Library, int Removed, int Added, string Tag, string BackupPath);

@@ -113,6 +113,7 @@
             <label id="syncedAvatarEditToggleWrap" class="edit-mode-toggle" hidden><span>Edit mode</span><input id="syncedAvatarEditToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span></label>
             <button id="applySyncedAvatarOrderBtn" class="primary" type="button" hidden>Save</button>
             <button id="cancelSyncedAvatarOrderBtn" type="button" hidden>Cancel</button>
+            <button id="replaceSyncedGroupBtn" type="button" hidden>Replace From Group</button>
             <button id="editGroupBtn">Edit Group</button>
             <button id="copyGroupBtn">Copy Group</button>
             <button id="deleteGroupBtn" class="danger">Delete Group</button>
@@ -318,7 +319,13 @@
   <dialog id="copyGroupDialog"><form method="dialog" class="dialog-form">
     <header><h3>Copy Group</h3><button type="button" class="icon-button" data-close="copyGroupDialog">x</button></header>
     <p id="copyGroupMessage" class="dialog-note"></p>
-    <label id="copyGroupTargetWrap" hidden>Target group<select id="copyGroupTargetInput"></select></label>
+    <label id="copyGroupTargetWrap" hidden>Target group
+      <div class="sort-control dialog-select-control copy-group-target-control">
+        <button id="copyGroupTargetMenuBtn" type="button">Choose Group</button>
+        <div id="copyGroupTargetMenu" class="sort-menu" hidden></div>
+        <select id="copyGroupTargetInput" hidden></select>
+      </div>
+    </label>
     <menu><button type="button" data-close="copyGroupDialog">Cancel</button><button id="copyGroupFullBtn" type="button">Copy Full Group</button><button id="copyGroupToExistingBtn" type="button" class="primary">Copy to Existing</button></menu>
   </form></dialog>
 

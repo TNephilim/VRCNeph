@@ -56,6 +56,8 @@ const state = {
   pendingMoveAvatarId: "",
   pendingMoveAvatarIds: [],
   pendingAvatarGroupAction: "",
+  copyGroupDialogMode: "copy",
+  pendingCopyTargetGroupId: "",
   pendingCurrentAvatarSave: null,
   pendingAvatarSort: null,
   selectedAvatarIds: new Set(),
@@ -129,6 +131,7 @@ const BASE_DEVICE_PIXEL_RATIO = window.devicePixelRatio || 1;
 let updatePromptShown = false;
 let confirmDialogQueue = Promise.resolve();
 let userDetailPopupClosedAt = 0;
+let appClosePromptOpen = false;
 const startupSummary = { items: [], pasStatus: null, shown: false };
 const AVATAR_DETAIL_FIELD_IDS = [
   "avatarIdInput",
@@ -399,6 +402,7 @@ function updatePipelineStatusText() {
 function handleAppEvent(name, data) {
   if (name === "vrchatPipeline") handleVrchatPipelineEvent(data);
   if (name === "vrchatPipelineStatus") handleVrchatPipelineStatus(data);
+  if (name === "appCloseRequested") void handleAppCloseRequested(data);
 }
 function invalidateBackgroundCache(groupId = "") {
   if (groupId) state.backgroundCache.delete(`group:${groupId}`);
@@ -523,8 +527,23 @@ function isDefaultLocalGroup(group) { return String(group?.description || "").to
 function isCustomLocalGroup(group) { return group && !isSyncedGroup(group.id) && !isPinnedSystemGroup(group.id) && !isDefaultLocalGroup(group); }
 function isSyncedAvatarEditActive(groupId = state.activeGroupId) { return Boolean(groupId && state.syncedAvatarEdit.groupId === groupId); }
 function canEditSyncedAvatarOrder(group = activeGroup()) { return Boolean(group && isSyncedGroup(group.id) && !isPinnedSystemGroup(group.id) && canAccessSyncedGroup(group.id)); }
+function canReplaceGroupIntoGroup(groupId = "") {
+  const group = state.library.groups.find((item) => item.id === groupId);
+  return canCopyGroupIntoGroup(groupId) || canEditSyncedAvatarOrder(group);
+}
 function canReorderAvatarsInGroup(groupId = state.activeGroupId) { return !isPinnedSystemGroup(groupId) && (!isSyncedGroup(groupId) || isSyncedAvatarEditActive(groupId)); }
 function isSyncedAvatarEditDrag() { return state.dragSort?.type === "avatar" && isSyncedAvatarEditActive(state.dragSort.groupId); }
+function persistedGroupAvatarIds(groupId = state.syncedAvatarEdit.groupId) {
+  return groupAvatars(groupId)
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")))
+    .map((avatar) => avatar.id);
+}
+function syncedAvatarEditHasChanges() {
+  if (!state.syncedAvatarEdit.groupId) return false;
+  const draft = currentSyncedEditAvatarOrder();
+  const saved = persistedGroupAvatarIds(state.syncedAvatarEdit.groupId);
+  return draft.length !== saved.length || draft.some((id, index) => id !== saved[index]);
+}
 function exitSyncedAvatarEditMode(message = "") {
   if (!state.syncedAvatarEdit.groupId || state.syncedAvatarEdit.applying) return false;
   state.syncedAvatarEdit = { groupId: "", avatarIds: [], backupPath: "", applying: false };
@@ -955,6 +974,7 @@ function renderGroups() {
         { label: "Edit Group", action: () => openGroupDialog(group) },
         { label: "Edit Background", action: () => openBackgroundDialog(group.id) },
         { label: "Edit Group Icon", action: () => openGroupIconDialog(group) },
+        { label: "Replace From Group", disabled: !isSyncedAvatarEditActive(group.id), action: () => openReplaceSyncedGroupDialog(group) },
         { label: "Copy Group", disabled: pinned, action: () => openCopyGroupDialog(group) },
         { label: "Delete Group", className: "danger", disabled: pinned || synced, action: () => deleteGroup(group) }
       ];
@@ -984,8 +1004,10 @@ function renderToolbar() {
   $("syncedAvatarEditToggle").disabled = state.syncedAvatarEdit.applying;
   $("applySyncedAvatarOrderBtn").hidden = !syncedEditActive;
   $("cancelSyncedAvatarOrderBtn").hidden = !syncedEditActive;
+  $("replaceSyncedGroupBtn").hidden = !syncedEditActive;
   $("applySyncedAvatarOrderBtn").disabled = state.syncedAvatarEdit.applying;
   $("cancelSyncedAvatarOrderBtn").disabled = state.syncedAvatarEdit.applying;
+  $("replaceSyncedGroupBtn").disabled = state.syncedAvatarEdit.applying;
   $("sortMenuBtn").disabled = syncedEditActive;
   $("editGroupBtn").hidden = false;
   $("copyGroupBtn").hidden = systemGroup;
@@ -1481,7 +1503,12 @@ function fillSaveAvatarGroupSelect(selectedId, options = {}) {
   updateSaveAvatarGroupMenu();
 }
 function fillCopyGroupTargets(sourceGroupId = "") {
-  fillSelectWithGroups($("copyGroupTargetInput"), state.activeGroupId, { includeGroup: (groupId) => groupId !== sourceGroupId && canCopyGroupIntoGroup(groupId) });
+  fillSelectWithGroups($("copyGroupTargetInput"), state.activeGroupId, { includeGroup: (groupId) => groupId !== sourceGroupId && canReplaceGroupIntoGroup(groupId) });
+  updateSortButton("copyGroupTargetInput", "copyGroupTargetMenuBtn");
+}
+function fillReplaceSyncedGroupSources(targetGroupId = "") {
+  fillSelectWithGroups($("copyGroupTargetInput"), "", { includeGroup: (groupId) => groupId !== targetGroupId && !isPinnedSystemGroup(groupId) });
+  updateSortButton("copyGroupTargetInput", "copyGroupTargetMenuBtn");
 }
 function openAvatarGroupActionDialog(avatar, action) {
   const ids = selectedAvatarIdsForAvatar(avatar);
@@ -3072,20 +3099,35 @@ function hideSortMenu(menuId = "sortMenu", buttonId = "sortMenuBtn") {
   }
   renderSyncQueueStatus();
 }
+function syncActionDisplayLabel(item) {
+  const kind = String(item?.kind || "").toLowerCase();
+  const payload = item?.payload || {};
+  const group = state.library.groups.find((entry) => entry.id === payload.groupId);
+  const groupName = group?.name || payload.groupId || "VRChat";
+  if (kind === "favorite-add") return `Adding favorite to ${groupName}`;
+  if (kind === "favorite-remove") return `Removing favorite from ${groupName}`;
+  if (kind === "equip-avatar") return "Equipping avatar in VRChat";
+  if (kind === "clear-group") return `Clearing ${groupName} in VRChat`;
+  if (kind === "synced-order") return `Saving order for ${groupName}`;
+  return item?.label || "VRChat sync";
+}
+function syncQueueMessage(status, pending) {
+  const stateName = String(status?.state || "idle").toLowerCase();
+  const suffix = pending > 1 ? ` ${pending - 1} pending.` : "";
+  if (stateName === "running") return `${status.message || "Syncing VRChat changes..."}${suffix}`;
+  if (stateName === "waiting") return `${status.message || "Waiting for VRChat..."}${suffix}`;
+  if (stateName === "failed") return status.message || "VRChat sync failed. Open Sync Center.";
+  return pending ? `${pending} VRChat change${pending === 1 ? "" : "s"} pending.` : "";
+}
 function renderSyncQueueStatus() {
   const el = $("syncQueueStatus");
   if (!el) return;
   const pending = state.syncQueue.length + (state.syncQueueRunning ? 1 : 0);
   const status = state.syncQueueStatus || { state: "idle", message: "" };
+  const message = syncQueueMessage(status, pending);
   el.className = `sync-queue-status ${status.state || "idle"}`;
-  el.hidden = !state.vrchat?.isLoggedIn && !pending && status.state !== "failed";
-  if (status.state === "failed") {
-    el.textContent = status.message || "Sync action failed.";
-  } else if (state.syncQueueRunning || state.syncQueue.length) {
-    el.textContent = `${status.message || "Syncing VRChat changes..."}${state.syncQueue.length ? ` ${state.syncQueue.length} pending.` : ""}`;
-  } else {
-    el.textContent = "VRChat sync idle.";
-  }
+  el.hidden = !message;
+  el.innerHTML = message ? `<span class="sync-queue-dot" aria-hidden="true"></span><span>${escapeHtml(message)}</span>` : "";
 }
 function renderSocialSidebar() {
   if (state.activePage !== "friends" && state.activePage !== "worlds" && state.activePage !== "messages" && state.activePage !== "notifications") return;
@@ -3458,12 +3500,6 @@ async function commitDraggedGroupDrop() {
 async function commitDraggedAvatarDrop() {
   const drag = state.dragSort;
   if (drag?.type !== "avatar") return;
-  if ((drag.ids?.length || 0) > 1) {
-    state.dragSort = null;
-    clearDragSortIndicators();
-    toast("Multiple selected avatars can be dragged to another group.");
-    return;
-  }
   if (drag.copyOnly) {
     state.dragSort = null;
     clearDragSortIndicators();
@@ -3472,7 +3508,8 @@ async function commitDraggedAvatarDrop() {
   const targetId = drag.dropTargetId;
   const groupId = drag.groupId || state.activeGroupId;
   const draggedId = drag.id;
-  const drop = targetId ? { type: "avatar", id: draggedId, targetId, groupId, x: state.dragPoint?.clientX ?? window.innerWidth / 2, y: state.dragPoint?.clientY ?? window.innerHeight / 2 } : null;
+  const ids = drag.ids?.length ? drag.ids : [draggedId];
+  const drop = targetId ? { type: "avatar", id: draggedId, ids, targetId, groupId, x: state.dragPoint?.clientX ?? window.innerWidth / 2, y: state.dragPoint?.clientY ?? window.innerHeight / 2 } : null;
   const position = drag.dropPosition || (!targetId ? orderedGroupAvatars(groupId).length : null);
   state.dragSort = null;
   clearDragSortIndicators();
@@ -3480,7 +3517,7 @@ async function commitDraggedAvatarDrop() {
     showDropPlacementMenu(drop);
     return;
   }
-  if (position) await reorderAvatar(draggedId, groupId, position);
+  if (position && ids.length === 1) await reorderAvatar(draggedId, groupId, position);
 }
 async function reorderGroup(id, position) {
   try {
@@ -3657,9 +3694,9 @@ async function reorderAvatarsRelativeToTarget(ids, targetId, groupId, placement)
   try {
     $("sortSelect").value = "manual";
     updateSortButton();
-    for (let i = 0; i < moving.length; i++) {
-      state.library = await api("reorderAvatar", { id: moving[i], groupId, position: insertIndex + i + 1 });
-    }
+    const next = [...remaining];
+    next.splice(insertIndex, 0, ...moving);
+    state.library = await api("reorderAvatars", { groupId, avatarIds: next });
     renderAvatars();
   } catch (e) { toast(e.message); }
 }
@@ -3668,10 +3705,11 @@ function showDropPlacementMenu(drop) {
     clearDragSortIndicators();
     return;
   }
+  const multi = (drop.ids?.length || 0) > 1;
   showContextMenu(drop.x, drop.y, [
-    { label: "Move Before", action: () => placeDroppedItem(drop, "before") },
-    { label: "Move After", action: () => placeDroppedItem(drop, "after") },
-    { label: "Swap Places", action: () => placeDroppedItem(drop, "swap") },
+    { label: multi ? "Move All Before" : "Move Before", action: () => placeDroppedItem(drop, "before") },
+    { label: multi ? "Move All After" : "Move After", action: () => placeDroppedItem(drop, "after") },
+    ...(!multi ? [{ label: "Swap Places", action: () => placeDroppedItem(drop, "swap") }] : []),
     { label: "Cancel", className: "separated", action: hideContextMenu }
   ]);
 }
@@ -3684,6 +3722,8 @@ async function placeDroppedItem(drop, placement) {
     return;
   }
   if (drop.type === "avatar") {
+    const ids = drop.ids?.length ? drop.ids : [drop.id];
+    if (ids.length > 1) return reorderAvatarsRelativeToTarget(ids, drop.targetId, drop.groupId, placement);
     const avatars = orderedGroupAvatars(drop.groupId);
     if (placement === "swap") return swapAvatarPositions(drop.id, drop.targetId, drop.groupId);
     const position = movePositionFromDrop(avatars, drop.id, drop.targetId, placement === "after");
@@ -3762,6 +3802,7 @@ async function moveAvatarsRelativeToTarget(ids, targetAvatar, placement, copy = 
   const targetPosition = listPosition(orderedGroupAvatars(targetGroupId), targetAvatar.id);
   if (targetPosition <= 0) return;
   try {
+    const beforeIds = copy ? new Set(state.library.avatars.map((item) => item.id)) : null;
     if (copy) {
       state.library = await api("copyAvatar", { avatarId: id, groupId: targetGroupId });
     } else {
@@ -3769,8 +3810,7 @@ async function moveAvatarsRelativeToTarget(ids, targetAvatar, placement, copy = 
       state.library = await api("moveAvatar", { avatarId: id, groupId: targetGroupId });
     }
     const placedAvatar = state.library.avatars
-      .filter((candidate) => candidate.groupId === targetGroupId && (copy ? candidate.id !== id && (candidate.avatarId || candidate.id) === (sourceAvatar.avatarId || sourceAvatar.id) : candidate.id === id))
-      .sort((a, b) => (b.order ?? 0) - (a.order ?? 0))[0];
+      .find((candidate) => candidate.groupId === targetGroupId && (copy ? !beforeIds.has(candidate.id) : candidate.id === id));
     if (!placedAvatar) return;
     const position = placement === "after" ? targetPosition + 1 : targetPosition;
     state.library = await api("reorderAvatar", { id: placedAvatar.id, groupId: targetGroupId, position });
@@ -3841,7 +3881,7 @@ async function placeAvatarInGroupEnd(id, groupId, copy = false, { focusTarget = 
       state.library = await api("moveAvatar", { avatarId: id, groupId });
     }
     if (focusTarget) state.activeGroupId = groupId;
-    state.avatarPage = Math.max(0, Math.floor((orderedGroupAvatars(groupId).length - 1) / AVATAR_PAGE_SIZE));
+    state.avatarPage = 0;
     $("sortSelect").value = "manual";
     updateSortButton();
     render();
@@ -3977,7 +4017,7 @@ function enqueueVrChatAction({ kind, label, run, retries = 3, payload = {} }) {
   };
   state.syncQueue.push(item);
   recordSyncAction(item, "queued");
-  state.syncQueueStatus = { state: "waiting", message: `Queued: ${label}` };
+  state.syncQueueStatus = { state: "waiting", message: `Queued: ${syncActionDisplayLabel(item)}` };
   renderSyncQueueStatus();
   void processVrChatSyncQueue();
   return item.id;
@@ -3992,7 +4032,8 @@ async function processVrChatSyncQueue() {
       let done = false;
       while (!done) {
         item.attempt++;
-        state.syncQueueStatus = { state: "running", message: item.attempt > 1 ? `Retrying: ${item.label}` : `Syncing: ${item.label}` };
+        const displayLabel = syncActionDisplayLabel(item);
+        state.syncQueueStatus = { state: "running", message: item.attempt > 1 ? `Retrying: ${displayLabel}` : `${displayLabel}...` };
         renderSyncQueueStatus();
         recordSyncAction(item, item.attempt > 1 ? "retrying" : "running");
         try {
@@ -4006,14 +4047,14 @@ async function processVrChatSyncQueue() {
           }
         } catch (error) {
           if (item.attempt >= item.retries) {
-            const message = `${item.label} failed: ${error.message || error}`;
+            const message = `${syncActionDisplayLabel(item)} failed: ${error.message || error}`;
             state.syncQueueStatus = { state: "failed", message };
             recordSyncAction(item, "failed", error.message || String(error));
             showSyncFailureDialog(item, error);
             done = true;
           } else {
             const wait = syncRetryDelay(error, item.attempt - 1);
-            state.syncQueueStatus = { state: "waiting", message: `Waiting to retry: ${item.label}` };
+            state.syncQueueStatus = { state: "waiting", message: `Waiting to retry: ${syncActionDisplayLabel(item)}` };
             recordSyncAction(item, "waiting", error.message || String(error));
             renderSyncQueueStatus();
             await delay(wait);
@@ -4139,7 +4180,7 @@ async function pushSyncedAvatarAdd(avatarId, groupId) {
   if (!syncedGroupHasCapacity(groupId, avatarId, "", true)) throw new Error(`Synced VRChat groups can only contain ${SYNCED_GROUP_AVATAR_LIMIT} avatars.`);
   const group = state.library.groups.find((item) => item.id === groupId);
   const action = createSyncAction("favorite-add", `Favorite ${avatarId} to ${group?.name || groupId}`, { avatarId, groupId });
-  state.syncQueueStatus = { state: "running", message: `Syncing: ${action.label}` };
+  state.syncQueueStatus = { state: "running", message: `${syncActionDisplayLabel(action)}...` };
   renderSyncQueueStatus();
   try {
     return await runRecordedSyncAction(action, () => api("vrchatFavoriteAdd", { avatarId, groupId }));
@@ -4152,7 +4193,7 @@ async function pushSyncedAvatarRemove(avatarId, groupId) {
   if (!isSyncedGroup(groupId) || !state.vrchat?.isLoggedIn || !avatarId) return;
   const group = state.library.groups.find((item) => item.id === groupId);
   const action = createSyncAction("favorite-remove", `Unfavorite ${avatarId} from ${group?.name || groupId}`, { avatarId, groupId });
-  state.syncQueueStatus = { state: "running", message: `Syncing: ${action.label}` };
+  state.syncQueueStatus = { state: "running", message: `${syncActionDisplayLabel(action)}...` };
   renderSyncQueueStatus();
   try {
     return await runRecordedSyncAction(action, () => api("vrchatFavoriteRemove", { avatarId, groupId }));
@@ -4639,18 +4680,42 @@ async function loadSettingsBackups() {
     const groupFiles = (result.files || []).map((file) => ({ ...file, backupKind: "group" }));
     const files = [...accountFiles, ...groupFiles].sort((a, b) => new Date(b.lastModified || b.createdAt || 0).getTime() - new Date(a.lastModified || a.createdAt || 0).getTime());
     list.innerHTML = files.length
-      ? files.map(settingsBackupItemHtml).join("")
+      ? settingsBackupGroupsHtml(files)
       : `<div class="settings-empty"><h4>No backups</h4><p>Account avatar backups are created after VRChat syncs. Group backups appear after group edits, synced order saves, or cleanup moves.</p></div>`;
     list.querySelectorAll("[data-backup-path]").forEach((button) => button.addEventListener("click", () => openBackupRestoreDialog(button.dataset.backupPath, button.dataset.backupName)));
   } catch (e) {
     list.innerHTML = `<div class="settings-empty"><h4>Could not load backups</h4><p>${escapeHtml(e.message)}</p></div>`;
   }
 }
+function settingsBackupGroupsHtml(files) {
+  const groups = new Map();
+  files.forEach((file) => {
+    const key = file.backupKind === "account"
+      ? "account"
+      : `group:${file.groupId || file.displayName || file.name}:${file.backupType || "Group"}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(file);
+  });
+  return [...groups.values()]
+    .sort((a, b) => new Date(b[0].lastModified || b[0].createdAt || 0).getTime() - new Date(a[0].lastModified || a[0].createdAt || 0).getTime())
+    .map(settingsBackupGroupHtml)
+    .join("");
+}
+function settingsBackupGroupHtml(files) {
+  const sorted = [...files].sort((a, b) => new Date(b.lastModified || b.createdAt || 0).getTime() - new Date(a.lastModified || a.createdAt || 0).getTime());
+  if (sorted.length === 1) return settingsBackupItemHtml(sorted[0]);
+  const latest = sorted[0];
+  const title = latest.backupKind === "account" ? "Account Avatars Backups" : (latest.displayName || latest.name || "Group Backups");
+  const type = latest.backupKind === "account" ? "Account" : (latest.backupType || "Group");
+  const latestTime = new Date(latest.lastModified || latest.createdAt || 0).toLocaleString();
+  return `<details class="backup-group"><summary><div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(type)} - ${sorted.length} backups - newest ${escapeHtml(latestTime)}</span></div><small>${escapeHtml(formatFileSize(sorted.reduce((total, file) => total + Number(file.size || 0), 0)))}</small></summary><div class="backup-group-items">${sorted.map(settingsBackupItemHtml).join("")}</div></details>`;
+}
 function settingsBackupItemHtml(file) {
   if (file.backupKind === "account") {
     return `<div class="settings-list-item"><div><strong>Account Avatars Backup</strong><span>${escapeHtml(accountBackupSummary(file, file.retention))}</span></div><small>${escapeHtml(formatFileSize(file.size))}</small></div>`;
   }
-  return `<div class="settings-list-item"><div><strong>${escapeHtml(file.displayName || file.name)}</strong><span>${escapeHtml(file.reason || "Group backup")} - ${escapeHtml(new Date(file.lastModified).toLocaleString())}</span></div><small>${escapeHtml(formatFileSize(file.size))}</small><button type="button" class="restore-action" data-backup-path="${escapeAttr(file.path)}" data-backup-name="${escapeAttr(file.displayName || file.name)}">Restore</button></div>`;
+  const type = file.backupType ? `${file.backupType} - ` : "";
+  return `<div class="settings-list-item"><div><strong>${escapeHtml(file.displayName || file.name)}</strong><span>${escapeHtml(type)}${escapeHtml(file.reason || "Group backup")} - ${escapeHtml(new Date(file.lastModified).toLocaleString())}</span></div><small>${escapeHtml(formatFileSize(file.size))}</small><button type="button" class="restore-action" data-backup-path="${escapeAttr(file.path)}" data-backup-name="${escapeAttr(file.displayName || file.name)}">Restore</button></div>`;
 }
 function accountBackupSummary(file, retention = 5) {
   const created = file.createdAt || file.lastModified;
@@ -6151,7 +6216,7 @@ function openNotificationFriendDetails(friend, notification = null, { resetTab =
     openNotificationFriendDetails(friend, notification, { resetTab: false, popup });
   }));
   $("notificationDetailsContent").querySelectorAll("[data-avatar-detail-id], [data-avatar-detail-kind]").forEach((button) => button.addEventListener("click", () => openSocialAvatarDetails(button.dataset.avatarDetailId, button.dataset.avatarDetailKind)));
-  $("notificationDetailsContent").querySelectorAll("[data-world-id]").forEach((button) => button.addEventListener("click", () => selectSocialWorld(button.dataset.worldId)));
+  $("notificationDetailsContent").querySelectorAll("[data-world-id]").forEach((button) => button.addEventListener("click", () => openLocationWorld(button.dataset.worldId)));
   $("notificationDetailsContent").querySelectorAll("[data-friend-note]").forEach((field) => field.addEventListener("change", () => saveFriendNote(field.dataset.friendNote || "", field.value)));
   bindPlayerHistoryTriggers($("notificationDetailsContent"));
   bindVrchatGroupLinks($("notificationDetailsContent"));
@@ -6197,7 +6262,7 @@ function userPopupFriendDetailsHtml(friend, notification = null) {
   const location = available ? (friend.worldId || friend.location || "Private location") : "Offline";
   const liveAvatar = friend.currentAvatar || {};
   const avatarId = avatarPublicId(liveAvatar) || (avatarIdLooksValid(friend.currentAvatarId) ? friend.currentAvatarId : "");
-  const avatarImage = liveAvatar.thumbnailImageUrl || liveAvatar.imageUrl || friend.currentAvatarThumbnailImageUrl || friend.currentAvatarImageUrl || friend.imageUrl || "";
+  const avatarImage = liveAvatar.thumbnailImageUrl || liveAvatar.imageUrl || friend.currentAvatarThumbnailImageUrl || friend.currentAvatarImageUrl || "";
   const avatarName = liveAvatar.name || friend.currentAvatarName || (avatarId ? avatarId : avatarImage ? "Current Avatar" : "Unknown Avatar");
   const header = friendHeaderImage(friend);
   const headerImageAttrs = header.image
@@ -6358,7 +6423,7 @@ function renderVrchatSocial() {
   worldDetails.innerHTML = state.social.selectedType === "world" ? socialDetailsHtml() : `<div class="settings-empty"><h4>Select a world</h4><p>Click a world to view details and join options.</p></div>`;
   details.querySelectorAll("[data-social-action]").forEach((button) => button.addEventListener("click", handleSocialAction));
   bindWorldDetailsPanelEvents(worldDetails, state.social.selectedType === "world" ? state.social.selectedItem : null);
-  details.querySelectorAll("[data-world-id]").forEach((button) => button.addEventListener("click", () => selectSocialWorld(button.dataset.worldId)));
+  details.querySelectorAll("[data-world-id]").forEach((button) => button.addEventListener("click", () => openLocationWorld(button.dataset.worldId)));
   details.querySelectorAll("[data-friend-id]").forEach((button) => button.addEventListener("click", () => selectSocialFriend(button.dataset.friendId, { clickedPresence: button.dataset.presence })));
   details.querySelectorAll("[data-avatar-detail-id], [data-avatar-detail-kind]").forEach((button) => button.addEventListener("click", () => openSocialAvatarDetails(button.dataset.avatarDetailId, button.dataset.avatarDetailKind)));
   bindPlayerHistoryTriggers(details);
@@ -6926,8 +6991,7 @@ function currentUserProfileImage(user = {}) {
   return preferredUserCardImage(user);
 }
 function preferredUserCardImage(user = {}) {
-  const custom = userHasVrcPlus(user) ? userCustomProfileImage(user) : "";
-  return custom || userCurrentAvatarImage(user) || userCustomProfileImage(user);
+  return userCustomProfileImage(user) || userCurrentAvatarImage(user);
 }
 function userHasVrcPlus(user = {}) {
   return splitCsv(user.tags).some((tag) => {
@@ -6988,10 +7052,8 @@ function findFirstDeepString(value, keys = [], { skipKeys = new Set(), depth = 0
 function friendHeaderImage(friend = {}) {
   const profileCandidates = userCustomProfileImageCandidates(friend);
   const avatarImage = userCurrentAvatarImage(friend);
-  const profileImage = userHasVrcPlus(friend) ? (profileCandidates[0] || "") : "";
-  const candidates = uniqueStrings(userHasVrcPlus(friend)
-    ? [...profileCandidates, avatarImage]
-    : [avatarImage, ...profileCandidates]);
+  const profileImage = profileCandidates[0] || "";
+  const candidates = uniqueStrings([...profileCandidates, avatarImage]);
   return { image: candidates[0] || "", candidates, hasProfileImage: Boolean(profileImage) };
 }
 function normalizeVrchatImageUrl(value) {
@@ -7436,6 +7498,15 @@ async function selectSocialWorld(id) {
     toast(e.message);
   }
 }
+async function openLocationWorld(id) {
+  const worldId = String(id || "").trim();
+  if (!worldId) return;
+  if (state.activePage !== "worlds") showPage("worlds", { userInitiated: true });
+  state.social.selectedWorldGroup = "";
+  $("worldSearchInput").value = "";
+  renderWorldDiscoveryFilter();
+  await selectSocialWorld(worldId);
+}
 function rememberRecentWorld(world) {
   if (!world?.id) return;
   state.worldRecentWorlds = [world, ...(state.worldRecentWorlds || []).filter((item) => item.id !== world.id)].slice(0, 50);
@@ -7741,7 +7812,7 @@ function friendDetailsHtml(friend) {
   const groups = Array.isArray(friend.groups) ? friend.groups : [];
   const liveAvatar = friend.currentAvatar || {};
   const avatarId = avatarPublicId(liveAvatar) || (avatarIdLooksValid(friend.currentAvatarId) ? friend.currentAvatarId : "");
-  const avatarImage = liveAvatar.thumbnailImageUrl || liveAvatar.imageUrl || friend.currentAvatarThumbnailImageUrl || friend.currentAvatarImageUrl || friend.imageUrl || "";
+  const avatarImage = liveAvatar.thumbnailImageUrl || liveAvatar.imageUrl || friend.currentAvatarThumbnailImageUrl || friend.currentAvatarImageUrl || "";
   const header = friendHeaderImage(friend);
   const avatarName = liveAvatar.name || friend.currentAvatarName || (avatarId ? avatarId : avatarImage ? "Current Avatar" : "Unknown Avatar");
   const representedGroup = friend.representedGroupName || friend.representedGroupId
@@ -7927,8 +7998,12 @@ function friendAvatarInfoButton(name, avatarId, image = "", subtitle = "", avata
   const title = name || avatarId || "Unknown Avatar";
   const detailAttrs = avatarId ? `data-avatar-detail-id="${escapeAttr(avatarId)}"` : `data-avatar-detail-kind="current"`;
   const author = subtitle || findKnownAvatarAuthorName({ ...avatar, name, avatarId, thumbnailImageUrl: image, imageUrl: image });
-  const hydrateAttrs = author ? "" : ` data-avatar-author-hydrate="1" data-avatar-name="${escapeAttr(name || "")}" data-avatar-image="${escapeAttr(image || "")}" data-avatar-id="${escapeAttr(avatarId || "")}"`;
-  return `<button type="button" class="friend-avatar-inline" ${detailAttrs}${hydrateAttrs}>${image ? `<img src="${escapeAttr(image)}" alt="">` : ""}<span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(author || "Loading author...")}</small></span></button>`;
+  const genericName = !name || /^current avatar$/i.test(String(name).trim()) || /^unknown avatar$/i.test(String(name).trim());
+  const unavailableStatus = ["private", "deleted", "unavailable"].some((value) => String(avatar?.releaseStatus || avatar?.source || "").toLowerCase().includes(value));
+  const canHydrate = !author && !unavailableStatus && Boolean(avatarId || image || !genericName);
+  const detail = author || (unavailableStatus || !canHydrate ? "Avatar details unavailable" : "Loading author...");
+  const hydrateAttrs = canHydrate ? ` data-avatar-author-hydrate="1" data-avatar-name="${escapeAttr(name || "")}" data-avatar-image="${escapeAttr(image || "")}" data-avatar-id="${escapeAttr(avatarId || "")}"` : "";
+  return `<button type="button" class="friend-avatar-inline" ${detailAttrs}${hydrateAttrs}>${image ? `<img src="${escapeAttr(image)}" alt="">` : ""}<span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(detail)}</small></span></button>`;
 }
 function friendWorldsTabHtml(friend) {
   if (friend.uploadedWorldsLoading) return loadingFriendTab("Worlds");
@@ -8527,10 +8602,10 @@ async function hydrateInlineAvatarAuthors(root = document) {
       imageUrl: button.dataset.avatarImage || ""
     }).then((resolved) => {
       const author = findKnownAvatarAuthorName(resolved) || displayAvatarAuthorName(resolved);
-      if (!author || !button.isConnected) return;
-      cacheAvatarAuthorName(resolved, author);
+      if (!button.isConnected) return;
+      if (author) cacheAvatarAuthorName(resolved, author);
       const text = button.querySelector("small");
-      if (text) text.textContent = author;
+      if (text) text.textContent = author || "Author unavailable";
       button.removeAttribute("data-avatar-author-hydrate");
     }).catch(() => {});
   }
@@ -8897,6 +8972,7 @@ async function copyAvatarsToGroup(ids, groupId, { focusTarget = true } = {}) {
     } catch (e) { handleAvatarAddError(e); break; }
   }
   if (focusTarget) state.activeGroupId = groupId;
+  if (focusTarget) state.avatarPage = 0;
   clearAvatarSelection();
   render();
   if (copied) toast(`${copied} avatars copied.`);
@@ -8948,7 +9024,7 @@ async function openBackupsFolder() {
 async function createAccountBackup() {
   if (!await confirmAction({
     title: "Create Account Avatars Backup",
-    message: "Create a clean backup of your synced, uploaded, recent, and deleted VRChat avatar records?",
+    message: "Create a clean backup of your synced VRChat avatar groups?",
     confirmLabel: "Create",
     confirmClass: "primary"
   })) return;
@@ -9081,12 +9157,34 @@ function cancelSettingsDialog() {
 }
 function openCopyGroupDialog(group) {
   if (!group || isPinnedSystemGroup(group.id)) return;
+  state.copyGroupDialogMode = "copy";
   state.pendingCopyGroupId = group.id;
+  state.pendingCopyTargetGroupId = "";
+  $("copyGroupDialog").querySelector("h3").textContent = "Copy Group";
   $("copyGroupMessage").textContent = `Copy "${group.name}" as a new group, or copy its avatars into an existing local group.`;
+  $("copyGroupFullBtn").hidden = false;
+  $("copyGroupToExistingBtn").textContent = "Copy to Existing";
   fillCopyGroupTargets(group.id);
   const hasTarget = Boolean($("copyGroupTargetInput").value);
   $("copyGroupTargetWrap").hidden = !hasTarget;
   $("copyGroupToExistingBtn").disabled = !hasTarget;
+  renderSortMenu("copyGroupTargetInput", "copyGroupTargetMenu", "copyGroupTargetMenuBtn", () => {});
+  $("copyGroupDialog").showModal();
+}
+function openReplaceSyncedGroupDialog(group = activeGroup()) {
+  if (!group || !canEditSyncedAvatarOrder(group)) return;
+  state.copyGroupDialogMode = "replaceSynced";
+  state.pendingCopyGroupId = "";
+  state.pendingCopyTargetGroupId = group.id;
+  $("copyGroupDialog").querySelector("h3").textContent = "Replace Synced Group";
+  $("copyGroupMessage").textContent = `Choose a source group to replace "${group.name}" in edit mode. A backup is created first, then Save applies the order to VRChat.`;
+  $("copyGroupFullBtn").hidden = true;
+  $("copyGroupToExistingBtn").textContent = "Replace From Group";
+  fillReplaceSyncedGroupSources(group.id);
+  const hasSource = Boolean($("copyGroupTargetInput").value);
+  $("copyGroupTargetWrap").hidden = !hasSource;
+  $("copyGroupToExistingBtn").disabled = !hasSource;
+  renderSortMenu("copyGroupTargetInput", "copyGroupTargetMenu", "copyGroupTargetMenuBtn", () => {});
   $("copyGroupDialog").showModal();
 }
 async function copyGroup(group) {
@@ -9101,15 +9199,36 @@ async function copyGroup(group) {
   } catch (e) { handleAvatarAddError(e); }
 }
 async function copyGroupToExisting() {
-  const source = state.library.groups.find((group) => group.id === state.pendingCopyGroupId);
-  const targetId = $("copyGroupTargetInput").value;
-  if (!source || !targetId) return;
+  const replaceMode = state.copyGroupDialogMode === "replaceSynced";
+  const sourceId = replaceMode ? $("copyGroupTargetInput").value : state.pendingCopyGroupId;
+  const targetId = replaceMode ? state.pendingCopyTargetGroupId : $("copyGroupTargetInput").value;
+  const source = state.library.groups.find((group) => group.id === sourceId);
+  const target = state.library.groups.find((group) => group.id === targetId);
+  if (!source || !target) return;
+  const replaceSynced = replaceMode || isSyncedGroup(target.id);
+  if (replaceSynced && !await confirmAction({
+    title: "Replace Synced Group",
+    message: `Replace "${target.name}" with avatars from "${source.name}" in edit mode? A backup is created before changing it. Click Save after this to apply the new order in VRChat.`,
+    confirmLabel: "Replace",
+    confirmClass: "danger"
+  })) return;
   try {
-    state.library = await api("copyGroupToExisting", { id: source.id, targetGroupId: targetId });
+    state.library = await api("copyGroupToExisting", { id: source.id, targetGroupId: target.id, replace: replaceSynced });
     state.activeGroupId = targetId;
+    if (replaceSynced) {
+      state.avatarPage = 0;
+      state.syncedAvatarEdit = {
+        groupId: target.id,
+        avatarIds: orderedGroupAvatars(target.id).map((avatar) => avatar.id),
+        backupPath: "",
+        applying: false
+      };
+      $("sortSelect").value = "manual";
+      updateSortButton();
+    }
     $("copyGroupDialog").close();
     render();
-    toast("Avatars copied to group.");
+    toast(replaceSynced ? "Synced group replaced in edit mode. Click Save to apply it to VRChat." : "Avatars copied to group.");
   } catch (e) { toast(e.message); }
 }
 async function deleteGroup(group) {
@@ -9194,6 +9313,40 @@ function queueConfirmDialog(openDialog) {
   const queued = confirmDialogQueue.then(run, run);
   confirmDialogQueue = queued.catch(() => {});
   return queued;
+}
+async function handleAppCloseRequested(data = {}) {
+  if (appClosePromptOpen) return;
+  appClosePromptOpen = true;
+  try {
+    let shouldClose = true;
+    if (state.syncedAvatarEdit.applying || data?.syncedOrderApplying) {
+      await confirmAction({
+        title: "Wait for Edit Mode",
+        message: data?.syncedOrderMessage || "VRCNeph is unfavoriting and refavoriting this synced group in VRChat. Wait for it to finish before closing.",
+        confirmLabel: "OK",
+        confirmClass: "primary",
+        hideCancel: true
+      });
+      shouldClose = false;
+    } else if (state.syncedAvatarEdit.groupId) {
+      const group = state.library.groups.find((item) => item.id === state.syncedAvatarEdit.groupId);
+      const changed = syncedAvatarEditHasChanges();
+      shouldClose = await confirmAction({
+        title: changed ? "Discard Edit Mode Changes" : "Close During Edit Mode",
+        message: changed
+          ? `Discard unapplied sorting changes${group?.name ? ` for "${group.name}"` : ""} and close VRCNeph?`
+          : `Close VRCNeph while synced edit mode${group?.name ? ` for "${group.name}"` : ""} is still open?`,
+        confirmLabel: changed ? "Discard and Close" : "Close",
+        confirmClass: "danger",
+        cancelLabel: "Keep Editing"
+      });
+    }
+    if (shouldClose) await api("appCloseConfirmed", {}, 10000);
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    appClosePromptOpen = false;
+  }
 }
 
 function applySettings() { applyGridSize(); applyColors(); applyBackgroundOpacity(); applyPanelOpacity(); applyActiveBackgroundEffect(); }
@@ -10119,6 +10272,7 @@ $("customizationDialog").addEventListener("close", () => {
 $("syncedAvatarEditToggle").addEventListener("change", async (event) => { await setSyncedAvatarEditMode(event.target.checked); });
 $("applySyncedAvatarOrderBtn").addEventListener("click", applySyncedAvatarEdit);
 $("cancelSyncedAvatarOrderBtn").addEventListener("click", cancelSyncedAvatarEdit);
+$("replaceSyncedGroupBtn").addEventListener("click", () => openReplaceSyncedGroupDialog(activeGroup()));
 $("openGameBtn").addEventListener("click", async () => {
   if (!await confirmAction({ title: "Open Game", message: "Open VRChat in desktop mode?", confirmLabel: "Open", confirmClass: "primary" })) return;
   try { await api("openGame"); } catch (e) { toast(e.message); }
@@ -10300,6 +10454,7 @@ $("confirmSaveAvatarGroupBtn").addEventListener("click", async (event) => {
 $("saveGroupBtn").addEventListener("click", async (event) => { event.preventDefault(); try { state.library = await api(state.editingGroupId ? "updateGroup" : "createGroup", { id: state.editingGroupId ?? "", name: $("groupNameInput").value, icon: $("groupIconInput").value, description: $("groupDescriptionInput").value }); $("groupDialog").close(); render(); } catch (e) { toast(e.message); } });
 $("copyGroupFullBtn").addEventListener("click", () => copyGroup(state.library.groups.find((group) => group.id === state.pendingCopyGroupId)));
 $("copyGroupToExistingBtn").addEventListener("click", copyGroupToExisting);
+$("copyGroupTargetMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "copyGroupTargetInput", "copyGroupTargetMenu", "copyGroupTargetMenuBtn", () => {}));
 $("avatarDatabaseSearchInput").addEventListener("focus", showDatabaseSearchHistory);
 $("avatarDatabaseSearchInput").addEventListener("input", () => { state.avatarDatabaseAuthorId = ""; showDatabaseSearchHistory(); });
 $("avatarDatabaseSearchInput").addEventListener("keydown", (event) => {
@@ -10313,6 +10468,10 @@ $("saveAvatarGroupMenuBtn").addEventListener("click", (event) => toggleSortMenu(
 document.addEventListener("click", (event) => {
   if (event.target.closest("#saveAvatarGroupDialog .dialog-select-control")) return;
   hideSortMenu("saveAvatarGroupMenu", "saveAvatarGroupMenuBtn");
+});
+document.addEventListener("click", (event) => {
+  if (event.target.closest("#copyGroupDialog .dialog-select-control")) return;
+  hideSortMenu("copyGroupTargetMenu", "copyGroupTargetMenuBtn");
 });
 document.addEventListener("click", (event) => {
   if (event.target.closest(".profile-status-control")) return;

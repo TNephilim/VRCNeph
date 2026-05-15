@@ -279,10 +279,18 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
 .current-avatar-copy small .profile-status-line { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .current-avatar-copy small .profile-location-line { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: color-mix(in srgb, var(--muted) 82%, var(--text)); }
 .account-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.sync-queue-status { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--glass-soft); color: var(--muted); font-size: 12px; line-height: 1.3; }
+.sync-queue-status { min-height: 32px; display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--glass-soft); color: var(--muted); font-size: 12px; line-height: 1.3; }
+.sync-queue-status[hidden] { display: none; }
+.sync-queue-status span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-queue-dot { width: 9px; height: 9px; border-radius: 999px; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent); }
+.sync-queue-status.running .sync-queue-dot { animation: syncPulse 900ms ease-in-out infinite; }
 .sync-queue-status.running { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 40%, var(--line)); }
 .sync-queue-status.failed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 52%, var(--line)); }
 .sync-queue-status.waiting { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 48%, var(--line)); }
+@keyframes syncPulse {
+  0%, 100% { opacity: .42; transform: scale(.78); }
+  50% { opacity: 1; transform: scale(1); }
+}
 .inline-login { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--glass-soft); }
 .inline-login .sort-control { width: 100%; }
 .inline-login .sort-menu { width: 100%; }
@@ -294,6 +302,17 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
 #saveAvatarGroupDialog .dialog-select-control.open { z-index: 1600; }
 #saveAvatarGroupDialog .dialog-select-control .sort-menu {
   max-height: clamp(170px, 44vh, 320px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+#copyGroupDialog { overflow: visible; }
+#copyGroupDialog .dialog-form { overflow: visible; }
+#copyGroupDialog .dialog-select-control { position: relative; z-index: 1200; }
+#copyGroupDialog .dialog-select-control.open { z-index: 1600; }
+#copyGroupDialog .copy-group-target-control .sort-menu {
+  top: calc(100% + 6px);
+  bottom: auto;
+  max-height: clamp(150px, 38vh, 280px);
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -866,6 +885,16 @@ dialog::backdrop { background: rgba(0,0,0,.62); transition: background-color 900
 .settings-list-item div { min-width: 0; display: grid; gap: 3px; }
 .settings-list-item strong, .settings-list-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-list-item span, .settings-list-item small { color: var(--muted); }
+.backup-group { border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--panel) 72%, transparent); overflow: hidden; }
+.backup-group summary { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 12px; cursor: pointer; list-style: none; }
+.backup-group summary::-webkit-details-marker { display: none; }
+.backup-group summary::before { content: "\25B6"; color: var(--accent); font-size: 10px; transform: translateY(1px); }
+.backup-group[open] summary::before { content: "\25BC"; }
+.backup-group summary div { min-width: 0; display: grid; gap: 3px; }
+.backup-group summary strong, .backup-group summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.backup-group summary span, .backup-group summary small { color: var(--muted); }
+.backup-group-items { display: grid; gap: 6px; padding: 0 8px 8px; }
+.backup-group-items .settings-list-item { background: color-mix(in srgb, var(--glass-soft) 84%, transparent); }
 .logs-list { max-height: 360px; }
 .sync-action-list { max-height: 420px; }
 .sync-conflict-list { max-height: 210px; }
