@@ -111,6 +111,10 @@ const state = {
   socialActivity: [],
   messageHistory: [],
   messageHydratingUsers: new Set(),
+  playerActivityWorldMediaHydrating: new Set(),
+  playerActivityWorldMediaAttempted: new Set(),
+  playerActivityUserMediaHydrating: new Set(),
+  playerActivityUserMediaAttempted: new Set(),
   selectedMessageUserId: "",
   inlineMessageUserId: "",
   inlineMessageUserIds: [],
@@ -791,7 +795,7 @@ function stepAppHistory(direction) {
 function renderAccount() {
   const user = state.vrchat?.user;
   const loggedIn = Boolean(state.vrchat?.isLoggedIn);
-  $("accountStatus").textContent = loggedIn && user ? user.displayName : state.vrchat?.requiresTwoFactor ? "Two-factor code required" : "Not signed in";
+  $("accountStatus").textContent = loggedIn ? "Logout" : state.vrchat?.requiresTwoFactor ? "Two-factor code required" : "Not signed in";
   $("loginBtn").hidden = loggedIn;
   $("logoutBtn").hidden = true;
   $("accountStatus").classList.toggle("logged-in", loggedIn);
@@ -998,7 +1002,7 @@ function renderToolbar() {
   const syncedEditVisible = canEditSyncedAvatarOrder(group);
   const syncedEditActive = isSyncedAvatarEditActive(group?.id);
   $("activeGroupName").textContent = group?.name ?? "Favorites";
-  $("activeGroupDescription").textContent = group?.description ?? "";
+  setActiveGroupDescription(group);
   $("syncedAvatarEditToggleWrap").hidden = !syncedEditVisible;
   $("syncedAvatarEditToggle").checked = syncedEditActive;
   $("syncedAvatarEditToggle").disabled = state.syncedAvatarEdit.applying;
@@ -1033,6 +1037,15 @@ function renderToolbar() {
   updateSortButton("databaseSortSelect", "databaseSortMenuBtn");
   renderWorldDiscoveryFilter();
 }
+function setActiveGroupDescription(group) {
+  const description = toolbarGroupDescription(group);
+  const el = $("activeGroupDescription");
+  if (typeof description === "string") {
+    el.textContent = description;
+    return;
+  }
+  el.innerHTML = `<span class="toolbar-main-status">${escapeHtml(description.main)}</span><span class="toolbar-sync-status">${escapeHtml(description.sync)}</span>`;
+}
 function updateGroupVisibilityButtons() {
   state.settings.hideLockedGroups = false;
   state.settings.hideFullGroups = false;
@@ -1051,6 +1064,19 @@ function renderWorldDiscoveryFilter() {
   const visible = state.activePage === "worlds" && !state.social.selectedWorldGroup && !$("worldSearchInput").value.trim();
   wrap.hidden = !visible;
   if (visible) updateSortButton("worldDiscoveryFilterSelect", "worldDiscoveryFilterMenuBtn");
+}
+function toolbarGroupDescription(group) {
+  const description = String(group?.description || "").trim();
+  const count = group?.id ? groupAvatars(group.id).length : 0;
+  if (!description) return "";
+  const synced = /^Synced from VRChat favorite group ([^.]+)\.\s*(\d+) avatars\.\s*Last synced\s+(.+)$/i.exec(description);
+  if (synced) return { main: `VRChat ${synced[1]} - ${synced[2]} avatars`, sync: `Last synced ${synced[3]}` };
+  const uploaded = /^Uploaded avatars from your VRChat account\.\s*(\d+) avatars\.\s*Last synced\s+(.+)$/i.exec(description);
+  if (uploaded) return { main: `Uploaded - ${uploaded[1]} avatars`, sync: `Last synced ${uploaded[2]}` };
+  if (isRecentGroup(group?.id)) return `Recent - ${count} avatar${count === 1 ? "" : "s"} detected`;
+  if (isDeletedGroup(group?.id)) return `Deleted/private - ${count} archived avatar${count === 1 ? "" : "s"}`;
+  if (isUpdatedGroup(group?.id)) return `Updated metadata - ${count} avatar${count === 1 ? "" : "s"} this sync`;
+  return description;
 }
 function activeGroupAllowsManualSort() {
   const group = activeGroup();
@@ -2043,8 +2069,8 @@ function avatarDatabaseProviderLabel(provider = avatarDatabaseProvider()) {
   return provider === "avtrzip" ? "AVTRZIP" : provider === "pas" ? "Prismic PAS" : "VRCX DB";
 }
 function avatarDatabaseProviderDescription(provider = avatarDatabaseProvider()) {
-  if (provider === "all") return "Search all databases. Broad search terms take longer; single databases are quicker.";
-  return provider === "avtrzip" ? "Search the remote AVTRZIP avatar database." : provider === "pas" ? "Search the Prismic AvatarSearch PAS database." : "Search the remote VRCX-compatible avatar database.";
+  if (provider === "all") return "Search all databases. Pick one for faster results.";
+  return provider === "avtrzip" ? "Search AVTRZIP avatars." : provider === "pas" ? "Search Prismic PAS avatars." : "Search VRCX avatars.";
 }
 function updateAvatarDatabaseCopy() {
   const provider = avatarDatabaseProvider();
@@ -2260,7 +2286,7 @@ async function runAvatarDatabaseSearch(page = 0) {
   $("avatarDatabaseStatus").textContent = page > 0
     ? `Loading ${providerLabel} page ${page + 1}...`
     : state.avatarDatabaseProvider === "all"
-      ? "Searching all databases. This will take longer; single database searches are quicker."
+      ? "Searching all databases. Pick one for faster results."
       : `Searching ${providerLabel}...`;
   await new Promise((resolve) => setTimeout(resolve, state.avatarDatabaseProvider === "all" ? 50 : 0));
   try {
@@ -5564,6 +5590,7 @@ function renderNotificationsPage() {
     state.playerActivityLog.page = next;
     renderNotificationsPage();
   }));
+  hydratePlayerActivityLogMedia(activity);
 }
 function filteredNotifications() {
   const filter = state.notifications.filter || "all";
@@ -5681,20 +5708,116 @@ function playerActivityLogHtml() {
   </div>`;
 }
 function playerActivityLogRowHtml(item) {
+  const knownFriend = findSocialFriend(item.userId, item.displayName) || {};
+  const userName = readableActivityName(item.displayName || knownFriend.displayName, "Unknown user");
+  const userImage = friendProfileImage(knownFriend) || knownFriend.imageUrl || "";
+  const knownWorld = findKnownActivityWorld(item.worldId, item.worldName);
+  const worldName = readableActivityName(item.worldName || knownWorld?.name, "Unknown world");
+  const worldImage = knownWorld?.imageUrl || "";
   const user = item.userId
-    ? `<button type="button" data-player-log-user="${escapeAttr(item.userId)}" data-player-log-name="${escapeAttr(item.displayName || "")}">${escapeHtml(item.displayName || item.userId)}</button>`
-    : `<span>${escapeHtml(item.displayName || "Unknown")}</span>`;
+    ? `<button type="button" class="player-log-entity" data-player-log-user="${escapeAttr(item.userId)}" data-player-log-name="${escapeAttr(userName)}">${userImage ? `<img src="${escapeAttr(userImage)}" alt="">` : ""}<span>${escapeHtml(userName)}</span></button>`
+    : `<span>${escapeHtml(userName)}</span>`;
   const typeClass = String(item.action || "").toLowerCase().includes("left") ? "left" : "joined";
-  const detail = [item.worldName, item.location].filter(Boolean).join(" - ");
   const detailHtml = item.worldId
-    ? `<button type="button" class="player-log-world" data-player-log-world="${escapeAttr(item.worldId)}" title="${escapeAttr(detail)}">${escapeHtml(detail || item.worldId)}</button>`
-    : `<small title="${escapeAttr(detail)}">${escapeHtml(detail || item.logFile || "")}</small>`;
+    ? `<button type="button" class="player-log-world player-log-entity" data-player-log-world="${escapeAttr(item.worldId)}">${worldImage ? `<img src="${escapeAttr(worldImage)}" alt="">` : ""}<span>${escapeHtml(worldName)}</span></button>`
+    : `<small>${escapeHtml(worldName || item.logFile || "")}</small>`;
   return `<div class="player-log-row">
     <time>${escapeHtml(formatShortLogDate(item.timestamp))}</time>
     <span class="player-log-type ${typeClass}">${escapeHtml(item.action || "")}</span>
     ${user}
     ${detailHtml}
   </div>`;
+}
+function hydratePlayerActivityLogMedia(container) {
+  if ((state.activityFilter || "players") !== "players") return;
+  const worldRequests = [];
+  container.querySelectorAll("[data-player-log-world]").forEach((button) => {
+    const id = String(button.dataset.playerLogWorld || "").trim();
+    if (!id) return;
+    const key = id.toLowerCase();
+    if (findKnownActivityWorld(id)?.imageUrl) return;
+    if (state.playerActivityWorldMediaHydrating.has(key) || state.playerActivityWorldMediaAttempted.has(key)) return;
+    worldRequests.push(id);
+  });
+  const userRequests = [];
+  container.querySelectorAll("[data-player-log-user]").forEach((button) => {
+    const id = String(button.dataset.playerLogUser || "").trim();
+    if (!id) return;
+    const key = id.toLowerCase();
+    const known = findSocialFriend(id, button.dataset.playerLogName || "") || {};
+    if (friendProfileImage(known) || known.imageUrl) return;
+    if (state.playerActivityUserMediaHydrating.has(key) || state.playerActivityUserMediaAttempted.has(key)) return;
+    userRequests.push({ id, name: button.dataset.playerLogName || "" });
+  });
+  for (const id of uniqueStrings(worldRequests).slice(0, 12)) void hydratePlayerActivityWorldMedia(id);
+  for (const user of uniqueBy(userRequests, (item) => item.id.toLowerCase()).slice(0, 12)) void hydratePlayerActivityUserMedia(user.id, user.name);
+}
+async function hydratePlayerActivityWorldMedia(worldId) {
+  const key = String(worldId || "").trim().toLowerCase();
+  if (!key || state.playerActivityWorldMediaHydrating.has(key) || state.playerActivityWorldMediaAttempted.has(key)) return;
+  state.playerActivityWorldMediaHydrating.add(key);
+  state.playerActivityWorldMediaAttempted.add(key);
+  try {
+    const world = await api("vrchatWorldDetail", { id: worldId }, 45000);
+    if (world?.id) rememberRecentWorld(world);
+    if ((state.activityFilter || "players") === "players") renderNotificationsPage();
+  } catch {
+  } finally {
+    state.playerActivityWorldMediaHydrating.delete(key);
+  }
+}
+async function hydratePlayerActivityUserMedia(userId, displayName = "") {
+  const key = String(userId || "").trim().toLowerCase();
+  if (!key || state.playerActivityUserMediaHydrating.has(key) || state.playerActivityUserMediaAttempted.has(key)) return;
+  state.playerActivityUserMediaHydrating.add(key);
+  state.playerActivityUserMediaAttempted.add(key);
+  try {
+    const detail = await api("vrchatFriendDetail", { id: userId }, 45000);
+    if (detail?.id) {
+      const existing = findSocialFriend(userId, displayName) || {};
+      const profileImage = userCustomProfileImage(detail);
+      const merged = applyFriendPresenceAuthority({
+        ...existing,
+        ...detail,
+        profilePicOverrideThumbnail: detail.profilePicOverrideThumbnail || profileImage || existing.profilePicOverrideThumbnail || "",
+        displayName: detail.displayName || displayName || existing.displayName || userId
+      });
+      cacheFriendDetail(merged);
+      state.social.friends = state.social.friends.map((friend) => String(friend.id || "").toLowerCase() === key ? { ...friend, ...merged } : friend);
+      state.social.favoriteFriends = state.social.favoriteFriends.map((friend) => String(friend.id || "").toLowerCase() === key ? { ...friend, ...merged } : friend);
+    }
+    if ((state.activityFilter || "players") === "players") renderNotificationsPage();
+  } catch {
+  } finally {
+    state.playerActivityUserMediaHydrating.delete(key);
+  }
+}
+function readableActivityName(value = "", fallback = "") {
+  const text = String(value || "").trim();
+  if (!text || /^(usr|wrld)_[0-9a-f-]{8,}/i.test(text)) return fallback;
+  return text;
+}
+function uniqueBy(items = [], keyFn = (item) => item) {
+  const seen = new Set();
+  const result = [];
+  for (const item of items || []) {
+    const key = keyFn(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+}
+function findKnownActivityWorld(worldId = "", worldName = "") {
+  const id = String(worldId || "").trim().toLowerCase();
+  const name = String(worldName || "").trim().toLowerCase();
+  const worlds = [
+    ...(state.worldRecentWorlds || []),
+    ...allLoadedWorlds(),
+    state.social.location?.world,
+    state.social.selectedType === "world" ? state.social.selectedItem : null
+  ].filter(Boolean);
+  return worlds.find((world) => (id && String(world.id || "").toLowerCase() === id) || (name && String(world.name || "").toLowerCase() === name)) || null;
 }
 function formatShortLogDate(value) {
   const normalized = String(value || "").replace(/^(\d{4})\.(\d{2})\.(\d{2})\s+/, "$1-$2-$3T");
@@ -6463,7 +6586,12 @@ function bindWorldDetailsPanelEvents(container, world) {
   container.querySelectorAll("[data-social-action]").forEach((button) => button.addEventListener("click", handleSocialAction));
   container.querySelectorAll("[data-world-detail-tab]").forEach((button) => button.addEventListener("click", () => {
     state.social.worldTab = button.dataset.worldDetailTab || "info";
-    renderVrchatSocial();
+    if (container.classList.contains("notification-world-detail-host")) {
+      container.innerHTML = worldDetailsHtml(world || {}, { compact: true });
+      bindWorldDetailsPanelEvents(container, world);
+    } else {
+      renderVrchatSocial();
+    }
   }));
   container.querySelectorAll("[data-user-detail-id]").forEach((button) => button.addEventListener("click", (event) => {
     event.preventDefault();
@@ -7155,6 +7283,8 @@ function applyFriendPresenceAuthority(friend = null) {
 }
 function sanitizeFriendDetailForCache(friend = {}) {
   const copy = { ...friend, cachedAt: Number(friend.cachedAt || Date.now()) };
+  const profileImage = userCustomProfileImage(friend);
+  if (profileImage && !userCustomProfileImage(copy)) copy.profilePicOverrideThumbnail = profileImage;
   delete copy.rawJson;
   delete copy.uploadedAvatars;
   delete copy.uploadedAvatarsLoading;
@@ -8072,18 +8202,19 @@ function worldDetailTabsHtml(active = "info") {
   return `<div class="social-detail-tabs world-detail-tabs">${tabs.map(([id, label]) => `<button type="button" data-world-detail-tab="${escapeAttr(id)}" class="${active === id ? "active" : ""}">${escapeHtml(label)}</button>`).join("")}</div>`;
 }
 function compactWorldDetailsHtml(world) {
-  const instances = Array.isArray(world.instances) ? world.instances : [];
-  const firstInstance = instances.find((item) => item?.location) || null;
-  const launchLocation = state.social.location?.worldId === world.id ? state.social.location.location : (firstInstance?.location || "");
   const favorite = isFavoriteWorld(world.id);
-  const selectedInstance = firstInstance || (launchLocation ? { id: worldInstanceIdFromLocation(launchLocation), location: launchLocation, occupants: world.occupants, type: "Instance", region: "", isLocked: false, isAgeRestricted: false } : null);
+  const tab = state.social.worldTab === "json" ? "json" : "info";
   const hero = worldDetailHeroHtml(world, favorite);
-  const selected = worldSelectedInstanceHtml(world, selectedInstance, launchLocation);
-  const actions = `<section class="social-detail-section world-actions-section"><h5>Actions</h5><div class="world-action-grid">${worldActionButtonsHtml(world, launchLocation, favorite)}</div></section>`;
+  const actions = `<section class="social-detail-section world-actions-section activity-world-actions"><h5>Actions</h5><div class="world-action-grid">${worldActionButtonsHtml(world, "", favorite, { includeOpenInWorlds: true, includeCopyId: false })}</div></section>`;
   const stats = `<div class="social-stat-grid"><span><strong>${Number(world.occupants || 0)}</strong>Users</span><span><strong>${Number(world.capacity || 0)}</strong>Capacity</span><span><strong>${Number(world.visits || 0)}</strong>Visits</span><span><strong>${Number(world.favorites || 0)}</strong>Favorites</span></div>`;
   const about = worldAboutHtml(world);
   const overview = `<section class="social-detail-section world-overview-section"><h5>Overview</h5><dl>${detailRowHtml("Author", userDetailButtonHtml(world.authorId, world.authorName))}${detailRow("World ID", world.id)}${detailRow("Status", world.releaseStatus)}${detailRow("Occupants", `${Number(world.occupants || 0)} total, ${Number(world.publicOccupants || 0)} public, ${Number(world.privateOccupants || 0)} private`)}${detailRow("Updated", world.updatedAt)}${detailRow("Created", world.createdAt)}</dl></section>`;
-  return `<div class="social-detail world-detail compact-world-detail">${hero}<div class="compact-world-detail-content">${worldDetailImageHtml(world)}${selected}${worldInstancesHtml(world, instances)}${about}${stats}${overview}${actions}${worldRawJsonHtml(world)}</div></div>`;
+  const tabs = worldDetailTabsHtml(tab);
+  const info = `<div class="compact-world-info-tab activity-world-info-tab">${stats}${about}${overview}</div>`;
+  const content = tab === "json"
+    ? `<section class="social-detail-section world-json-details world-json-tab"><h5>Raw JSON</h5>${world.rawJson ? `<pre>${escapeHtml(world.rawJson)}</pre>` : `<p class="social-muted">No raw JSON is available for this world.</p>`}</section>`
+    : info;
+  return `<div class="social-detail world-detail compact-world-detail activity-world-detail">${hero}<div class="compact-world-detail-content">${actions}${worldDetailImageHtml(world)}${tabs}<div class="world-detail-tab-content">${content}</div></div></div>`;
 }
 function worldDetailHeroHtml(world, favorite) {
   const status = world.releaseStatus || "World";
@@ -8103,8 +8234,10 @@ function worldAboutHtml(world) {
   const description = world.description || "No world description is available.";
   return `<section class="social-detail-section world-about-section"><h5>About This World</h5><p class="vrchat-formatted-text">${escapeHtml(description)}</p></section>`;
 }
-function worldActionButtonsHtml(world, launchLocation, favorite) {
-  return `<button type="button" data-social-action="favoriteWorld" data-world-id="${escapeAttr(world.id)}" ${favorite ? "hidden" : ""}>Add to Favorites</button><button type="button" data-social-action="unfavoriteWorld" data-world-id="${escapeAttr(world.id)}" class="danger" ${favorite ? "" : "hidden"}>Unfavorite</button><button type="button" data-social-action="copyWorldId" data-world-id="${escapeAttr(world.id)}">Copy World ID</button>`;
+function worldActionButtonsHtml(world, launchLocation, favorite, options = {}) {
+  const openButton = options.includeOpenInWorlds ? `<button type="button" data-social-action="openWorldInWorldsTab" data-world-id="${escapeAttr(world.id)}">Open in Worlds</button>` : "";
+  const copyButton = options.includeCopyId === false ? "" : `<button type="button" data-social-action="copyWorldId" data-world-id="${escapeAttr(world.id)}">Copy World ID</button>`;
+  return `<button type="button" data-social-action="favoriteWorld" data-world-id="${escapeAttr(world.id)}" ${favorite ? "hidden" : ""}>Add to Favorites</button><button type="button" data-social-action="unfavoriteWorld" data-world-id="${escapeAttr(world.id)}" class="danger" ${favorite ? "" : "hidden"}>Unfavorite</button>${openButton}${copyButton}`;
 }
 function worldRawJsonHtml(world) {
   return world.rawJson ? `<section class="social-detail-section world-json-details"><h5>Raw JSON</h5><pre>${escapeHtml(world.rawJson)}</pre></section>` : "";
@@ -8650,6 +8783,11 @@ async function handleSocialAction(event) {
     }
     if (action === "copyWorldId") {
       if (await copyTextToClipboard(worldId)) toast("World ID copied.");
+      return;
+    }
+    if (action === "openWorldInWorldsTab") {
+      closeNotificationDetails();
+      await openLocationWorld(worldId);
       return;
     }
     if (action === "invite") {
@@ -10638,10 +10776,10 @@ $("inlineLoginPasswordInput").addEventListener("keydown", (event) => {
 });
 $("inlineTwoFactorPanel").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); runInlineTwoFactor(); } });
 $("inlineTwoFactorMethodBtn").addEventListener("click", (event) => toggleSortMenu(event, "inlineTwoFactorMethodInput", "inlineTwoFactorMethodMenu", "inlineTwoFactorMethodBtn", () => {}));
-$("accountStatus").addEventListener("click", (event) => {
+$("accountStatus").addEventListener("click", async (event) => {
   if (!state.vrchat?.isLoggedIn) return;
   event.stopPropagation();
-  showContextMenu(event.clientX, event.clientY, [{ label: "Logout", className: "danger", action: async () => { if (await confirmAction({ title: "Logout", message: "Log out of VRChat?", confirmLabel: "Logout", confirmClass: "danger" })) await logoutVrChat(); } }]);
+  if (await confirmAction({ title: "Logout", message: "Log out of VRChat?", confirmLabel: "Logout", confirmClass: "danger" })) await logoutVrChat();
 });
 $("logoutBtn").addEventListener("click", async () => { if (await confirmAction({ title: "Logout", message: "Log out of VRChat?", confirmLabel: "Logout", confirmClass: "danger" })) await logoutVrChat(); });
 $("saveCurrentAvatarBtn").addEventListener("click", async () => {

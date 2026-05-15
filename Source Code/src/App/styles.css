@@ -713,10 +713,13 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
 .toolbar-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; align-items: flex-start; min-width: 0; }
 .toolbar-actions input[type="search"] { width: 220px; }
 .world-discovery-filter-control { width: 164px; }
-#favoritesPage .toolbar p { width: 360px; max-width: calc(100vw - 1020px); display: block; white-space: normal; overflow: visible; }
+#favoritesPage .toolbar p { width: 360px; max-width: calc(100vw - 1020px); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; overflow: hidden; line-height: 1.35; max-height: 2.7em; }
+#favoritesPage .toolbar p:has(.toolbar-main-status) { display: grid; gap: 1px; max-height: none; }
+.toolbar-main-status, .toolbar-sync-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolbar-sync-status { color: color-mix(in srgb, var(--muted) 86%, var(--text)); }
 #databasePage .toolbar { grid-template-columns: minmax(210px, 230px) minmax(0, 1fr); gap: 12px; align-items: start; }
 #databasePage .toolbar-title { width: 100%; }
-#databasePage .toolbar p { width: 320px; max-width: calc(100vw - 980px); display: block; white-space: normal; overflow: visible; }
+#databasePage .toolbar p { width: 360px; max-width: calc(100vw - 940px); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; overflow: hidden; line-height: 1.35; max-height: 2.7em; }
 .database-toolbar-actions { flex-wrap: wrap; justify-content: flex-end; gap: 8px; overflow: visible; }
 .database-toolbar-actions input[type="search"] { width: 215px; flex: 0 0 215px; }
 .database-search-history-wrap { position: relative; flex: 0 0 215px; width: 215px; }
@@ -1249,16 +1252,19 @@ dialog::backdrop { background: rgba(0,0,0,.62); transition: background-color 900
 .notification-details-panel .world-detail-sidebar .world-instance-main { grid-template-columns: minmax(0, 1fr); }
 .notification-details-panel .world-detail-sidebar .world-instance-action { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 .notification-details-panel .world-detail-sidebar .world-instance-row button[data-social-action="joinWorld"] { width: 100%; justify-self: stretch; }
-.notification-details-panel .notification-world-detail-host .compact-world-detail { height: 100% !important; grid-template-rows: auto minmax(0, 1fr) !important; align-content: stretch; overflow: hidden !important; gap: 10px; }
-.compact-world-detail-content { min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 10px; overflow: auto; overscroll-behavior: contain; padding-right: 4px; }
+.notification-details-panel .notification-world-detail-host .compact-world-detail { height: 100% !important; grid-template-rows: auto minmax(0, 1fr) !important; align-content: stretch; overflow: hidden !important; gap: 8px; }
+.compact-world-detail-content { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(140px, auto) auto minmax(0, 1fr); grid-template-columns: minmax(0, 1fr); align-content: stretch; gap: 8px; overflow: hidden; padding-right: 0; }
 .compact-world-detail .world-detail-hero-copy { padding: 10px 12px; }
-.compact-world-detail .world-detail-hero-copy h4 { font-size: 20px; }
-.compact-world-detail .world-detail-image-card img { height: auto; max-height: none; aspect-ratio: auto; object-fit: contain; }
+.compact-world-detail .world-detail-hero-copy h4 { font-size: 20px; line-height: 1.15; }
+.compact-world-detail .world-detail-image-card { aspect-ratio: 16 / 9; max-height: min(248px, 30vh); }
+.compact-world-detail .world-detail-image-card img { width: 100%; height: 100%; aspect-ratio: auto; object-fit: contain; background: var(--panel-2); }
 .compact-world-detail .world-selected-instance-section,
 .compact-world-detail .world-instances-section,
 .compact-world-detail .world-actions-section,
 .compact-world-detail .world-about-section,
 .compact-world-detail .world-overview-section { min-height: 0; height: auto; }
+.compact-world-info-tab { min-width: 0; min-height: 0; display: grid; align-content: start; gap: 10px; overflow: auto; overscroll-behavior: contain; padding-right: 4px; }
+.compact-world-detail .world-detail-tab-content { min-height: 0; overflow: hidden; }
 .compact-world-detail .world-selected-instance-card { grid-template-columns: minmax(0, 1fr) auto; }
 .compact-world-detail .world-instances-section { grid-template-rows: auto auto; padding: 8px; }
 .compact-world-detail .section-title-row { align-items: flex-start; flex-direction: column; gap: 8px; }
@@ -1274,8 +1280,27 @@ dialog::backdrop { background: rgba(0,0,0,.62); transition: background-color 900
 .compact-world-detail .world-about-section p { max-height: 180px; overflow: auto; }
 .compact-world-detail .social-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .compact-world-detail .world-overview-section dl { grid-template-columns: 82px minmax(0, 1fr); }
-.compact-world-detail .world-json-details { display: grid; gap: 6px; }
-.compact-world-detail .world-json-details pre { max-height: 180px; min-height: 120px; overflow: auto; }
+.compact-world-detail .world-json-details { min-height: 0; height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 6px; }
+.compact-world-detail .world-json-details pre { max-height: none; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.activity-world-detail .world-detail-hero-copy { grid-template-columns: minmax(0, 1fr) auto; }
+.activity-world-detail .world-detail-hero-copy > div:first-child { min-width: 0; }
+.activity-world-detail .world-detail-hero-copy h4,
+.activity-world-detail .world-detail-hero-copy span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-world-detail .world-detail-tab-content { min-height: 0; overflow: hidden; }
+.activity-world-info-tab { gap: 8px; padding-right: 5px; align-content: stretch; }
+.activity-world-info-tab .social-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.activity-world-info-tab .social-stat-grid span { min-height: 54px; align-content: center; }
+.activity-world-info-tab .world-about-section { max-height: none; }
+.activity-world-info-tab .world-about-section p { max-height: min(260px, 26vh); overflow: auto; }
+.activity-world-info-tab .world-overview-section { max-height: none; overflow: visible; }
+.activity-world-info-tab .world-overview-section dl { grid-template-columns: 76px minmax(0, 1fr); }
+.activity-world-info-tab .world-overview-section dt,
+.activity-world-info-tab .world-overview-section dd { min-width: 0; overflow-wrap: anywhere; }
+.activity-world-detail .activity-world-actions { padding: 8px; }
+.activity-world-detail .activity-world-actions h5 { display: none; }
+.activity-world-detail .activity-world-actions .world-action-grid { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); }
+.activity-world-detail .activity-world-actions .world-action-grid button[hidden] { display: none; }
+.activity-world-detail .world-json-details pre { font-size: 11px; line-height: 1.22; }
 .world-detail-host:not(.notification-world-detail-host) .world-detail-image-card img { min-height: clamp(150px, 18vh, 230px); }
 .world-detail-host:not(.notification-world-detail-host) .world-about-section { grid-template-rows: auto minmax(0, 1fr); }
 .world-detail-host:not(.notification-world-detail-host) .world-about-section p { max-height: none; min-height: 0; }
@@ -1348,6 +1373,10 @@ dialog::backdrop { background: rgba(0,0,0,.62); transition: background-color 900
 .player-log-row button { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .player-log-row button { justify-self: start; max-width: 100%; min-height: 0; border: 0; padding: 0; background: transparent; color: var(--blue); font-weight: 900; text-align: left; }
 .player-log-row button:hover { color: var(--text); background: transparent; text-decoration: underline; }
+.player-log-row .player-log-entity { display: inline-grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px; align-items: center; }
+.player-log-row .player-log-entity:not(:has(img)) { display: inline-block; }
+.player-log-row .player-log-entity img { width: 24px; height: 24px; border-radius: 6px; object-fit: cover; border: 1px solid var(--line); background: var(--panel-2); }
+.player-log-row .player-log-entity span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .player-log-row .player-log-world { color: var(--muted); font-weight: 700; }
 .player-log-row .player-log-world:hover { color: var(--blue); }
 .player-log-row small { color: var(--muted); }
