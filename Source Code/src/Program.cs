@@ -307,6 +307,7 @@ internal static class Program
                 "vrchatSession" => await VrChat.GetSessionAsync(),
                 "vrchatLogin" => await VrChat.LoginAsync(GetPayload<LoginInput>(request)),
                 "vrchatTwoFactor" => await VrChat.TwoFactorAsync(GetPayload<TwoFactorInput>(request)),
+                "vrchatUpdateCurrentUser" => await VrChat.UpdateCurrentUserAsync(GetPayload<VrChatProfileUpdateInput>(request)),
                 "vrchatLogout" => LogoutAndResetSyncedGroups(),
                 "vrchatPipelineStart" => Pipeline is null ? new VrChatPipelineStatus(false, "Unavailable", 0, "") : await Pipeline.StartAsync(),
                 "vrchatPipelineStop" => PipelineStop(),
@@ -349,6 +350,7 @@ internal static class Program
                 "vrchatFavoriteWorldRemove" => await VrChat.RemoveFavoriteWorldAsync(GetPayload<IdInput>(request).Id),
                 "vrchatWorldDetail" => await VrChat.GetWorldDetailAsync(GetPayload<IdInput>(request).Id),
                 "vrchatWorldVisitHistory" => VrChatLogWatcher.WorldVisitHistory(GetPayload<WorldVisitHistoryInput>(request)),
+                "vrchatLatestLogLocation" => VrChatLogWatcher.LatestWorldLocation(),
                 "vrchatOpenWorld" => await VrChat.OpenWorldAsync(GetPayload<WorldLaunchInput>(request)),
                 "vrchatCurrentLocation" => await VrChat.GetCurrentLocationAsync(),
                 "vrchatFavoriteAdd" => await VrChat.AddFavoriteAvatarAsync(GetPayload<VrChatFavoriteChangeInput>(request)),
@@ -1290,8 +1292,6 @@ internal sealed class AvatarStore
                 .Select(x => x.Avatar.AvatarId)
                 .Where(x => !string.IsNullOrWhiteSpace(x))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var syncConflicts = DetectSyncConflicts(previousSyncedRows, previousSyncedGroups, imported);
-            if (syncConflicts.Count > 0) _appData.RecordSyncConflicts(syncConflicts);
             lib.Groups.RemoveAll(x => x.Id.StartsWith("vrc_", StringComparison.OrdinalIgnoreCase));
             lib.Avatars.RemoveAll(x => x.GroupId.StartsWith("vrc_", StringComparison.OrdinalIgnoreCase));
             lib.Groups.RemoveAll(x => x.Id.Equals(UpdatedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
@@ -1325,14 +1325,10 @@ internal sealed class AvatarStore
                         return new SyncedAvatarSyncItem(avatar, previous);
                     })
                     .ToList();
-                var order = 0;
-                foreach (var item in syncedAvatars.Where(x => x.Previous is null))
+                for (var order = 0; order < syncedAvatars.Count; order++)
                 {
-                    lib.Avatars.Add(CreateSyncedFavorite(item.Avatar, item.Previous, groupId, now, order++));
-                }
-                foreach (var item in syncedAvatars.Where(x => x.Previous is not null).OrderBy(x => x.Previous!.Order).ThenBy(x => x.Previous!.CreatedAt))
-                {
-                    lib.Avatars.Add(CreateSyncedFavorite(item.Avatar, item.Previous, groupId, now, order++));
+                    var item = syncedAvatars[order];
+                    lib.Avatars.Add(CreateSyncedFavorite(item.Avatar, item.Previous, groupId, now, order));
                 }
             }
             ApplyStoredAvatarDetailRefreshes(lib, storedAvatarRefresh.UpdatedAvatars, now);
@@ -1345,61 +1341,8 @@ internal sealed class AvatarStore
             NormalizeOrders(lib);
             _ = WriteAccountBackup(lib, "sync");
             PruneAccountBackups();
-            return new VrChatSyncResult(lib, imported.Groups.Count, imported.Avatars.Count, movedToDeleted.Count, movedToDeleted.Select(x => x.Name).ToList(), movedToDeleted, storedAvatarRefresh.ChangedAvatars.Count, storedAvatarRefresh.ChangedAvatars.Select(x => string.IsNullOrWhiteSpace(x.Name) ? x.AvatarId : x.Name).Where(x => !string.IsNullOrWhiteSpace(x)).ToList(), uploadedAvatars.Count, imported.Groups.Count, syncConflicts.Count, syncConflicts.Take(12).Select(x => x.Detail).Where(x => !string.IsNullOrWhiteSpace(x)).ToList());
+            return new VrChatSyncResult(lib, imported.Groups.Count, imported.Avatars.Count, movedToDeleted.Count, movedToDeleted.Select(x => x.Name).ToList(), movedToDeleted, storedAvatarRefresh.ChangedAvatars.Count, storedAvatarRefresh.ChangedAvatars.Select(x => string.IsNullOrWhiteSpace(x.Name) ? x.AvatarId : x.Name).Where(x => !string.IsNullOrWhiteSpace(x)).ToList(), uploadedAvatars.Count, imported.Groups.Count, 0, []);
         }
-    }
-    private static List<SyncConflictInput> DetectSyncConflicts(List<AvatarFavorite> previousSyncedRows, Dictionary<string, AvatarGroup> previousGroups, VrChatFavoriteImport imported)
-    {
-        if (previousSyncedRows.Count == 0) return [];
-        var conflicts = new List<SyncConflictInput>();
-        var previousByLocation = previousSyncedRows
-            .GroupBy(x => SyncedAvatarKey(x.GroupId, x.AvatarId), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(x => x.Key, x => x.OrderBy(a => a.Order).ThenBy(a => a.CreatedAt).First(), StringComparer.OrdinalIgnoreCase);
-        var remoteByLocation = imported.Avatars
-            .Where(x => !string.IsNullOrWhiteSpace(x.Avatar.AvatarId))
-            .GroupBy(x => SyncedAvatarKey($"vrc_{x.GroupTag}", x.Avatar.AvatarId), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(x => x.Key, x => x.First(), StringComparer.OrdinalIgnoreCase);
-
-        foreach (var (key, remote) in remoteByLocation)
-        {
-            if (previousByLocation.ContainsKey(key)) continue;
-            var groupId = $"vrc_{remote.GroupTag}";
-            previousGroups.TryGetValue(groupId, out var group);
-            conflicts.Add(new SyncConflictInput("remote_added", groupId, group?.Name ?? remote.GroupTag, remote.Avatar.AvatarId, remote.Avatar.Name, $"Added in VRChat: {remote.Avatar.NameOrId()}"));
-        }
-
-        foreach (var (key, local) in previousByLocation)
-        {
-            if (remoteByLocation.ContainsKey(key)) continue;
-            previousGroups.TryGetValue(local.GroupId, out var group);
-            conflicts.Add(new SyncConflictInput("remote_removed", local.GroupId, group?.Name ?? local.GroupId, local.AvatarId, local.Name, $"Removed from VRChat: {local.NameOrId()}"));
-        }
-
-        foreach (var group in imported.Groups)
-        {
-            var groupId = $"vrc_{group.Tag}";
-            var localOrder = previousSyncedRows
-                .Where(x => x.GroupId.Equals(groupId, StringComparison.OrdinalIgnoreCase))
-                .OrderBy(x => x.Order)
-                .ThenBy(x => x.CreatedAt)
-                .Select(x => x.AvatarId)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .ToList();
-            var remoteOrder = imported.Avatars
-                .Where(x => x.GroupTag.Equals(group.Tag, StringComparison.OrdinalIgnoreCase))
-                .Select(x => x.Avatar.AvatarId)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .ToList();
-            if (localOrder.Count < 2 || localOrder.Count != remoteOrder.Count) continue;
-            if (localOrder.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(remoteOrder)
-                && !localOrder.SequenceEqual(remoteOrder, StringComparer.OrdinalIgnoreCase))
-            {
-                previousGroups.TryGetValue(groupId, out var previousGroup);
-                conflicts.Add(new SyncConflictInput("remote_order_changed", groupId, previousGroup?.Name ?? group.DisplayName, "", "", $"Order changed in VRChat: {previousGroup?.Name ?? group.DisplayName}"));
-            }
-        }
-
-        return conflicts;
     }
     private async Task<StoredAvatarRefreshResult> RefreshStoredFavoriteAvatarsAsync(VrChatClient client)
     {
@@ -3473,12 +3416,49 @@ internal static class VrChatLogWatcher
         }
         return new PlayerActivityLogResult(items.OrderByDescending(x => x.Timestamp).Take(limit).ToList());
     }
+    public static LatestWorldLocationResult LatestWorldLocation()
+    {
+        if (!IsVrChatRunning()) return new LatestWorldLocationResult(false, "", "", "", "", "VRChat is not running.");
+        var log = LatestLogPath();
+        if (string.IsNullOrWhiteSpace(log)) return new LatestWorldLocationResult(false, "", "", "", "", "No VRChat log found.");
+        var room = "";
+        var location = "";
+        var timestamp = "";
+        foreach (var line in ReadTailLines(log, 2500))
+        {
+            var lineTime = line.Length >= 19 ? line[..19] : "";
+            var entering = line.IndexOf("[Behaviour] Entering Room:", StringComparison.OrdinalIgnoreCase);
+            if (entering >= 0)
+            {
+                room = line[(entering + "[Behaviour] Entering Room:".Length)..].Trim();
+                if (!string.IsNullOrWhiteSpace(lineTime)) timestamp = lineTime;
+            }
+            var joining = line.IndexOf("[Behaviour] Joining ", StringComparison.OrdinalIgnoreCase);
+            if (joining >= 0 && !line.Contains("Joining or Creating Room:", StringComparison.OrdinalIgnoreCase))
+            {
+                location = line[(joining + "[Behaviour] Joining ".Length)..].Trim();
+                if (!string.IsNullOrWhiteSpace(lineTime)) timestamp = lineTime;
+            }
+            if ((line.Contains("OnLeftRoom", StringComparison.OrdinalIgnoreCase) || line.Contains("Left Room", StringComparison.OrdinalIgnoreCase)) && !string.IsNullOrWhiteSpace(lineTime))
+            {
+                timestamp = lineTime;
+            }
+        }
+        var worldId = WorldIdFromLocation(location);
+        var found = !string.IsNullOrWhiteSpace(room) || !string.IsNullOrWhiteSpace(worldId) || !string.IsNullOrWhiteSpace(location);
+        return new LatestWorldLocationResult(found, room, location, worldId, timestamp, found ? "" : "No recent world location found in the VRChat log.");
+    }
     private static string WorldIdFromLocation(string location)
     {
         var value = location?.Trim() ?? "";
         if (!value.StartsWith("wrld_", StringComparison.OrdinalIgnoreCase)) return "";
         var colon = value.IndexOf(':');
         return colon > 0 ? value[..colon] : value;
+    }
+    public static bool IsVrChatRunning()
+    {
+        try { return Process.GetProcessesByName("VRChat").Any(); }
+        catch { return false; }
     }
     public static WorldVisitHistoryResult WorldVisitHistory(WorldVisitHistoryInput input)
     {
@@ -3844,6 +3824,32 @@ internal sealed class VrChatClient
         if (File.Exists(_sessionPath)) File.Delete(_sessionPath);
         return new(false, false, [], null);
     }
+    public async Task<VrChatSessionState> UpdateCurrentUserAsync(VrChatProfileUpdateInput input)
+    {
+        var current = await GetCurrentUserAsync();
+        if (string.IsNullOrWhiteSpace(current.Id)) throw new InvalidOperationException("Not signed in.");
+        var status = CleanProfileStatus(input.Status, current.Status);
+        var statusDescription = (input.StatusDescription ?? "").Trim();
+        var bio = (input.Bio ?? "").Trim();
+        var pronouns = (input.Pronouns ?? "").Trim();
+        if (pronouns.Length > 32) pronouns = pronouns[..32];
+        var bioLinks = (input.BioLinks ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(10)
+            .ToArray();
+        var payload = new Dictionary<string, object?>
+        {
+            ["status"] = status,
+            ["statusDescription"] = statusDescription,
+            ["bio"] = bio,
+            ["pronouns"] = pronouns,
+            ["bioLinks"] = bioLinks
+        };
+        using var response = await _client.PutAsync($"users/{WebUtility.UrlEncode(current.Id)}", new StringContent(JsonSerializer.Serialize(payload, ProgramJson.Options), Encoding.UTF8, "application/json"));
+        await ReadActionResponseAsync(response, "Update profile failed.");
+        return await GetSessionAsync();
+    }
     public async Task<AvatarInput> FetchAvatarAsync(string id)
     {
         id = id.Trim();
@@ -3939,6 +3945,7 @@ internal sealed class VrChatClient
     }
     public async Task<VrChatCurrentLocationResult> GetCurrentLocationAsync()
     {
+        if (!VrChatLogWatcher.IsVrChatRunning()) return new VrChatCurrentLocationResult("", "", "", null);
         var user = await GetCurrentUserAsync();
         var location = user.Location ?? "";
         var worldId = user.WorldId;
@@ -4778,6 +4785,13 @@ internal sealed class VrChatClient
         foreach (var group in groups)
         {
             var favoriteRefs = await GetFavoriteAvatarRefsAsync(group.Tag);
+            var favoriteOrder = favoriteRefs
+                .Select((favorite, index) => new { favorite.AvatarId, Index = index })
+                .Where(x => !string.IsNullOrWhiteSpace(x.AvatarId))
+                .GroupBy(x => x.AvatarId, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(x => x.Key, x => x.First().Index, StringComparer.OrdinalIgnoreCase);
+            var groupAvatars = new List<VrChatGroupedAvatar>();
+            var groupDeletedAvatars = new List<VrChatGroupedAvatar>();
             var detailedAvatarIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var offset = 0;
             while (true)
@@ -4799,7 +4813,7 @@ internal sealed class VrChatClient
                     if (IsUnavailableAvatarStatus(releaseStatus))
                     {
                         avatar.ReleaseStatus = ArchivedReleaseStatus(releaseStatus);
-                        deletedAvatars.Add(new VrChatGroupedAvatar(group.Tag, avatar));
+                        groupDeletedAvatars.Add(new VrChatGroupedAvatar(group.Tag, avatar));
                     }
                     else
                     {
@@ -4807,7 +4821,7 @@ internal sealed class VrChatClient
                         {
                             detailedAvatarIds.Add(avatar.AvatarId);
                         }
-                        avatars.Add(new VrChatGroupedAvatar(group.Tag, avatar));
+                        groupAvatars.Add(new VrChatGroupedAvatar(group.Tag, avatar));
                     }
                 }
 
@@ -4830,11 +4844,11 @@ internal sealed class VrChatClient
                 if (checkedAvatar is not null && !IsUnavailableAvatarStatus(checkedAvatar.ReleaseStatus))
                 {
                     detailedAvatarIds.Add(checkedAvatar.AvatarId);
-                    avatars.Add(new VrChatGroupedAvatar(group.Tag, checkedAvatar));
+                    groupAvatars.Add(new VrChatGroupedAvatar(group.Tag, checkedAvatar));
                     continue;
                 }
 
-                deletedAvatars.Add(new VrChatGroupedAvatar(group.Tag, checkedAvatar ?? new AvatarInput
+                groupDeletedAvatars.Add(new VrChatGroupedAvatar(group.Tag, checkedAvatar ?? new AvatarInput
                 {
                     AvatarId = favorite.AvatarId,
                     Name = favorite.AvatarId,
@@ -4845,6 +4859,16 @@ internal sealed class VrChatClient
                     RawJson = JsonSerializer.Serialize(favorite, ProgramJson.Options)
                 }));
             }
+            avatars.AddRange(groupAvatars
+                .Select((item, fallback) => new { item, fallback })
+                .OrderBy(x => favoriteOrder.TryGetValue(x.item.Avatar.AvatarId, out var order) ? order : int.MaxValue)
+                .ThenBy(x => x.fallback)
+                .Select(x => x.item));
+            deletedAvatars.AddRange(groupDeletedAvatars
+                .Select((item, fallback) => new { item, fallback })
+                .OrderBy(x => favoriteOrder.TryGetValue(x.item.Avatar.AvatarId, out var order) ? order : int.MaxValue)
+                .ThenBy(x => x.fallback)
+                .Select(x => x.item));
         }
         return new VrChatFavoriteImport(groups, avatars, deletedAvatars);
     }
@@ -4992,6 +5016,20 @@ internal sealed class VrChatClient
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         return ReadUser(doc.RootElement);
     }
+    private static string CleanProfileStatus(string? status, string fallback)
+    {
+        var value = (status ?? "").Trim().ToLowerInvariant().Replace("_", " ").Replace("-", " ");
+        return value switch
+        {
+            "active" => "active",
+            "join me" => "join me",
+            "joinme" => "join me",
+            "ask me" => "ask me",
+            "askme" => "ask me",
+            "busy" => "busy",
+            _ => string.IsNullOrWhiteSpace(fallback) ? "active" : fallback
+        };
+    }
     private async Task<VrChatWorldSummary> GetWorldAsync(string worldId)
     {
         using var response = await _client.GetAsync($"worlds/{WebUtility.UrlEncode(worldId)}");
@@ -5110,6 +5148,12 @@ internal sealed class VrChatClient
         ReadString(root, "last_login") ?? ReadString(root, "lastLogin") ?? "",
         ReadString(root, "developerType") ?? "",
         ReadStringArray(root, "tags"),
+        ReadStringArray(root, "bioLinks"),
+        ReadString(root, "pronouns") ?? "",
+        ReadString(root, "profileImageUrl") ?? ReadString(root, "profilePicture") ?? "",
+        ReadString(root, "userIcon") ?? "",
+        ReadString(root, "profilePicOverride") ?? "",
+        ReadString(root, "profilePicOverrideThumbnail") ?? "",
         JsonSerializer.Serialize(root, ProgramJson.Options));
     private static VrChatFriendSummary ReadFriend(JsonElement root, bool? endpointOnline = null)
     {
@@ -7738,6 +7782,7 @@ internal sealed record VrcxFeedAvatarRow(string CreatedAt, string UserId, string
 internal sealed record PasDatabaseInfo(string Location, string FileDate, long ContentLength, DateTimeOffset? LastModifiedUtc, string ETag, int AvatarCount, int AuthorCount, int FileAvatarCount, int FileAuthorCount, bool HeaderVerified);
 internal sealed record LoginInput(string Username, string Password);
 internal sealed record TwoFactorInput(string Code, string Method);
+internal sealed record VrChatProfileUpdateInput(string Status = "", string StatusDescription = "", string Bio = "", string BioLinks = "", string Pronouns = "");
 internal sealed record CurrentAvatarInput(string GroupId);
 internal sealed record VrChatFavoriteChangeInput(string AvatarId, string GroupId);
 internal sealed record WorldFavoriteInput(string Id = "", string Tag = "");
@@ -7745,6 +7790,7 @@ internal sealed record PageInput(int Limit = 100, int Offset = 0);
 internal sealed record WorldSearchInput(string Query = "", int Limit = 50, int Offset = 0, string Mode = "", string Sort = "popularity", string Order = "descending", string ReleaseStatus = "");
 internal sealed record WorldLaunchInput(string WorldId = "", string InstanceId = "", string Location = "");
 internal sealed record WorldVisitHistoryInput(string WorldId = "", string InstanceId = "", string Location = "");
+internal sealed record LatestWorldLocationResult(bool Found, string WorldName, string Location, string WorldId, string Timestamp, string Message);
 internal sealed record PlayerActivityLogInput(int Limit = 250);
 internal sealed record InviteMessageInput(string Type = "message");
 internal sealed record InviteMessageUpdateInput(string Type = "message", int Slot = 0, string Message = "");
@@ -7757,7 +7803,7 @@ internal sealed record ChatMessageResult(string UserId, string Message, string M
 internal sealed record UserModerationInput(string Id = "", string Type = "block");
 internal sealed record EncounterHistoryInput(string UserId = "", string DisplayName = "");
 internal sealed record VrChatSessionState(bool IsLoggedIn, bool RequiresTwoFactor, string[] TwoFactorMethods, VrChatUserSummary? User);
-internal sealed record VrChatUserSummary(string Id, string DisplayName, string CurrentAvatarId, string CurrentAvatarImageUrl, string CurrentAvatarThumbnailImageUrl, string Status = "", string StatusDescription = "", string Location = "", string WorldId = "", string InstanceId = "", string HomeWorldId = "", string Bio = "", string DateJoined = "", string LastLogin = "", string DeveloperType = "", string Tags = "", string RawJson = "");
+internal sealed record VrChatUserSummary(string Id, string DisplayName, string CurrentAvatarId, string CurrentAvatarImageUrl, string CurrentAvatarThumbnailImageUrl, string Status = "", string StatusDescription = "", string Location = "", string WorldId = "", string InstanceId = "", string HomeWorldId = "", string Bio = "", string DateJoined = "", string LastLogin = "", string DeveloperType = "", string Tags = "", string BioLinks = "", string Pronouns = "", string ProfileImageUrl = "", string UserIcon = "", string ProfilePicOverride = "", string ProfilePicOverrideThumbnail = "", string RawJson = "");
 internal sealed record VrChatFriendSummary(string Id, string DisplayName, string Status, string StatusDescription, string Location, string WorldId, string ImageUrl, bool IsOnline = false, string Presence = "offline", string State = "", string Bio = "", string DateJoined = "", string LastLogin = "", string DeveloperType = "", string Tags = "", string RawJson = "", string ProfileImageUrl = "", string UserIcon = "", string ProfilePicOverride = "", string ProfilePicOverrideThumbnail = "", string CurrentAvatarId = "", string CurrentAvatarName = "", string CurrentAvatarImageUrl = "", string CurrentAvatarThumbnailImageUrl = "", string AllowAvatarCopying = "", string Pronouns = "", string AgeVerificationStatus = "", string LastPlatform = "", string RepresentedGroupId = "", string RepresentedGroupName = "", string RepresentedGroupShortCode = "", string RepresentedGroupMemberCount = "", string RepresentedGroupImageUrl = "", string BioLinks = "", bool IsFriend = false, bool IsBlocked = false, string FavoriteTags = "", string PresenceSource = "");
 internal sealed record VrChatFriendListResult(List<VrChatFriendSummary> Friends, bool HasMore);
 internal sealed record VrChatUserGroupSummary(string Id, string Name, string ShortCode, string MemberCount, string Description, string ImageUrl);

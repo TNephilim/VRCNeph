@@ -21,8 +21,8 @@
       <section class="account-panel">
         <button id="accountStatus" class="account-status" type="button">Not signed in</button>
         <button id="currentAvatarCard" class="current-avatar-card" type="button" hidden>
-          <span class="current-avatar-thumb"><img id="currentAvatarImage" alt=""></span>
-          <span class="current-avatar-copy"><span>My Profile</span><strong id="currentAvatarName">Unknown avatar</strong><small id="currentAvatarId"></small></span>
+          <span class="current-avatar-thumb"><img id="currentAvatarImage" alt=""><span id="currentProfilePresenceDot" class="presence-dot offline" aria-hidden="true"></span></span>
+          <span class="current-avatar-copy"><span id="currentProfileLabel">My Profile</span><strong id="currentAvatarName">Unknown avatar</strong><small id="currentAvatarId"></small></span>
         </button>
         <div class="account-actions"><button id="loginBtn">VRChat Login</button><button id="logoutBtn" hidden>Logout</button></div>
         <div id="inlineLoginPanel" class="inline-login" hidden>
@@ -66,7 +66,7 @@
     </aside>
     <main class="workspace">
       <nav class="page-tabs" aria-label="Pages">
-        <button id="favoritesTabBtn" class="active" type="button">Avatar Favorites</button>
+        <button id="favoritesTabBtn" class="active" type="button">Avatars</button>
         <button id="databaseTabBtn" type="button">Database Search</button>
         <button id="worldsTabBtn" type="button">Worlds</button>
         <button id="friendsTabBtn" type="button">Friends</button>
@@ -96,7 +96,7 @@
       </nav>
       <section id="favoritesPage" class="workspace-page">
         <header class="toolbar">
-          <div class="toolbar-title"><h2 id="activeGroupName">Favorites</h2><p id="activeGroupDescription"></p><span id="rouletteCountdownFav" class="roulette-countdown toolbar-countdown" hidden></span></div>
+          <div class="toolbar-title"><h2 id="activeGroupName">Favorites</h2><div class="toolbar-status-row"><p id="activeGroupDescription"></p><span id="rouletteCountdownFav" class="roulette-countdown toolbar-countdown" hidden></span></div></div>
           <div class="toolbar-actions">
             <input id="searchInput" type="search" placeholder="Search avatars">
             <div class="sort-control">
@@ -119,6 +119,7 @@
             <button id="unfavoriteAllBtn" type="button" class="danger">Unfavorite All</button>
             <button id="checkDeletedFavoritesBtn" type="button" hidden>Check for Deleted/Private</button>
             <button id="addAvatarBtn" class="primary">Add Avatar</button>
+            <button id="equipRandomFavoriteBtn" type="button" class="primary" title="Equip a random favorite avatar">Equip Random</button>
             <button id="favRouletteBtn" type="button" title="Favorite avatar roulette">Fav Roulette</button>
             <span class="flex-break"></span>
             <label class="range-control">Columns<input id="gridSizeInput" type="range" min="3" max="10" value="10"><output id="gridSizeValue">10</output></label>
@@ -130,9 +131,12 @@
       </section>
       <section id="databasePage" class="workspace-page" hidden>
         <header class="toolbar">
-          <div class="toolbar-title"><h2>Database Search</h2><p id="avatarDatabaseStatus">Search AVTRZIP, Prismic PAS, and VRCX DB.</p><span id="rouletteCountdownDb" class="roulette-countdown toolbar-countdown" hidden></span></div>
+          <div class="toolbar-title"><h2>Database Search</h2><div class="toolbar-status-row"><p id="avatarDatabaseStatus">Search AVTRZIP, Prismic PAS, and VRCX DB.</p><span id="rouletteCountdownDb" class="roulette-countdown toolbar-countdown" hidden></span></div></div>
           <div class="toolbar-actions database-toolbar-actions">
-            <input id="avatarDatabaseSearchInput" type="search" placeholder="Search all databases">
+            <div class="database-search-history-wrap">
+              <input id="avatarDatabaseSearchInput" type="search" placeholder="Search all databases" autocomplete="off">
+              <div id="databaseSearchHistoryMenu" class="database-search-history-menu" hidden></div>
+            </div>
             <button id="searchAvatarDatabaseBtn" type="button" class="primary">Search</button>
             <button id="clearAvatarDatabaseBtn" type="button">Clear</button>
             <div class="sort-control database-provider-control">
@@ -168,7 +172,7 @@
                 <label class="field-toggle"><input id="databasePlatformIosToggle" type="checkbox">iOS</label>
               </div>
             </div>
-            <button id="randomAvatarDatabaseBtn" type="button" title="Random page">Random</button>
+            <button id="randomAvatarDatabaseBtn" type="button" title="Random page">Random Page</button>
             <button id="equipRandomAvatarBtn" type="button" class="primary">Equip Random</button>
             <button id="avatarRouletteBtn" type="button" title="Avatar roulette">Roulette</button>
             <span class="flex-break"></span>
@@ -182,9 +186,6 @@
       <section id="friendsPage" class="workspace-page social-page" hidden>
         <header class="toolbar">
           <div class="toolbar-title"><h2>Friends</h2><p id="vrchatSocialStatus">Friends and profile details.</p></div>
-          <div class="toolbar-actions">
-            <button id="refreshVrchatSocialBtn" type="button" class="primary">Refresh</button>
-          </div>
         </header>
         <section class="social-layout friends-layout">
           <section class="social-panel">
@@ -192,7 +193,7 @@
             <div id="friendsList" class="social-list"></div>
           </section>
           <section class="social-panel social-detail-panel">
-            <header><h3>Friend Details</h3></header>
+            <header><h3 id="friendDetailsPanelTitle">Friend Details</h3></header>
             <div id="socialDetailsPanel" class="social-list"></div>
           </section>
         </section>
@@ -215,7 +216,10 @@
                 <option value="random">Random</option>
               </select>
             </div>
-            <input id="worldSearchInput" type="search" placeholder="Search worlds">
+            <div class="world-search-history-wrap">
+              <input id="worldSearchInput" type="search" placeholder="Search worlds" autocomplete="off">
+              <div id="worldSearchHistoryMenu" class="database-search-history-menu" hidden></div>
+            </div>
             <button id="worldSearchBtn" type="button" class="primary">Search Worlds</button>
             <button id="clearWorldSearchBtn" type="button">Clear</button>
             <button id="randomWorldBtn" type="button">Random World</button>
@@ -326,7 +330,14 @@
 
   <dialog id="saveAvatarGroupDialog"><form method="dialog" class="dialog-form">
     <header><h3>Save Avatar</h3><button type="button" class="icon-button" data-close="saveAvatarGroupDialog">x</button></header>
-    <p id="saveAvatarGroupName" class="dialog-note"></p><label>Group<select id="saveAvatarGroupInput"></select></label>
+    <p id="saveAvatarGroupName" class="dialog-note"></p>
+    <label>Group
+      <div class="sort-control dialog-select-control">
+        <button id="saveAvatarGroupMenuBtn" type="button">Group</button>
+        <div id="saveAvatarGroupMenu" class="sort-menu" hidden></div>
+        <select id="saveAvatarGroupInput" hidden></select>
+      </div>
+    </label>
     <menu><button type="button" data-close="saveAvatarGroupDialog">Cancel</button><button id="confirmSaveAvatarGroupBtn" class="primary">Save Avatar</button></menu>
   </form></dialog>
 
