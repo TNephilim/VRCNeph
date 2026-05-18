@@ -110,19 +110,20 @@
                 <option value="authorAsc">Author A-Z</option>
               </select>
             </div>
-            <label id="syncedAvatarEditToggleWrap" class="edit-mode-toggle" hidden><span>Edit mode</span><input id="syncedAvatarEditToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span></label>
-            <button id="applySyncedAvatarOrderBtn" class="primary" type="button" hidden>Save</button>
-            <button id="cancelSyncedAvatarOrderBtn" type="button" hidden>Cancel</button>
             <button id="replaceSyncedGroupBtn" type="button" hidden>Replace From Group</button>
             <button id="editGroupBtn">Edit Group</button>
             <button id="copyGroupBtn">Copy Group</button>
+            <button id="addAvatarBtn" class="primary">Add Avatar</button>
             <button id="deleteGroupBtn" class="danger">Delete Group</button>
             <button id="unfavoriteAllBtn" type="button" class="danger">Unfavorite All</button>
             <button id="checkDeletedFavoritesBtn" type="button" hidden>Check for Deleted/Private</button>
-            <button id="addAvatarBtn" class="primary">Add Avatar</button>
-            <button id="equipRandomFavoriteBtn" type="button" class="primary" title="Equip a random favorite avatar">Equip Random</button>
-            <button id="favRouletteBtn" type="button" title="Favorite avatar roulette">Fav Roulette</button>
             <span class="flex-break"></span>
+            <span class="toolbar-secondary-actions">
+              <button id="applySyncedAvatarOrderBtn" class="primary" type="button" hidden>Save</button>
+              <label id="syncedAvatarEditToggleWrap" class="edit-mode-toggle" hidden><input id="syncedAvatarEditToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span><span>Edit mode</span></label>
+              <button id="equipRandomFavoriteBtn" type="button" class="primary" title="Equip a random favorite avatar">Equip Random</button>
+              <button id="favRouletteBtn" type="button" title="Favorite avatar roulette">Fav Roulette</button>
+            </span>
             <label class="range-control">Columns<input id="gridSizeInput" type="range" min="3" max="10" value="10"><output id="gridSizeValue">10</output></label>
           </div>
         </header>
@@ -140,6 +141,36 @@
             </div>
             <button id="searchAvatarDatabaseBtn" type="button" class="primary">Search</button>
             <button id="clearAvatarDatabaseBtn" type="button">Clear</button>
+            <div id="databaseSearchScopeControl" class="segmented-control database-search-scope" role="group" aria-label="Database search scope">
+              <button id="databaseScopeAvatarBtn" type="button" class="active" data-database-scope="avatar">Avatars</button>
+              <button id="databaseScopeAuthorBtn" type="button" data-database-scope="author">Authors</button>
+            </div>
+            <div class="sort-control database-search-method-control">
+              <button id="databaseSearchMethodMenuBtn" type="button">Match Phrase</button>
+              <div id="databaseSearchMethodMenu" class="sort-menu" hidden></div>
+              <select id="databaseSearchMethodSelect" hidden>
+                <option value="phrase">Match Phrase</option>
+                <option value="exact">Exact Phrase</option>
+                <option value="startsWith">Starts With Phrase</option>
+                <option value="endsWith">Ends With Phrase</option>
+                <option value="allWords">Match All Words</option>
+              </select>
+            </div>
+            <div class="database-field-dropdown">
+              <button id="databaseFieldMenuBtn" type="button">Filters</button>
+              <div id="databaseFieldMenu" class="database-field-menu" hidden aria-label="Database search filters">
+                <section class="database-filter-section">
+                  <h4>Search</h4>
+                  <label id="databaseDescriptionTagsWrap" class="field-toggle database-description-tags-toggle"><input id="databaseSearchDescriptionTagsToggle" type="checkbox" checked>Description & Tags</label>
+                </section>
+                <section class="database-filter-section">
+                  <h4>Platforms</h4>
+                  <label class="field-toggle"><input id="databasePlatformPcToggle" type="checkbox">PC</label>
+                  <label class="field-toggle"><input id="databasePlatformAndroidToggle" type="checkbox">Android</label>
+                  <label class="field-toggle"><input id="databasePlatformIosToggle" type="checkbox">iOS</label>
+                </section>
+              </div>
+            </div>
             <div class="sort-control database-provider-control">
               <button id="avatarDatabaseProviderMenuBtn" type="button">All Databases</button>
               <div id="avatarDatabaseProviderMenu" class="sort-menu" hidden></div>
@@ -161,22 +192,12 @@
                 <option value="authorAsc">Author A-Z</option>
               </select>
             </div>
-            <div class="database-field-dropdown">
-              <button id="databaseFieldMenuBtn" type="button">Search By</button>
-              <div id="databaseFieldMenu" class="database-field-menu" hidden aria-label="Database search fields">
-                <label class="field-toggle"><input id="databaseSearchAvatarToggle" type="checkbox" checked>Avatar</label>
-                <label class="field-toggle"><input id="databaseSearchAuthorToggle" type="checkbox" checked>Author</label>
-                <label class="field-toggle"><input id="databaseSearchDescriptionToggle" type="checkbox" checked>Description</label>
-                <label class="field-toggle"><input id="databaseSearchTagsToggle" type="checkbox" checked>Tags</label>
-                <label class="field-toggle"><input id="databasePlatformPcToggle" type="checkbox">PC</label>
-                <label class="field-toggle"><input id="databasePlatformAndroidToggle" type="checkbox">Android</label>
-                <label class="field-toggle"><input id="databasePlatformIosToggle" type="checkbox">iOS</label>
-              </div>
-            </div>
-            <button id="randomAvatarDatabaseBtn" type="button" title="Random page">Random Page</button>
-            <button id="equipRandomAvatarBtn" type="button" class="primary">Equip Random</button>
-            <button id="avatarRouletteBtn" type="button" title="Avatar roulette">Roulette</button>
             <span class="flex-break"></span>
+            <span class="toolbar-secondary-actions">
+              <button id="randomAvatarDatabaseBtn" type="button" title="Random page">Random Page</button>
+              <button id="equipRandomAvatarBtn" type="button" class="primary">Equip Random</button>
+              <button id="avatarRouletteBtn" type="button" title="Avatar roulette">Roulette</button>
+            </span>
             <label class="range-control">Columns<input id="databaseGridSizeInput" type="range" min="3" max="10" value="10"><output id="databaseGridSizeValue">10</output></label>
           </div>
         </header>
@@ -202,33 +223,76 @@
       <section id="worldsPage" class="workspace-page social-page" hidden>
         <header class="toolbar">
           <div class="toolbar-title"><h2>Worlds</h2><p id="worldSocialStatus">Search and inspect VRChat worlds.</p></div>
-          <div class="toolbar-actions">
-            <div id="worldDiscoveryFilterWrap" class="sort-control world-discovery-filter-control">
-              <button id="worldDiscoveryFilterMenuBtn" type="button">All</button>
-              <div id="worldDiscoveryFilterMenu" class="sort-menu" hidden></div>
-              <select id="worldDiscoveryFilterSelect" hidden>
-                <option value="all">All</option>
-                <option value="popular">Most Popular</option>
-                <option value="trending">Trending</option>
-                <option value="active">Active Worlds</option>
-                <option value="updated">Recently Updated</option>
-                <option value="published">Recently Published</option>
-                <option value="labs">Community Labs</option>
-                <option value="random">Random</option>
-              </select>
-            </div>
+          <div class="toolbar-actions world-toolbar-actions">
             <div class="world-search-history-wrap">
               <input id="worldSearchInput" type="search" placeholder="Search worlds" autocomplete="off">
               <div id="worldSearchHistoryMenu" class="database-search-history-menu" hidden></div>
             </div>
             <button id="worldSearchBtn" type="button" class="primary">Search Worlds</button>
             <button id="clearWorldSearchBtn" type="button">Clear</button>
-            <button id="randomWorldBtn" type="button">Random World</button>
+            <div class="sort-control world-search-method-control">
+              <button id="worldSearchMethodMenuBtn" type="button">Match Phrase</button>
+              <div id="worldSearchMethodMenu" class="sort-menu" hidden></div>
+              <select id="worldSearchMethodSelect" hidden>
+                <option value="phrase">Match Phrase</option>
+                <option value="exact">Exact Phrase</option>
+                <option value="startsWith">Starts With Phrase</option>
+                <option value="endsWith">Ends With Phrase</option>
+                <option value="allWords">Match All Words</option>
+              </select>
+            </div>
+            <div class="sort-control world-search-sort-control">
+              <button id="worldSearchSortMenuBtn" type="button">Relevance</button>
+              <div id="worldSearchSortMenu" class="sort-menu" hidden></div>
+              <select id="worldSearchSortSelect" hidden>
+                <option value="relevance">Relevance</option>
+                <option value="popularity">Most popular</option>
+                <option value="heat">Trending</option>
+                <option value="updatedDesc">Recently updated</option>
+                <option value="publishedDesc">Recently published</option>
+                <option value="nameAsc">Name A-Z</option>
+              </select>
+            </div>
+            <div id="worldGroupSortWrap" class="sort-control" hidden>
+              <button id="worldGroupSortMenuBtn" type="button">Recently updated</button>
+              <div id="worldGroupSortMenu" class="sort-menu" hidden></div>
+              <select id="worldGroupSortSelect" hidden>
+                <option value="updatedDesc">Recently updated</option>
+                <option value="manual">Custom order</option>
+                <option value="createdDesc">Recently added</option>
+                <option value="nameAsc">Name A-Z</option>
+                <option value="authorAsc">Author A-Z</option>
+              </select>
+            </div>
+            <button id="editWorldGroupBtn" type="button" hidden>Edit Group</button>
+            <button id="copyWorldGroupBtn" type="button" hidden>Copy Group</button>
+            <button id="deleteWorldGroupBtn" type="button" class="danger" hidden>Delete Group</button>
+            <button id="unfavoriteAllWorldsBtn" type="button" class="danger" hidden>Unfavorite All</button>
+            <span class="flex-break"></span>
+            <span class="toolbar-secondary-actions">
+              <button id="randomWorldBtn" type="button">Random World</button>
+            </span>
           </div>
         </header>
         <section class="social-layout worlds-layout">
           <section class="social-panel">
-            <header><h3>Worlds</h3></header>
+            <header>
+              <h3>Worlds</h3>
+              <div id="worldDiscoveryFilterWrap" class="sort-control world-discovery-filter-control">
+                <button id="worldDiscoveryFilterMenuBtn" type="button">All Worlds</button>
+                <div id="worldDiscoveryFilterMenu" class="sort-menu" hidden></div>
+                <select id="worldDiscoveryFilterSelect" hidden>
+                  <option value="all">All Worlds</option>
+                  <option value="popular">Most Popular</option>
+                  <option value="trending">Trending</option>
+                  <option value="active">Active Worlds</option>
+                  <option value="updated">Recently Updated</option>
+                  <option value="published">Recently Published</option>
+                  <option value="labs">Community Labs</option>
+                  <option value="random">Random</option>
+                </select>
+              </div>
+            </header>
             <div id="worldResults" class="social-list"></div>
           </section>
           <section class="social-panel social-detail-panel">
@@ -309,10 +373,12 @@
     </main>
   </div>
 
-  <dialog id="groupDialog"><form method="dialog" class="dialog-form">
-    <header><h3 id="groupDialogTitle">Group</h3><div class="group-dialog-header-actions"><div id="groupIconWrap" class="group-icon-editor"><span id="groupIconPreview" class="custom-group-icon" hidden></span><button id="editGroupIconBtn" type="button">Edit Group Icon</button><input id="groupIconInput" type="hidden"></div><button id="editGroupBackgroundBtn" type="button">Edit Background</button><button type="button" class="icon-button" data-close="groupDialog">x</button></div></header>
-    <label>Name<input id="groupNameInput" required maxlength="80"></label>
-    <label>Description<textarea id="groupDescriptionInput" rows="3"></textarea></label>
+  <dialog id="groupDialog" class="confirm-dialog favorite-group-dialog avatar-group-dialog"><form method="dialog" class="dialog-form">
+    <header><h3 id="groupDialogTitle">Group</h3><div class="group-dialog-header-actions"><div id="groupIconWrap" class="group-icon-editor"><span id="groupIconPreview" class="custom-group-icon" hidden></span><button id="editGroupIconBtn" type="button">Edit Icon</button><input id="groupIconInput" type="hidden"></div><button id="editGroupBackgroundBtn" type="button">Edit Background</button><button type="button" class="icon-button" data-close="groupDialog">x</button></div></header>
+    <div class="favorite-group-fields">
+      <label>Group name<input id="groupNameInput" required maxlength="80" autocomplete="off"></label>
+      <label>Description<textarea id="groupDescriptionInput" rows="3"></textarea></label>
+    </div>
     <menu><button type="button" data-close="groupDialog">Cancel</button><button id="saveGroupBtn" class="primary">Save</button></menu>
   </form></dialog>
 
@@ -377,10 +443,10 @@
     <div class="settings-tabs" role="tablist">
       <button id="settingsCustomizationTab" type="button" class="active">Customization</button>
       <button id="settingsSyncTab" type="button">Sync</button>
-      <button id="settingsDiagnosticsTab" type="button">Diagnostics</button>
-      <button id="settingsHistoryTab" type="button">History</button>
-      <button id="settingsLogsTab" type="button">Logs</button>
       <button id="settingsBackupsTab" type="button">Backups</button>
+      <button id="settingsHistoryTab" type="button">Metadata History</button>
+      <button id="settingsDiagnosticsTab" type="button">Diagnostics</button>
+      <button id="settingsLogsTab" type="button">Logs</button>
     </div>
     <section id="settingsCustomizationPanel" class="settings-panel">
       <div class="settings-panel-actions"><button id="openBackgroundFolderBtn" type="button">Edit Global Background</button><button id="resetThemeBtn" type="button">Reset Theme</button><select id="bgEffectSelect" hidden><option value="">None</option><option value="aurora">Aurora</option><option value="aurorasnow">Aurora 2</option><option value="blizzard">Blizzard</option><option value="embers">Embers</option><option value="fog">Fog</option><option value="pulse">Gradient pulse</option><option value="lowpoly">Low-poly</option><option value="matrix">Matrix rain</option><option value="nebula">Nebula</option><option value="particles">Particles</option><option value="flow">Perlin flow</option><option value="rain">Rain</option><option value="snow">Snowfall</option><option value="stars">Starfield</option><option value="thunderstorm">Thunderstorm</option><option value="noise">White noise</option><option value="noise2">White noise 2</option></select></div>
@@ -399,21 +465,21 @@
       <div id="syncCenterConflicts" class="settings-list sync-conflict-list"></div>
       <div id="syncCenterActions" class="settings-list sync-action-list"></div>
     </section>
-    <section id="settingsDiagnosticsPanel" class="settings-panel" hidden>
-      <div class="settings-panel-actions"><button id="refreshDiagnosticsBtn" type="button">Refresh</button></div>
-      <div id="diagnosticsList" class="settings-list"></div>
+    <section id="settingsBackupsPanel" class="settings-panel" hidden>
+      <div class="settings-panel-actions"><button id="createAccountBackupBtn" type="button">Create Account Backup</button><button id="openAccountBackupsFolderBtn" type="button">Open Account Backups Folder</button><button id="openBackupsFolderBtn" type="button">Open Group Backups Folder</button></div>
+      <div id="settingsBackupsList" class="settings-list"></div>
     </section>
     <section id="settingsHistoryPanel" class="settings-panel" hidden>
       <div class="settings-panel-actions"><button id="refreshMetadataHistoryBtn" type="button">Refresh</button></div>
       <div id="metadataHistoryList" class="settings-list metadata-history-list"></div>
     </section>
+    <section id="settingsDiagnosticsPanel" class="settings-panel" hidden>
+      <div class="settings-panel-actions"><button id="refreshDiagnosticsBtn" type="button">Refresh</button></div>
+      <div id="diagnosticsList" class="settings-list"></div>
+    </section>
     <section id="settingsLogsPanel" class="settings-panel" hidden>
       <div class="settings-panel-actions"><div class="sort-control settings-log-filter-control"><button id="settingsLogFilterMenuBtn" type="button">All Logs</button><div id="settingsLogFilterMenu" class="sort-menu" hidden></div><select id="settingsLogFilterSelect" hidden><option value="all">All Logs</option><option value="area:App">App</option><option value="area:VRChat">VRChat</option><option value="area:Groups">Groups</option><option value="area:Avatars">Avatars</option><option value="area:Backups">Backups</option><option value="area:Import">Import</option><option value="area:Export">Export</option><option value="area:Settings">Settings</option><option value="area:Database">Database</option><option value="area:Updater">Updater</option><option value="level:Warning">Warnings</option><option value="level:Error">Errors</option></select></div><button id="refreshLogsBtn" type="button">Refresh</button><button id="copyLogsBtn" type="button">Copy Logs</button><button id="openLogsFolderBtn" type="button">Open Logs Folder</button><button id="clearLogsBtn" type="button" class="danger">Clear Logs</button></div>
       <div id="settingsLogsList" class="settings-list logs-list"></div>
-    </section>
-    <section id="settingsBackupsPanel" class="settings-panel" hidden>
-      <div class="settings-panel-actions"><button id="createAccountBackupBtn" type="button">Create Account Backup</button><button id="openAccountBackupsFolderBtn" type="button">Open Account Backups Folder</button><button id="openBackupsFolderBtn" type="button">Open Group Backups Folder</button></div>
-      <div id="settingsBackupsList" class="settings-list"></div>
     </section>
     <menu><button id="checkUpdateBtn" type="button">Check Updates</button><button id="cancelSettingsBtn" type="button">Cancel</button><button id="applySettingsBtn" type="button" class="primary">Apply</button></menu>
   </form></dialog>
@@ -431,7 +497,7 @@
     <menu><button id="importBackgroundsBtn" type="button" class="primary">Import Backgrounds</button><button id="openBackgroundFolderActionBtn" type="button">Open Background Folder</button><button id="clearBackgroundsBtn" type="button" class="danger">Clear Backgrounds</button><button type="button" data-close="backgroundActionDialog">Cancel</button></menu>
   </form></dialog>
   <dialog id="groupIconActionDialog"><form method="dialog" class="dialog-form">
-    <header><h3>Edit Group Icon</h3><button type="button" class="icon-button" data-close="groupIconActionDialog">x</button></header>
+    <header><h3>Edit Icon</h3><button type="button" class="icon-button" data-close="groupIconActionDialog">x</button></header>
     <menu><button id="changeGroupIconActionBtn" type="button" class="primary">Change Icon</button><button id="removeGroupIconActionBtn" type="button" class="danger">Remove Icon</button><button type="button" data-close="groupIconActionDialog">Cancel</button></menu>
   </form></dialog>
   <dialog id="inviteMessageDialog" class="confirm-dialog"><form method="dialog" class="dialog-form">
@@ -453,6 +519,14 @@
     <p id="favoriteWorldText" class="dialog-note"></p>
     <label>Favorite group<select id="favoriteWorldGroupInput"></select></label>
     <menu><button id="cancelFavoriteWorldBtn" type="button">Cancel</button><button id="confirmFavoriteWorldBtn" type="button" class="primary">Favorite</button></menu>
+  </form></dialog>
+  <dialog id="worldGroupDialog" class="confirm-dialog favorite-group-dialog world-group-dialog"><form method="dialog" class="dialog-form">
+    <header><h3 id="worldGroupDialogTitle">World Group</h3><button type="button" class="icon-button" data-close="worldGroupDialog">x</button></header>
+    <div class="favorite-group-fields">
+      <label>Group name<input id="worldGroupNameInput" maxlength="80" autocomplete="off"></label>
+      <label>Description<textarea id="worldGroupDescriptionInput" rows="3"></textarea></label>
+    </div>
+    <menu><button id="cancelWorldGroupBtn" type="button">Cancel</button><button id="saveWorldGroupBtn" type="button" class="primary">Save</button></menu>
   </form></dialog>
 
   <dialog id="imagePreviewDialog" class="image-preview-dialog"><button type="button" class="icon-button image-preview-close" data-close="imagePreviewDialog">x</button><img id="imagePreviewFull" alt=""></dialog>

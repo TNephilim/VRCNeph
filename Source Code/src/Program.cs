@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Drawing;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
@@ -5370,7 +5371,7 @@ internal sealed class VrChatClient
         if (instances is null || instances.Count == 0) return world;
         var groupIds = instances.Select(x => x.GroupId).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).Take(10).ToList();
         if (groupIds.Count == 0) return world;
-        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var names = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         using var gate = new SemaphoreSlim(3);
         var tasks = groupIds.Select(async id =>
         {
@@ -6208,7 +6209,7 @@ internal sealed class AvatarDatabaseClient
     }
 
     private static string AllCountProgressKey(AvatarSearchInput input) =>
-        $"all-count\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.PlatformFilters}";
+        $"all-count\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}";
 
     private async Task<List<AvatarInput>> LoadSearchWindowAsync(AvatarSearchInput input, VrChatClient? vrchat, int maxPages)
     {
@@ -6520,20 +6521,18 @@ internal sealed class AvatarDatabaseClient
         if (IsAuthorIdOnlySearch(input)) return false;
         var query = input.Query?.Trim() ?? "";
         var textMatches = query.Length == 0;
-        var reversedQuery = ReverseText(query);
         if (input.SearchAvatar)
         {
-            if (query.Length > 0 && database.AvatarNames[index].Contains(reversedQuery, StringComparison.OrdinalIgnoreCase)) textMatches = true;
-            if (query.Length > 0 && LooksLikeAvatarIdQuery(query) && DecodePasAvatarId(database, index).Contains(query, StringComparison.OrdinalIgnoreCase)) textMatches = true;
+            if (TextMatches(query, input.SearchMode, ReverseText(database.AvatarNames[index]), DecodePasAvatarId(database, index))) textMatches = true;
         }
 
         if (input.SearchAuthor)
         {
             var authorIndex = database.AuthorIds[index];
-            if (query.Length > 0 && authorIndex < (uint)database.AuthorNames.Length && database.AuthorNames[(int)authorIndex].Contains(reversedQuery, StringComparison.OrdinalIgnoreCase)) textMatches = true;
+            if (authorIndex < (uint)database.AuthorNames.Length && TextMatches(query, input.SearchMode, ReverseText(database.AuthorNames[(int)authorIndex]))) textMatches = true;
         }
 
-        if (query.Length > 0 && input.SearchTags && PasTags(database).Contains(query, StringComparison.OrdinalIgnoreCase)) textMatches = true;
+        if (input.SearchTags && TextMatches(query, input.SearchMode, PasTags(database))) textMatches = true;
         if (!textMatches) return false;
         return MatchesPlatformFilters(database.PlatformLabel, input);
     }
@@ -6870,7 +6869,7 @@ internal sealed class AvatarDatabaseClient
     {
         var path = PasDatabasePath();
         var stamp = File.Exists(path) ? File.GetLastWriteTimeUtc(path).Ticks : 0;
-        return $"pas\n{path}\n{stamp}\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.PlatformFilters}\n{page}\n{limit}";
+        return $"pas\n{path}\n{stamp}\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}\n{page}\n{limit}";
     }
 
     private static List<AvatarInput> MergeAvatarResults(IEnumerable<AvatarInput> results, int limit)
@@ -7351,7 +7350,7 @@ internal sealed class AvatarDatabaseClient
     private static bool IsAuthorNameOnlySearch(AvatarSearchInput input) =>
         input.SearchAuthor && !input.SearchAvatar && !input.SearchDescription && !input.SearchTags && !HasOptionFilter(input) && !string.IsNullOrWhiteSpace(input.Query);
     private static string AvtrZipCacheKey(AvatarSearchInput input, int page, int limit) =>
-        $"avtrzip\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.PlatformFilters}\n{page}\n{limit}";
+        $"avtrzip\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}\n{page}\n{limit}";
     private static async Task<AvatarDatabaseSearchResult> SearchRemoteVrcxAsync(AvatarSearchInput input, VrChatClient? vrchat)
     {
         var query = input.Query?.Trim() ?? "";
@@ -7482,7 +7481,7 @@ internal sealed class AvatarDatabaseClient
     }
 
     private static string RemoteVrcxCacheKey(AvatarSearchInput input, int page, int limit) =>
-        $"vrcx-remote\n{VrcxRemoteDatabaseUrl}\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.PlatformFilters}\n{page}\n{limit}";
+        $"vrcx-remote\n{VrcxRemoteDatabaseUrl}\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}\n{page}\n{limit}";
 
     private static string RemoteVrcxTags(JsonElement item)
     {
@@ -7828,19 +7827,18 @@ internal sealed class AvatarDatabaseClient
         var query = input.Query?.Trim() ?? "";
         var clauses = new List<string>();
         var textFields = new List<string>();
-        if (!string.IsNullOrWhiteSpace(query) && input.SearchAvatar) textFields.Add("(a.name LIKE @like ESCAPE '\\' OR a.id LIKE @like ESCAPE '\\')");
-        if (!string.IsNullOrWhiteSpace(query) && input.SearchAuthor) textFields.Add("(a.author_name LIKE @like ESCAPE '\\' OR a.author_id LIKE @like ESCAPE '\\')");
-        if (!string.IsNullOrWhiteSpace(query) && input.SearchDescription) textFields.Add("a.description LIKE @like ESCAPE '\\'");
+        if (!string.IsNullOrWhiteSpace(query) && input.SearchAvatar) textFields.Add(SearchSqlGroup(["a.name", "a.id"], input, command, "avatar"));
+        if (!string.IsNullOrWhiteSpace(query) && input.SearchAuthor) textFields.Add(SearchSqlGroup(["a.author_name", "a.author_id"], input, command, "author"));
+        if (!string.IsNullOrWhiteSpace(query) && input.SearchDescription) textFields.Add(SearchSqlGroup(["a.description"], input, command, "description"));
         if (!string.IsNullOrWhiteSpace(query) && input.SearchTags)
         {
-            textFields.Add("""
-                (EXISTS (SELECT 1 FROM avatar_tags t WHERE t.avatar_id = a.id AND t.tag LIKE @like ESCAPE '\')
-                 OR EXISTS (SELECT 1 FROM avatar_memos m WHERE m.avatar_id = a.id AND m.memo LIKE @like ESCAPE '\'))
-                """);
+            textFields.Add(SearchSqlGroup([
+                "coalesce((SELECT group_concat(t.tag, ' ') FROM avatar_tags t WHERE t.avatar_id = a.id), '')",
+                "coalesce((SELECT m.memo FROM avatar_memos m WHERE m.avatar_id = a.id), '')"
+            ], input, command, "tags"));
         }
         if (textFields.Count > 0)
         {
-            command.Parameters.AddWithValue("@like", $"%{EscapeLike(query)}%");
             clauses.Add($"({string.Join(" OR ", textFields)})");
         }
 
@@ -7859,6 +7857,37 @@ internal sealed class AvatarDatabaseClient
         }
 
         return clauses.Count == 0 ? "" : $"WHERE {string.Join(" AND ", clauses)}";
+    }
+
+    private static string SearchSqlGroup(string[] fields, AvatarSearchInput input, SqliteCommand command, string prefix)
+    {
+        var query = input.Query?.Trim() ?? "";
+        var mode = NormalizeSearchMode(input.SearchMode);
+        if (mode == "allWords")
+        {
+            var wordClauses = new List<string>();
+            var words = SearchWords(query);
+            if (words.Count == 0) return "1 = 1";
+            for (var i = 0; i < words.Count; i++)
+            {
+                var parameter = $"@{prefix}Word{i}";
+                command.Parameters.AddWithValue(parameter, $"%{EscapeLike(words[i])}%");
+                wordClauses.Add($"({string.Join(" OR ", fields.Select(field => $"{field} LIKE {parameter} ESCAPE '\\'"))})");
+            }
+            return $"({string.Join(" AND ", wordClauses)})";
+        }
+
+        var valueParameter = $"@{prefix}Search";
+        var escaped = EscapeLike(query);
+        command.Parameters.AddWithValue(valueParameter, mode switch
+        {
+            "exact" => query,
+            "startsWith" => $"{escaped}%",
+            "endsWith" => $"%{escaped}",
+            _ => $"%{escaped}%"
+        });
+        if (mode == "exact") return $"({string.Join(" OR ", fields.Select(field => $"lower({field}) = lower({valueParameter})"))})";
+        return $"({string.Join(" OR ", fields.Select(field => $"{field} LIKE {valueParameter} ESCAPE '\\'"))})";
     }
 
     private static SqliteConnection OpenReadOnlyConnection(string databasePath)
@@ -7950,22 +7979,55 @@ internal sealed class AvatarDatabaseClient
         if (IsAuthorIdOnlySearch(input)) return true;
         var query = input.Query?.Trim() ?? "";
         var textMatches = string.IsNullOrWhiteSpace(query);
-        if (input.SearchAvatar && TextMatches(query, avatar.Name, avatar.AvatarId, avatar.Id)) textMatches = true;
-        if (input.SearchAuthor && TextMatches(query, avatar.AuthorName, avatar.AuthorId)) textMatches = true;
-        if (input.SearchDescription && TextMatches(query, avatar.Description)) textMatches = true;
-        if (input.SearchTags && TextMatches(query, avatar.Tags, avatar.Notes)) textMatches = true;
+        if (input.SearchAvatar && TextMatches(query, input.SearchMode, avatar.Name, avatar.AvatarId, avatar.Id)) textMatches = true;
+        if (input.SearchAuthor && TextMatches(query, input.SearchMode, avatar.AuthorName, avatar.AuthorId)) textMatches = true;
+        if (input.SearchDescription && TextMatches(query, input.SearchMode, avatar.Description)) textMatches = true;
+        if (input.SearchTags && TextMatches(query, input.SearchMode, avatar.Tags, avatar.Notes)) textMatches = true;
         if (!textMatches) return false;
         return MatchesPlatformFilters(MergeTagText(avatar.Platforms, avatar.Tags), input);
     }
 
-    private static bool TextMatches(string query, params string?[] values) =>
-        values.Any(value => !string.IsNullOrWhiteSpace(value) && value.Contains(query, StringComparison.OrdinalIgnoreCase));
+    private static bool TextMatches(string query, string mode, params string?[] values)
+    {
+        var needle = query.Trim();
+        if (string.IsNullOrWhiteSpace(needle)) return true;
+        var haystacks = values.Select(value => value?.Trim() ?? "").Where(value => !string.IsNullOrWhiteSpace(value)).ToList();
+        if (haystacks.Count == 0) return false;
+        mode = NormalizeSearchMode(mode);
+        if (mode == "allWords")
+        {
+            var combined = string.Join(" ", haystacks);
+            return SearchWords(needle).All(word => combined.Contains(word, StringComparison.OrdinalIgnoreCase));
+        }
+        return haystacks.Any(value => mode switch
+        {
+            "exact" => value.Equals(needle, StringComparison.OrdinalIgnoreCase),
+            "startsWith" => value.StartsWith(needle, StringComparison.OrdinalIgnoreCase),
+            "endsWith" => value.EndsWith(needle, StringComparison.OrdinalIgnoreCase),
+            _ => value.Contains(needle, StringComparison.OrdinalIgnoreCase)
+        });
+    }
+
+    private static string NormalizeSearchMode(string? mode) => (mode ?? "").Trim() switch
+    {
+        "exact" => "exact",
+        "startsWith" => "startsWith",
+        "endsWith" => "endsWith",
+        "allWords" => "allWords",
+        _ => "phrase"
+    };
+
+    private static List<string> SearchWords(string query) =>
+        query.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(word => word.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
     private static bool MatchesPlatformFilters(string value, AvatarSearchInput input)
     {
         var filters = OptionFilterValues(input.PlatformFilters);
         if (filters.Count == 0) return true;
-        return filters.SelectMany(PlatformFilterAliases).Any(filter => TextMatches(filter, value));
+        return filters.SelectMany(PlatformFilterAliases).Any(filter => TextMatches(filter, "phrase", value));
     }
 
     private static IEnumerable<string> PlatformFilterAliases(string value)
@@ -7987,7 +8049,7 @@ internal sealed class AvatarDatabaseClient
     private static bool IsAuthorIdOnlySearch(AvatarSearchInput input) =>
         input.SearchAuthor && !input.SearchAvatar && !input.SearchDescription && !input.SearchTags && !HasOptionFilter(input) && !string.IsNullOrWhiteSpace(input.AuthorId);
     private static string SearchCacheKey(AvatarSearchInput input, int page, int limit, string databasePath) =>
-        $"{Path.GetFullPath(databasePath)}\n{File.GetLastWriteTimeUtc(databasePath).Ticks}\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.PlatformFilters}\n{page}\n{limit}";
+        $"{Path.GetFullPath(databasePath)}\n{File.GetLastWriteTimeUtc(databasePath).Ticks}\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}\n{page}\n{limit}";
 
     private static string EscapeLike(string value) =>
         value.Replace(@"\", @"\\", StringComparison.Ordinal)
@@ -8094,7 +8156,7 @@ internal sealed record DiagnosticsResult(List<DiagnosticItem> Items);
 internal sealed record ExportResult(string Path);
 internal sealed record GroupClearResult(LibraryData Library, int Removed, string BackupPath);
 internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", bool HideLockedGroups = false, bool HideFullGroups = false, int SchemaVersion = 7);
-internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx");
+internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx", string SearchMode = "phrase");
 internal sealed record AvatarListResult(List<AvatarInput> Avatars);
 internal sealed record AvatarImageResolveInput(string AvatarId = "", string ImageUrl = "", string Name = "", string UserId = "", string DisplayName = "");
 internal sealed record AvatarDatabaseSearchResult(List<AvatarInput> Results, int Page, bool HasMore, DateTimeOffset CachedAt, int Total = 0);
