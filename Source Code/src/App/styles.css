@@ -295,13 +295,14 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
 .inline-login { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--glass-soft); }
 .inline-login .sort-control { width: 100%; }
 .inline-login .sort-menu { width: 100%; }
+.dialog-select-field { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
 .dialog-select-control { width: 100%; }
 .dialog-select-control .sort-menu { max-height: min(260px, 42vh); overflow-y: auto; overscroll-behavior: contain; }
-#saveAvatarGroupDialog { overflow: visible; }
-#saveAvatarGroupDialog .dialog-form { overflow: visible; }
-#saveAvatarGroupDialog .dialog-select-control { position: relative; z-index: 1200; }
-#saveAvatarGroupDialog .dialog-select-control.open { z-index: 1600; }
-#saveAvatarGroupDialog .dialog-select-control .sort-menu {
+#saveAvatarGroupDialog, #addDatabaseAvatarDialog { overflow: visible; }
+#saveAvatarGroupDialog .dialog-form, #addDatabaseAvatarDialog .dialog-form { overflow: visible; }
+#saveAvatarGroupDialog .dialog-select-control, #addDatabaseAvatarDialog .dialog-select-control { position: relative; z-index: 1200; }
+#saveAvatarGroupDialog .dialog-select-control.open, #addDatabaseAvatarDialog .dialog-select-control.open { z-index: 1600; }
+#saveAvatarGroupDialog .dialog-select-control .sort-menu, #addDatabaseAvatarDialog .dialog-select-control .sort-menu {
   max-height: clamp(170px, 44vh, 320px);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -371,7 +372,7 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
 .page-tabs .notification-bell-button[aria-expanded="true"] { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 30%, var(--glass-strong)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 10%, transparent), 0 0 18px color-mix(in srgb, var(--accent) 24%, transparent); transform: translateY(-1px); }
 .notification-bell-button .tab-badge { top: -4px; right: -5px; box-shadow: 0 0 0 2px color-mix(in srgb, var(--panel-2) 82%, black); }
 .bell-icon { width: 18px; height: 18px; display: block; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
-.notification-popover { position: absolute; right: 0; top: calc(100% + 8px); z-index: 1600; width: min(390px, calc(100vw - 32px)); max-height: min(560px, calc(100vh - 86px)); display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); border: 1px solid var(--line); border-radius: 10px; background: var(--popup-surface); backdrop-filter: var(--surface-filter); box-shadow: 0 22px 58px rgba(0,0,0,.48); overflow: hidden; }
+.notification-popover { position: fixed; right: 48px; top: 58px; z-index: 1700; width: min(390px, calc(100vw - 32px)); max-height: min(560px, calc(100vh - 86px)); display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); border: 1px solid var(--line); border-radius: 10px; background: var(--popup-surface); -webkit-backdrop-filter: var(--surface-filter); backdrop-filter: var(--surface-filter); box-shadow: 0 22px 58px rgba(0,0,0,.48); overflow: hidden; }
 .notification-popover[hidden] { display: none; }
 .notification-popover header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px 10px; }
 .notification-popover h3 { margin: 0; font-size: 20px; }
@@ -848,9 +849,15 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
 .empty-state { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(380px, calc(100% - 48px)); min-height: 126px; padding: 20px 22px; border: 1px solid var(--line); border-radius: 8px; background: var(--popup-surface); backdrop-filter: var(--surface-filter); text-align: center; box-shadow: 0 18px 38px rgba(0,0,0,.22); pointer-events: none; display: grid; place-content: center; gap: 7px; }
 .empty-state h3 { margin: 0; font-size: 17px; line-height: 1.2; color: var(--text); }
 .empty-state p { margin: 0 auto; max-width: 300px; color: var(--muted); line-height: 1.45; }
-dialog { border: 1px solid var(--line); border-radius: 8px; background: var(--popup-surface); backdrop-filter: var(--surface-filter); color: var(--text); width: min(520px, calc(100vw - 48px)); max-height: calc(100vh - 48px); padding: 0; overflow: hidden; box-shadow: 0 24px 70px rgba(0,0,0,.46); }
+dialog { position: relative; border: 1px solid var(--line); border-radius: 8px; background: var(--popup-surface); backdrop-filter: var(--surface-filter); color: var(--text); width: min(520px, calc(100vw - 48px)); max-height: calc(100vh - 48px); padding: 0; overflow: hidden; box-shadow: 0 24px 70px rgba(0,0,0,.46); }
+dialog:has(> .sort-menu:not([hidden])) { overflow: visible; }
 dialog.wide-dialog { width: min(1180px, calc(100vw - 32px)); }
-body.settings-live-preview #customizationDialog::backdrop { background: transparent; }
+body.settings-live-preview #customizationDialog::backdrop,
+body.settings-live-preview #backgroundActionDialog::backdrop {
+  background: transparent;
+  transition: none;
+}
+body.settings-live-preview::before { background: transparent; }
 #backgroundActionDialog, #backgroundActionDialog .dialog-form { overflow: visible; }
 body.background-effect-preview .app-shell,
 body.background-effect-preview #customizationDialog {
@@ -863,7 +870,11 @@ body.background-effect-preview #backgroundActionDialog {
   box-shadow: none;
   backdrop-filter: none;
 }
-body.background-effect-preview #backgroundActionDialog::backdrop { background: transparent; }
+body.background-effect-preview #customizationDialog::backdrop,
+body.background-effect-preview #backgroundActionDialog::backdrop {
+  background: transparent;
+  transition: none;
+}
 body.background-effect-preview::before { background: transparent; }
 body.background-effect-preview #backgroundActionDialog .dialog-form {
   background: transparent;

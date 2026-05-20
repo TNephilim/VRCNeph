@@ -318,7 +318,7 @@
       </section>
       <section id="messagesPage" class="workspace-page social-page" hidden>
         <header class="toolbar">
-          <div class="toolbar-title"><h2>Messages</h2><p id="messagesStatus">VRChat notification messages grouped by user.</p></div>
+          <div class="toolbar-title"><h2>Messages</h2><p id="messagesStatus">VRChat messages grouped by user.</p></div>
           <div class="toolbar-actions">
             <button id="clearMessagesBtn" type="button" class="danger">Clear Messages</button>
             <button id="refreshMessagesBtn" type="button" class="primary">Refresh</button>
@@ -385,32 +385,38 @@
   <dialog id="copyGroupDialog"><form method="dialog" class="dialog-form">
     <header><h3>Copy Group</h3><button type="button" class="icon-button" data-close="copyGroupDialog">x</button></header>
     <p id="copyGroupMessage" class="dialog-note"></p>
-    <label id="copyGroupTargetWrap" hidden>Target group
+    <div id="copyGroupTargetWrap" class="dialog-select-field" hidden><span>Target group</span>
       <div class="sort-control dialog-select-control copy-group-target-control">
         <button id="copyGroupTargetMenuBtn" type="button">Choose Group</button>
         <div id="copyGroupTargetMenu" class="sort-menu" hidden></div>
         <select id="copyGroupTargetInput" hidden></select>
       </div>
-    </label>
+    </div>
     <menu><button type="button" data-close="copyGroupDialog">Cancel</button><button id="copyGroupFullBtn" type="button">Copy Full Group</button><button id="copyGroupToExistingBtn" type="button" class="primary">Copy to Existing</button></menu>
   </form></dialog>
 
   <dialog id="addDatabaseAvatarDialog"><form method="dialog" class="dialog-form">
     <header><h3>Add to Group</h3><button type="button" class="icon-button" data-close="addDatabaseAvatarDialog">x</button></header>
-    <p id="addDatabaseAvatarName" class="dialog-note"></p><label>Group<select id="databaseAvatarGroupInput"></select></label>
+    <p id="addDatabaseAvatarName" class="dialog-note"></p><div class="dialog-select-field"><span>Group</span>
+      <div class="sort-control dialog-select-control">
+        <button id="databaseAvatarGroupMenuBtn" type="button" aria-expanded="false">Group</button>
+        <div id="databaseAvatarGroupMenu" class="sort-menu" hidden></div>
+        <select id="databaseAvatarGroupInput" hidden></select>
+      </div>
+    </div>
     <menu><button type="button" data-close="addDatabaseAvatarDialog">Cancel</button><button id="confirmAddDatabaseAvatarBtn" class="primary">Add Avatar</button></menu>
   </form></dialog>
 
   <dialog id="saveAvatarGroupDialog"><form method="dialog" class="dialog-form">
     <header><h3>Save Avatar</h3><button type="button" class="icon-button" data-close="saveAvatarGroupDialog">x</button></header>
     <p id="saveAvatarGroupName" class="dialog-note"></p>
-    <label>Group
+    <div class="dialog-select-field"><span>Group</span>
       <div class="sort-control dialog-select-control">
         <button id="saveAvatarGroupMenuBtn" type="button">Group</button>
         <div id="saveAvatarGroupMenu" class="sort-menu" hidden></div>
         <select id="saveAvatarGroupInput" hidden></select>
       </div>
-    </label>
+    </div>
     <menu><button type="button" data-close="saveAvatarGroupDialog">Cancel</button><button id="confirmSaveAvatarGroupBtn" class="primary">Save Avatar</button></menu>
   </form></dialog>
 

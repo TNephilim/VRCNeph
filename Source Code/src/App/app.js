@@ -541,7 +541,7 @@ async function loadMessageHistory() {
   const local = Array.isArray(localHistory) ? localHistory : [];
   let persisted = [];
   try { persisted = await api("messageHistoryLoad", {}, 30000); } catch { persisted = []; }
-  state.messageHistory = dedupeNotifications([...(persisted || []).map(normalizeNotification), ...local.map(normalizeNotification)]).slice(0, 2000);
+  state.messageHistory = dedupeNotifications([...(persisted || []).map(normalizeNotification), ...local.map(normalizeNotification)]).filter(isMessageHistoryItem).slice(0, 2000);
   persistMessageHistory();
   renderMessagesPage();
   if (state.activePage === "messages" || state.activePage === "notifications") renderSocialSidebar();
@@ -720,7 +720,7 @@ function renderPageTabs() {
   $("notificationsTabBtn").classList.toggle("active", state.activePage === "notifications");
   updateTabBadge("messagesTabBadge", unreadMessageCount());
   const notificationCount = unreadNotificationCount();
-  updateTabBadge("activityTabBadge", notificationCount);
+  updateTabBadge("activityTabBadge", 0);
   updateTabBadge("notificationsTabBadge", notificationCount);
 }
 function isNotificationPopoverOpen() {
@@ -730,7 +730,25 @@ function hideNotificationPopover() {
   const popover = $("notificationPopover");
   if (!popover) return;
   popover.hidden = true;
+  hideSortMenu("notificationFilterMenu", "notificationFilterMenuBtn");
   $("notificationBellBtn")?.setAttribute("aria-expanded", "false");
+}
+function positionNotificationPopover() {
+  const popover = $("notificationPopover");
+  const button = $("notificationBellBtn");
+  if (!popover || !button) return;
+  if (popover.parentElement !== document.body) document.body.append(popover);
+  const rect = button.getBoundingClientRect();
+  const padding = 16;
+  const gap = 8;
+  const width = Math.min(390, Math.max(240, window.innerWidth - padding * 2));
+  const left = Math.max(padding, Math.min(window.innerWidth - width - padding, rect.right - width));
+  const top = Math.min(window.innerHeight - 120, rect.bottom + gap);
+  popover.style.left = `${left}px`;
+  popover.style.right = "auto";
+  popover.style.top = `${Math.max(padding, top)}px`;
+  popover.style.width = `${width}px`;
+  popover.style.maxHeight = `${Math.max(180, window.innerHeight - Math.max(padding, top) - padding)}px`;
 }
 function toggleNotificationPopover(event) {
   event.stopPropagation();
@@ -738,6 +756,7 @@ function toggleNotificationPopover(event) {
   if (!popover) return;
   const opening = popover.hidden;
   hideSortMenu("notificationFilterMenu", "notificationFilterMenuBtn");
+  if (opening) positionNotificationPopover();
   popover.hidden = !opening;
   $("notificationBellBtn").setAttribute("aria-expanded", opening ? "true" : "false");
   if (!opening) return;
@@ -752,22 +771,25 @@ function updateTabBadge(id, count) {
   badge.textContent = count > 99 ? "99+" : String(count);
 }
 function unreadMessageCount() {
-  return (state.messageHistory || []).filter((item) => item.direction !== "outgoing" && !item.seen && !isLocalConversationMessage(item)).length;
+  return (state.messageHistory || []).filter((item) => isMessageHistoryItem(item) && item.direction !== "outgoing" && !item.seen && !isLocalConversationMessage(item)).length;
 }
 function unreadNotificationCount() {
   return (state.notifications.items || []).filter((item) => !item.seen).length;
 }
-function isImportantNotification(item) {
-  const bucket = notificationBucket(item);
-  return bucket === "invite" || bucket === "request" || isFriendRequestNotification(item);
-}
 function isLocalConversationMessage(item) {
   return String(item?.type || "").toLowerCase() === "localconversation";
+}
+function isMessageHistoryItem(item) {
+  if (!item) return false;
+  const type = String(item?.type || "").toLowerCase();
+  if (isLocalConversationMessage(item) || String(item?.direction || "").toLowerCase() === "outgoing") return true;
+  if (isFriendRequestNotification(item)) return false;
+  return type.includes("message") || type.includes("request") || notificationBucket(item) === "invite" || notificationBucket(item) === "request";
 }
 function markMessagesSeen() {
   let changed = false;
   state.messageHistory = (state.messageHistory || []).map((item) => {
-    if (item.seen || item.direction === "outgoing" || isLocalConversationMessage(item)) return item;
+    if (!isMessageHistoryItem(item) || item.seen || item.direction === "outgoing" || isLocalConversationMessage(item)) return item;
     changed = true;
     return { ...item, seen: true };
   });
@@ -1635,6 +1657,14 @@ function updateSaveAvatarGroupMenu() {
 function fillSaveAvatarGroupSelect(selectedId, options = {}) {
   fillSelectWithGroups($("saveAvatarGroupInput"), selectedId, options);
   updateSaveAvatarGroupMenu();
+}
+function updateDatabaseAvatarGroupMenu() {
+  updateSortButton("databaseAvatarGroupInput", "databaseAvatarGroupMenuBtn");
+  $("confirmAddDatabaseAvatarBtn").disabled = !$("databaseAvatarGroupInput").value;
+}
+function fillDatabaseAvatarGroupSelect(selectedId) {
+  fillSelectWithGroups($("databaseAvatarGroupInput"), selectedId);
+  updateDatabaseAvatarGroupMenu();
 }
 function fillCopyGroupTargets(sourceGroupId = "") {
   fillSelectWithGroups($("copyGroupTargetInput"), state.activeGroupId, { includeGroup: (groupId) => groupId !== sourceGroupId && canReplaceGroupIntoGroup(groupId) });
@@ -3126,8 +3156,7 @@ function renderAvatarDatabaseResults() {
 function openAddDatabaseAvatarDialog(avatar) {
   state.pendingDatabaseAvatar = avatar;
   $("addDatabaseAvatarName").textContent = `Choose a group for "${avatar.name || avatar.avatarId}".`;
-  fillSelectWithGroups($("databaseAvatarGroupInput"), state.activeGroupId);
-  $("confirmAddDatabaseAvatarBtn").disabled = !$("databaseAvatarGroupInput").value;
+  fillDatabaseAvatarGroupSelect(state.activeGroupId);
   $("addDatabaseAvatarDialog").showModal();
 }
 async function saveDatabaseAvatarToGroup(avatar, groupId, { focusTarget = false, confirm = false } = {}) {
@@ -3249,6 +3278,8 @@ function hideContextMenu() {
   hideSortMenu("bgEffectMenu", "bgEffectMenuBtn");
   hideSortMenu("backgroundEffectMenu", "backgroundEffectMenuBtn");
   hideSortMenu("inviteMessageSlotMenu", "inviteMessageSlotBtn");
+  hideSortMenu("saveAvatarGroupMenu", "saveAvatarGroupMenuBtn");
+  hideSortMenu("databaseAvatarGroupMenu", "databaseAvatarGroupMenuBtn");
   hideDatabaseFieldMenu();
 }
 function hideDatabaseFieldMenu() {
@@ -3273,6 +3304,7 @@ function closeOtherDropdownMenus(exceptMenuId = "") {
     ["backgroundEffectMenu", "backgroundEffectMenuBtn"],
     ["inviteMessageSlotMenu", "inviteMessageSlotBtn"],
     ["saveAvatarGroupMenu", "saveAvatarGroupMenuBtn"],
+    ["databaseAvatarGroupMenu", "databaseAvatarGroupMenuBtn"],
     ["copyGroupTargetMenu", "copyGroupTargetMenuBtn"],
     ["profileStatusMenu", "profileStatusMenuBtn"]
   ];
@@ -3353,10 +3385,10 @@ function containSortMenuWheel(menu) {
   if (!menu || menu.dataset.wheelContained === "true") return;
   menu.dataset.wheelContained = "true";
   menu.addEventListener("wheel", (event) => {
-    const maxScroll = menu.scrollHeight - menu.clientHeight;
-    if (maxScroll <= 0) return;
     event.preventDefault();
     event.stopPropagation();
+    const maxScroll = menu.scrollHeight - menu.clientHeight;
+    if (maxScroll <= 0) return;
     const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? menu.clientHeight : 1;
     menu.scrollTop = Math.min(maxScroll, Math.max(0, menu.scrollTop + event.deltaY * unit));
   }, { passive: false });
@@ -3369,6 +3401,25 @@ function restoreSortMenu(menu, button) {
 }
 function positionSortMenu(menu, button) {
   if (!menu || !button) return;
+  const openDialog = button.closest("dialog[open]");
+  if (openDialog) {
+    if (menu.parentElement !== openDialog) openDialog.append(menu);
+    const rect = button.getBoundingClientRect();
+    const dialogRect = openDialog.getBoundingClientRect();
+    const gap = 6;
+    const viewportPadding = 12;
+    const availableBelow = window.innerHeight - rect.bottom - viewportPadding - gap;
+    const maxHeight = Math.max(120, Math.min(320, availableBelow));
+    menu.style.position = "absolute";
+    menu.style.left = `${rect.left - dialogRect.left}px`;
+    menu.style.top = `${rect.bottom - dialogRect.top + gap}px`;
+    menu.style.bottom = "";
+    menu.style.width = `${rect.width}px`;
+    menu.style.maxHeight = `${maxHeight}px`;
+    menu.scrollTop = 0;
+    containSortMenuWheel(menu);
+    return;
+  }
   if (menu.parentElement !== document.body) document.body.append(menu);
   const rect = button.getBoundingClientRect();
   const gap = 6;
@@ -3380,6 +3431,7 @@ function positionSortMenu(menu, button) {
   menu.style.position = "fixed";
   menu.style.left = `${Math.max(viewportPadding, Math.min(rect.left, window.innerWidth - rect.width - viewportPadding))}px`;
   menu.style.top = openAbove ? `${Math.max(viewportPadding, rect.top - gap - maxHeight)}px` : `${rect.bottom + gap}px`;
+  menu.style.bottom = "";
   menu.style.width = `${rect.width}px`;
   menu.style.maxHeight = `${maxHeight}px`;
   menu.scrollTop = 0;
@@ -3413,6 +3465,8 @@ function cycleSortOption(event, selectId = "sortSelect", buttonId = "sortMenuBtn
   hideSortMenu("notificationFilterMenu", "notificationFilterMenuBtn");
   hideSortMenu("bgEffectMenu", "bgEffectMenuBtn");
   hideSortMenu("backgroundEffectMenu", "backgroundEffectMenuBtn");
+  hideSortMenu("saveAvatarGroupMenu", "saveAvatarGroupMenuBtn");
+  hideSortMenu("databaseAvatarGroupMenu", "databaseAvatarGroupMenuBtn");
   hideDatabaseFieldMenu();
   updateSortButton(selectId, buttonId);
   onChange();
@@ -3426,6 +3480,7 @@ function hideSortMenu(menuId = "sortMenu", buttonId = "sortMenuBtn") {
   menu.style.position = "";
   menu.style.left = "";
   menu.style.top = "";
+  menu.style.bottom = "";
   menu.style.width = "";
   menu.style.maxHeight = "";
   menu.scrollTop = 0;
@@ -3434,6 +3489,7 @@ function hideSortMenu(menuId = "sortMenu", buttonId = "sortMenuBtn") {
   button.closest(".sort-control")?.classList.remove("open");
   if (menuId === "backgroundEffectMenu") {
     document.body.classList.remove("background-effect-preview");
+    if (wasOpen) pulseSettingsLivePreview();
     if (wasOpen && menu.dataset.committed !== "true") applyActiveBackgroundEffect();
     delete menu.dataset.committed;
   }
@@ -6035,7 +6091,9 @@ function applyPipelineNotificationEvent(type, content = {}) {
   state.notifications.items = dedupeNotifications([item, ...state.notifications.items]);
   state.notifications.loaded = true;
   addMessageNotification(item, { popup: true });
-  addSocialActivity({ type, title: notificationTitle(item), detail: notificationDetail(item), userId: item.senderUserId || "", source: "Pipeline" });
+  if (!isMessageHistoryItem(item) && !isFriendRequestNotification(item)) {
+    addSocialActivity({ type, title: notificationTitle(item), detail: notificationDetail(item), userId: item.senderUserId || "", source: "Pipeline" });
+  }
   renderNotificationsPage();
   renderMessagesPage();
   renderPageTabs();
@@ -6109,6 +6167,7 @@ function notificationValueText(value) {
 }
 function addMessageNotification(item, { popup = false } = {}) {
   const normalized = normalizeNotification(item);
+  if (!isMessageHistoryItem(normalized)) return false;
   if (!normalized.senderUserId && !normalized.senderUsername) return;
   recordPlayerName(normalized.senderUserId, normalized.senderUsername, normalized.createdAt, "Messages");
   if (state.activePage === "messages" && normalized.direction !== "outgoing") normalized.seen = true;
@@ -6119,6 +6178,7 @@ function addMessageNotification(item, { popup = false } = {}) {
     renderMessagePopup();
   }
   renderPageTabs();
+  return true;
 }
 function ensureMessageConversationForUser(userId, displayName = "") {
   const id = String(userId || "").trim();
@@ -6510,13 +6570,11 @@ function notificationHtml(item) {
   </article>`;
 }
 function activityFilters() {
-  const socialItems = state.socialActivity || [];
-  const messageItems = state.messageHistory || [];
+  const socialItems = filteredSocialActivityItems();
   return [
     { id: "players", label: "Player Join/Leave", count: (state.playerActivityLog.items || []).length },
     { id: "worlds", label: "Worlds Viewed", count: socialItems.filter((item) => activityItemBucket(item) === "worlds").length },
     { id: "users", label: "Users Viewed", count: socialItems.filter((item) => activityItemBucket(item) === "users").length },
-    { id: "messages", label: "Messages / Invites", count: messageItems.length },
     { id: "all", label: "All Local Activity", count: socialItems.length }
   ];
 }
@@ -6534,23 +6592,21 @@ function activityItemBucket(item = {}) {
   if (type.includes("message") || type.includes("invite") || type.includes("notification")) return "messages";
   return "all";
 }
+function isActivityNotificationMessageOrRequest(item = {}) {
+  const type = String(item.type || "").toLowerCase();
+  const source = String(item.source || "").toLowerCase();
+  return type.includes("message") || type.includes("invite") || type.includes("request") || type.includes("notification") || source.includes("notification");
+}
+function filteredSocialActivityItems() {
+  return (state.socialActivity || []).filter((item) => !isActivityNotificationMessageOrRequest(item));
+}
 function activityListHtml(filter = "all") {
-  const items = filter === "all" ? state.socialActivity || [] : (state.socialActivity || []).filter((item) => activityItemBucket(item) === filter);
+  const sourceItems = filteredSocialActivityItems();
+  const items = filter === "all" ? sourceItems : sourceItems.filter((item) => activityItemBucket(item) === filter);
   if (!items.length) return `<div class="settings-empty"><h4>No activity yet</h4><p>Matching local activity will appear here.</p></div>`;
   return items.map((item) => `<article class="activity-item">
     <div>${activityTitleHtml(item)}<p>${escapeHtml(item.detail || item.source || "")}</p>${activityLinksHtml(item)}</div>
     <time>${escapeHtml(formatDateTime(item.timestamp))}</time>
-  </article>`).join("");
-}
-function messageActivityHtml() {
-  const items = state.messageHistory || [];
-  if (!items.length) return `<div class="settings-empty"><h4>No message activity</h4><p>Invite and request messages will appear here.</p></div>`;
-  const userIdForMessage = (item) => item.direction === "outgoing" ? item.recipientUserId : item.senderUserId;
-  const userNameForMessage = (item) => item.direction === "outgoing" ? item.recipientUsername : item.senderUsername;
-  const userLabelForMessage = (item) => readableActivityName(userNameForMessage(item), userIdForMessage(item) || "Unknown user");
-  return items.slice().sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)).map((item) => `<article class="activity-item ${escapeAttr(notificationBucket(item))}">
-    <div>${userIdForMessage(item) ? `<button type="button" data-activity-user="${escapeAttr(userIdForMessage(item))}" data-activity-user-name="${escapeAttr(userLabelForMessage(item))}">${activityUserEntityHtml(userIdForMessage(item), userLabelForMessage(item))}</button>` : `<strong>${escapeHtml(userNameForMessage(item) || "VRChat")}</strong>`}<p>${escapeHtml(messageConversationPreview(item) || notificationDetail(item) || "No message text.")}</p></div>
-    <time>${escapeHtml(formatDateTime(item.createdAt))}</time>
   </article>`).join("");
 }
 function activityTitleHtml(item = {}) {
@@ -6605,7 +6661,6 @@ function activityLinksHtml(item = {}) {
 function selectedActivityHtml() {
   const filter = activityFilters().some((item) => item.id === state.activityFilter) ? state.activityFilter : "players";
   if (filter === "players") return playerActivityLogHtml();
-  if (filter === "messages") return messageActivityHtml();
   return activityListHtml(filter);
 }
 function selectedActivityTitle() {
@@ -6812,6 +6867,7 @@ function openNotificationWorldDetails(world, options = {}) {
 function messageConversations() {
   const byUser = new Map();
   for (const item of state.messageHistory || []) {
+    if (!isMessageHistoryItem(item)) continue;
     const userId = item.senderUserId || item.senderUsername || "system";
     if (!byUser.has(userId)) {
       const friend = findSocialFriend(userId, item.senderUsername);
@@ -6909,7 +6965,7 @@ function renderMessagesPage() {
   if (!thread || !header || !status) return;
   const conversations = messageConversations();
   if (!state.selectedMessageUserId && conversations[0]) state.selectedMessageUserId = conversations[0].userId;
-  status.textContent = conversations.length ? `${conversations.length} conversation${conversations.length === 1 ? "" : "s"} from VRChat notifications.` : "No VRChat notification messages yet.";
+  status.textContent = conversations.length ? `${conversations.length} message conversation${conversations.length === 1 ? "" : "s"}.` : "No VRChat messages yet.";
   const selected = conversations.find((conversation) => conversation.userId === state.selectedMessageUserId) || conversations[0] || null;
   if (!selected) {
     header.innerHTML = `<h3>Select a conversation</h3>`;
@@ -7416,7 +7472,7 @@ function userPopupMetHistoryCompactHtml(friend, limit = 2) {
 function isFriendRequestNotification(notification) {
   const type = String(notification?.type || "").toLowerCase();
   const id = String(notification?.id || "").toLowerCase();
-  return Boolean(type === "friendrequest" || type === "friend-request" || id.startsWith("frq_"));
+  return Boolean(type === "friendrequest" || type === "friend-request" || (type.includes("friend") && type.includes("request")) || id.startsWith("frq_"));
 }
 function closeNotificationDetails() {
   $("notificationDetailsPanel").hidden = true;
@@ -11725,6 +11781,7 @@ $("groupList").addEventListener("drop", handleGroupListDrop);
 $("gridSizeInput").addEventListener("input", () => { state.settings.gridSize = Number($("gridSizeInput").value); applyGridSize(); queueSaveSettings(); });
 $("databaseGridSizeInput").addEventListener("input", () => { state.settings.databaseGridSize = Number($("databaseGridSizeInput").value); applyGridSize(); queueSaveSettings(); });
 window.addEventListener("resize", applyGridSize);
+window.addEventListener("resize", () => { if (isNotificationPopoverOpen()) positionNotificationPopover(); });
 window.addEventListener("resize", () => { if (_bgCanvas && _bgActive) { _bgCanvas.width = window.innerWidth; _bgCanvas.height = window.innerHeight; _bgState = {}; } });
 $("customizationBtn").addEventListener("click", openSettingsDialog);
 $("settingsCustomizationTab").addEventListener("click", () => setSettingsTab("customization"));
@@ -11966,9 +12023,24 @@ $("avatarDatabaseSearchInput").addEventListener("keydown", (event) => {
   }
   if (event.key === "Enter") { event.preventDefault(); runAvatarDatabaseSearch(0); }
 });
+$("databaseAvatarGroupMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "databaseAvatarGroupInput", "databaseAvatarGroupMenu", "databaseAvatarGroupMenuBtn", updateDatabaseAvatarGroupMenu));
+$("databaseAvatarGroupMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "databaseAvatarGroupInput", "databaseAvatarGroupMenuBtn", updateDatabaseAvatarGroupMenu), { passive: false });
 $("saveAvatarGroupMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "saveAvatarGroupInput", "saveAvatarGroupMenu", "saveAvatarGroupMenuBtn", updateSaveAvatarGroupMenu));
+$("saveAvatarGroupMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "saveAvatarGroupInput", "saveAvatarGroupMenuBtn", updateSaveAvatarGroupMenu), { passive: false });
+$("addDatabaseAvatarDialog").addEventListener("click", (event) => {
+  if (event.target.closest(".dialog-select-control") || event.target.closest("#databaseAvatarGroupMenu")) return;
+  hideSortMenu("databaseAvatarGroupMenu", "databaseAvatarGroupMenuBtn");
+});
+$("saveAvatarGroupDialog").addEventListener("click", (event) => {
+  if (event.target.closest(".dialog-select-control") || event.target.closest("#saveAvatarGroupMenu")) return;
+  hideSortMenu("saveAvatarGroupMenu", "saveAvatarGroupMenuBtn");
+});
 document.addEventListener("click", (event) => {
-  if (event.target.closest("#saveAvatarGroupDialog .dialog-select-control")) return;
+  if (event.target.closest("#addDatabaseAvatarDialog .dialog-select-control") || event.target.closest("#databaseAvatarGroupMenu")) return;
+  hideSortMenu("databaseAvatarGroupMenu", "databaseAvatarGroupMenuBtn");
+});
+document.addEventListener("click", (event) => {
+  if (event.target.closest("#saveAvatarGroupDialog .dialog-select-control") || event.target.closest("#saveAvatarGroupMenu")) return;
   hideSortMenu("saveAvatarGroupMenu", "saveAvatarGroupMenuBtn");
 });
 document.addEventListener("click", (event) => {
