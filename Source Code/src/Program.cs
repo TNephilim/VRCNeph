@@ -339,9 +339,9 @@ internal static class Program
                 "vrchatTwoFactor" => await VrChat.TwoFactorAsync(GetPayload<TwoFactorInput>(request)),
                 "vrchatUpdateCurrentUser" => await VrChat.UpdateCurrentUserAsync(GetPayload<VrChatProfileUpdateInput>(request)),
                 "vrchatLogout" => LogoutAndResetSyncedGroups(),
-                "vrchatPipelineStart" => Pipeline is null ? new VrChatPipelineStatus(false, "Unavailable", 0, "") : await Pipeline.StartAsync(),
+                "vrchatPipelineStart" => Pipeline is null ? VrChatPipelineStatus.Unavailable : await Pipeline.StartAsync(),
                 "vrchatPipelineStop" => PipelineStop(),
-                "vrchatPipelineStatus" => Pipeline?.Status() ?? new VrChatPipelineStatus(false, "Unavailable", 0, ""),
+                "vrchatPipelineStatus" => Pipeline?.Status() ?? VrChatPipelineStatus.Unavailable,
                 "vrchatSyncFavorites" => await Store.SyncVrChatFavoritesAsync(VrChat),
                 "vrchatSaveCurrentAvatar" => Store.SaveCurrentAvatar(await VrChat.CurrentAvatarAsync(), GetPayload<CurrentAvatarInput>(request).GroupId),
                 "vrchatCurrentAvatar" => await VrChat.CurrentAvatarAsync(),
@@ -480,7 +480,7 @@ internal static class Program
     private static VrChatPipelineStatus PipelineStop()
     {
         Pipeline?.Stop();
-        return Pipeline?.Status() ?? new VrChatPipelineStatus(false, "Stopped", 0, "");
+        return Pipeline?.Status() ?? VrChatPipelineStatus.Stopped;
     }
 
     private static async Task<SyncedAvatarOrderApplyResult> ApplySyncedAvatarOrderWithCloseBlock(SyncedAvatarOrderInput input)
@@ -1060,12 +1060,24 @@ internal sealed class AvatarStore
             if (lib.Groups.All(x => x.Id != input.GroupId)) throw new InvalidOperationException("Choose a valid group.");
             var now = DateTimeOffset.UtcNow;
             var avatar = !string.IsNullOrWhiteSpace(input.Id) ? lib.Avatars.FirstOrDefault(x => x.Id == input.Id) : null;
+            var cleanAvatarId = input.AvatarId?.Trim() ?? "";
+            if (avatar is null && !string.IsNullOrWhiteSpace(cleanAvatarId))
+            {
+                avatar = lib.Avatars.FirstOrDefault(x =>
+                    x.GroupId.Equals(input.GroupId, StringComparison.OrdinalIgnoreCase) &&
+                    x.AvatarId.Equals(cleanAvatarId, StringComparison.OrdinalIgnoreCase));
+                if (avatar is not null) PlaceAvatarAtTop(lib, avatar, input.GroupId);
+            }
             var oldGroupId = avatar?.GroupId ?? "";
             if ((avatar is null || !avatar.GroupId.Equals(input.GroupId, StringComparison.OrdinalIgnoreCase)) && IsPinnedSystemGroupId(input.GroupId))
             {
                 throw new InvalidOperationException("Recent and Deleted groups are managed automatically.");
             }
-            EnsureSyncedGroupCapacity(lib, input.GroupId, input.Id, input.AvatarId);
+            if (avatar is not null && AvatarExistsInGroup(lib, input.GroupId, cleanAvatarId, avatar.Id))
+            {
+                throw new InvalidOperationException("That avatar is already in the group.");
+            }
+            EnsureSyncedGroupCapacity(lib, input.GroupId, avatar?.Id ?? input.Id, cleanAvatarId);
             if (avatar is null)
             {
                 avatar = new AvatarFavorite { Id = NewId("local"), CreatedAt = now, Order = 0, Source = input.Source?.Trim() ?? "" };
@@ -1490,7 +1502,7 @@ internal sealed class AvatarStore
             NormalizeOrders(lib);
             _ = WriteAccountBackup(lib, "sync");
             PruneAccountBackups();
-            return new VrChatSyncResult(lib, imported.Groups.Count, imported.Avatars.Count, movedToDeleted.Count, movedToDeleted.Select(x => x.Name).ToList(), movedToDeleted, storedAvatarRefresh.ChangedAvatars.Count, storedAvatarRefresh.ChangedAvatars.Select(x => string.IsNullOrWhiteSpace(x.Name) ? x.AvatarId : x.Name).Where(x => !string.IsNullOrWhiteSpace(x)).ToList(), uploadedAvatars.Count, imported.Groups.Count, 0, []);
+            return new VrChatSyncResult(lib, imported.Groups.Count, imported.Avatars.Count, movedToDeleted.Count, movedToDeleted.Select(x => x.Name).ToList(), movedToDeleted, storedAvatarRefresh.ChangedAvatars.Count, storedAvatarRefresh.ChangedAvatars.Select(x => string.IsNullOrWhiteSpace(x.Name) ? x.AvatarId : x.Name).Where(x => !string.IsNullOrWhiteSpace(x)).ToList(), uploadedAvatars.Count, imported.FavoriteGroupLimit, 0, []);
         }
     }
     private async Task<StoredAvatarRefreshResult> RefreshStoredFavoriteAvatarsAsync(VrChatClient client)
@@ -1819,6 +1831,7 @@ internal sealed class AvatarStore
         Directory.CreateDirectory(_exportDirectory);
         Directory.CreateDirectory(_backupDirectory);
         EnsureDefaultGroups(lib, DateTimeOffset.UtcNow);
+        DeduplicateAvatarFavorites(lib);
         NormalizeOrders(lib);
         File.WriteAllText(_libraryPath, JsonSerializer.Serialize(lib, ProgramJson.Options));
         SaveSplitFiles(lib);
@@ -2490,6 +2503,21 @@ internal sealed class AvatarStore
         {
             avatar.Order = order++;
         }
+    }
+    private static void DeduplicateAvatarFavorites(LibraryData lib)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        lib.Avatars = lib.Avatars
+            .OrderBy(x => x.GroupId, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(x => x.Order)
+            .ThenBy(x => x.CreatedAt)
+            .Where(avatar =>
+            {
+                var avatarId = avatar.AvatarId?.Trim() ?? "";
+                if (string.IsNullOrWhiteSpace(avatarId)) return true;
+                return seen.Add($"{avatar.GroupId.Trim()}::{avatarId}");
+            })
+            .ToList();
     }
     private static void EnsureSyncedGroupCapacity(LibraryData lib, string groupId, string? existingId, string? avatarId)
     {
@@ -3932,6 +3960,9 @@ internal sealed class VrChatPipelineClient
     private string _state = "Stopped";
     private int _eventsReceived;
     private string _lastEventType = "";
+    private string _lastReceivedAt = "";
+    private int _reconnectAttempts;
+    private string _lastError = "";
 
     public VrChatPipelineClient(VrChatClient vrchat, Func<VrChatPipelineEvent, Task> onEvent, Func<VrChatPipelineStatus, Task> onStatus)
     {
@@ -3962,14 +3993,14 @@ internal sealed class VrChatPipelineClient
             _cts = null;
             _connected = false;
             _state = "Stopped";
-            status = new VrChatPipelineStatus(_connected, _state, _eventsReceived, _lastEventType);
+            status = CurrentStatusLocked();
         }
         _ = _onStatus(status);
     }
 
     public VrChatPipelineStatus Status()
     {
-        lock (_gate) return new VrChatPipelineStatus(_connected, _state, _eventsReceived, _lastEventType);
+        lock (_gate) return CurrentStatusLocked();
     }
 
     private async Task RunAsync(CancellationToken token)
@@ -3985,9 +4016,26 @@ internal sealed class VrChatPipelineClient
                 using var socket = new ClientWebSocket();
                 ConfigurePipelineSocket(socket);
                 await socket.ConnectAsync(uri, token);
+                lock (_gate)
+                {
+                    _reconnectAttempts = 0;
+                    _lastError = "";
+                }
                 await SetStateAsync(true, "Connected");
                 delay = TimeSpan.FromSeconds(2);
                 await ReceiveLoopAsync(socket, token);
+                if (!token.IsCancellationRequested)
+                {
+                    lock (_gate)
+                    {
+                        _connected = false;
+                        _reconnectAttempts++;
+                        _lastError = "Pipeline closed";
+                    }
+                    await SetStateAsync(false, "Reconnecting: pipeline closed");
+                    try { await Task.Delay(delay, token); } catch { break; }
+                    delay = TimeSpan.FromSeconds(Math.Min(60, delay.TotalSeconds * 1.7));
+                }
             }
             catch (OperationCanceledException)
             {
@@ -3995,6 +4043,12 @@ internal sealed class VrChatPipelineClient
             }
             catch (Exception ex)
             {
+                lock (_gate)
+                {
+                    _connected = false;
+                    _reconnectAttempts++;
+                    _lastError = ex.Message;
+                }
                 await SetStateAsync(false, $"Reconnecting: {ex.Message}");
                 try { await Task.Delay(delay, token); } catch { break; }
                 delay = TimeSpan.FromSeconds(Math.Min(60, delay.TotalSeconds * 1.7));
@@ -4028,6 +4082,7 @@ internal sealed class VrChatPipelineClient
             {
                 _eventsReceived++;
                 _lastEventType = evt.Type;
+                _lastReceivedAt = evt.ReceivedAt;
             }
             await _onEvent(evt);
         }
@@ -4051,30 +4106,37 @@ internal sealed class VrChatPipelineClient
 
     private static VrChatPipelineEvent? ParseEvent(string text)
     {
-        if (string.IsNullOrWhiteSpace(text)) return null;
-        using var doc = JsonDocument.Parse(text);
-        if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
-        var type = ReadString(doc.RootElement, "type") ?? "";
-        if (string.IsNullOrWhiteSpace(type)) return null;
-        JsonElement content;
-        if (doc.RootElement.TryGetProperty("content", out var rawContent))
+        try
         {
-            if (rawContent.ValueKind == JsonValueKind.String)
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            using var doc = JsonDocument.Parse(text);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+            var type = ReadString(doc.RootElement, "type") ?? "";
+            if (string.IsNullOrWhiteSpace(type)) return null;
+            JsonElement content;
+            if (doc.RootElement.TryGetProperty("content", out var rawContent))
             {
-                var contentText = rawContent.GetString() ?? "{}";
-                using var contentDoc = JsonDocument.Parse(string.IsNullOrWhiteSpace(contentText) ? "{}" : contentText);
-                content = contentDoc.RootElement.Clone();
+                if (rawContent.ValueKind == JsonValueKind.String)
+                {
+                    var contentText = rawContent.GetString() ?? "{}";
+                    using var contentDoc = JsonDocument.Parse(string.IsNullOrWhiteSpace(contentText) ? "{}" : contentText);
+                    content = contentDoc.RootElement.Clone();
+                }
+                else
+                {
+                    content = rawContent.Clone();
+                }
             }
             else
             {
-                content = rawContent.Clone();
+                content = doc.RootElement.Clone();
             }
+            return new VrChatPipelineEvent(type, content, DateTimeOffset.UtcNow.ToString("O"));
         }
-        else
+        catch (JsonException)
         {
-            content = doc.RootElement.Clone();
+            return null;
         }
-        return new VrChatPipelineEvent(type, content, DateTimeOffset.UtcNow.ToString("O"));
     }
 
     private async Task SetStateAsync(bool connected, string state)
@@ -4084,10 +4146,12 @@ internal sealed class VrChatPipelineClient
         {
             _connected = connected;
             _state = state;
-            status = new VrChatPipelineStatus(_connected, _state, _eventsReceived, _lastEventType);
+            status = CurrentStatusLocked();
         }
         await _onStatus(status);
     }
+
+    private VrChatPipelineStatus CurrentStatusLocked() => new(_connected, _state, _eventsReceived, _lastEventType, _lastReceivedAt, _reconnectAttempts, _lastError);
 
     private static string? ReadString(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 }
@@ -4095,6 +4159,7 @@ internal sealed class VrChatPipelineClient
 internal sealed class VrChatClient
 {
     private const int DefaultAvatarFavoriteGroupLimit = 1;
+    private const int DefaultWorldFavoriteGroupLimit = 4;
     private static readonly Uri ApiBase = new("https://api.vrchat.cloud/api/1/");
     private readonly CookieContainer _cookies = new();
     private readonly HttpClient _client;
@@ -4809,6 +4874,9 @@ internal sealed class VrChatClient
         var limit = Math.Clamp(input.Limit <= 0 ? 100 : input.Limit, 1, 100);
         var startOffset = Math.Max(0, input.Offset);
         var currentUser = await GetCurrentUserAsync();
+        var groupLimit = HasSupporterTag(currentUser)
+            ? await GetFavoriteGroupLimitAsync("world", DefaultWorldFavoriteGroupLimit)
+            : DefaultWorldFavoriteGroupLimit;
         var groups = new List<VrChatFavoriteGroupSummary>();
         var offset = startOffset;
         while (true)
@@ -4838,7 +4906,7 @@ internal sealed class VrChatClient
             offset += count;
             if (input.Offset > 0) break;
         }
-        return new VrChatFavoriteGroupsResult(groups, input.Offset > 0 && groups.Count == limit);
+        return new VrChatFavoriteGroupsResult(groups, input.Offset > 0 && groups.Count == limit, groupLimit);
     }
     public async Task<object> AddFavoriteWorldAsync(WorldFavoriteInput input)
     {
@@ -5105,7 +5173,8 @@ internal sealed class VrChatClient
     }
     public async Task<VrChatFavoriteImport> GetFavoriteAvatarsAsync()
     {
-        var groups = await GetFavoriteAvatarGroupsAsync();
+        var groupResult = await GetFavoriteAvatarGroupsAsync();
+        var groups = groupResult.Groups;
         var avatars = new List<VrChatGroupedAvatar>();
         var deletedAvatars = new List<VrChatGroupedAvatar>();
         foreach (var group in groups)
@@ -5196,7 +5265,7 @@ internal sealed class VrChatClient
                 .ThenBy(x => x.fallback)
                 .Select(x => x.item));
         }
-        return new VrChatFavoriteImport(groups, avatars, deletedAvatars);
+        return new VrChatFavoriteImport(groups, avatars, deletedAvatars, groupResult.FavoriteGroupLimit);
     }
     private async Task<List<VrChatFavoriteRef>> GetFavoriteAvatarRefsAsync(string tag)
     {
@@ -5240,10 +5309,12 @@ internal sealed class VrChatClient
             response.Dispose();
         }
     }
-    private async Task<List<VrChatRemoteGroup>> GetFavoriteAvatarGroupsAsync()
+    private async Task<(List<VrChatRemoteGroup> Groups, int FavoriteGroupLimit)> GetFavoriteAvatarGroupsAsync()
     {
         var currentUser = await GetCurrentUserAsync();
-        var groupLimit = await GetAvatarFavoriteGroupLimitAsync();
+        var groupLimit = HasSupporterTag(currentUser)
+            ? await GetFavoriteGroupLimitAsync("avatar", DefaultAvatarFavoriteGroupLimit)
+            : DefaultAvatarFavoriteGroupLimit;
         var groups = Enumerable.Range(1, groupLimit)
             .Select(i => new VrChatRemoteGroup($"avatars{i}", DefaultAvatarGroupName(i), i - 1))
             .ToDictionary(x => x.Tag, StringComparer.OrdinalIgnoreCase);
@@ -5286,7 +5357,7 @@ internal sealed class VrChatClient
             groups[group.Tag] = group with { DisplayName = displayName };
         }
 
-        return groups.Values.OrderBy(x => x.SortOrder).ThenBy(x => x.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
+        return (groups.Values.OrderBy(x => x.SortOrder).ThenBy(x => x.DisplayName, StringComparer.OrdinalIgnoreCase).ToList(), groupLimit);
     }
     private async Task<string> GetFavoriteAvatarGroupDisplayNameAsync(string tag, string ownerId, string fallback)
     {
@@ -5309,17 +5380,17 @@ internal sealed class VrChatClient
             return fallback;
         }
     }
-    private async Task<int> GetAvatarFavoriteGroupLimitAsync()
+    private async Task<int> GetFavoriteGroupLimitAsync(string favoriteType, int defaultLimit)
     {
         try
         {
             using var response = await _client.GetAsync("auth/user/favoritelimits");
-            if (!response.IsSuccessStatusCode) return DefaultAvatarFavoriteGroupLimit;
+            if (!response.IsSuccessStatusCode) return defaultLimit;
             using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
             if (doc.RootElement.TryGetProperty("maxFavoriteGroups", out var maxGroups) &&
-                maxGroups.TryGetProperty("avatar", out var avatarGroups) &&
-                avatarGroups.ValueKind == JsonValueKind.Number &&
-                avatarGroups.TryGetInt32(out var limit))
+                maxGroups.TryGetProperty(favoriteType, out var favoriteGroups) &&
+                favoriteGroups.ValueKind == JsonValueKind.Number &&
+                favoriteGroups.TryGetInt32(out var limit))
             {
                 return Math.Clamp(limit, 1, 24);
             }
@@ -5327,7 +5398,13 @@ internal sealed class VrChatClient
         catch
         {
         }
-        return DefaultAvatarFavoriteGroupLimit;
+        return defaultLimit;
+    }
+    private static bool HasSupporterTag(VrChatUserSummary user)
+    {
+        return (user.Tags ?? "")
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Any(tag => tag.Contains("system_supporter", StringComparison.OrdinalIgnoreCase) || tag.Contains("supporter", StringComparison.OrdinalIgnoreCase));
     }
     private static int ReadAvatarGroupOrder(string tag)
     {
@@ -8113,7 +8190,11 @@ internal static class ProgramJson
 internal sealed record ApiRequest(string Id, string Command, JsonElement Payload);
 internal sealed record ApiResponse(string? Id, bool Ok, object? Data, string? Error) { public static ApiResponse Success(string id, object? data) => new(id, true, data, null); public static ApiResponse Failure(string? id, string error) => new(id, false, null, error); }
 internal sealed record AppEvent(string Event, object Data) { public static AppEvent Push(string name, object data) => new(name, data); }
-internal sealed record VrChatPipelineStatus(bool Connected, string State, int EventsReceived, string LastEventType);
+internal sealed record VrChatPipelineStatus(bool Connected, string State, int EventsReceived, string LastEventType, string LastReceivedAt, int ReconnectAttempts, string LastError)
+{
+    public static readonly VrChatPipelineStatus Unavailable = new(false, "Unavailable", 0, "", "", 0, "");
+    public static readonly VrChatPipelineStatus Stopped = new(false, "Stopped", 0, "", "", 0, "");
+}
 internal sealed record VrChatPipelineEvent(string Type, JsonElement Content, string ReceivedAt);
 internal sealed class LibraryData { public List<AvatarGroup> Groups { get; set; } = []; public List<AvatarFavorite> Avatars { get; set; } = []; }
 internal sealed class AvatarGroup { public string Id { get; set; } = ""; public string Name { get; set; } = ""; public string Description { get; set; } = ""; public string Icon { get; set; } = ""; public string BackgroundFolder { get; set; } = ""; public string BackgroundEffect { get; set; } = "global"; public int Order { get; set; } public bool? ReorderLocked { get; set; } public DateTimeOffset CreatedAt { get; set; } public DateTimeOffset UpdatedAt { get; set; } }
@@ -8203,7 +8284,7 @@ internal sealed record VrChatWorldSummary(string Id, string Name, string AuthorN
 internal sealed record VrChatWorldInstanceSummary(string Id, string Location, int Occupants, string Type, string Region, bool IsLocked, bool IsAgeRestricted, string GroupId = "", string GroupName = "");
 internal sealed record VrChatWorldSearchResult(List<VrChatWorldSummary> Worlds, bool HasMore);
 internal sealed record VrChatFavoriteGroupSummary(string Id, string Name, string DisplayName, string Type, string Visibility = "", string RawJson = "");
-internal sealed record VrChatFavoriteGroupsResult(List<VrChatFavoriteGroupSummary> Groups, bool HasMore);
+internal sealed record VrChatFavoriteGroupsResult(List<VrChatFavoriteGroupSummary> Groups, bool HasMore, int FavoriteGroupLimit = 4);
 internal sealed record VrChatCurrentLocationResult(string Location, string WorldId, string InstanceId, VrChatWorldSummary? World);
 internal sealed record VrChatLogAvatarResult(bool Found, string AvatarId, string AvatarName, string LogPath, string Timestamp, string Message);
 internal sealed record VrChatNotificationSummary(string Id, string Type, string SenderUserId, string SenderUsername, string Message, string CreatedAt, bool Seen, string RawJson);
@@ -8218,7 +8299,7 @@ internal sealed record VrChatRemoteGroup(string Tag, string DisplayName, int Sor
 internal sealed record VrChatGroupedAvatar(string GroupTag, AvatarInput Avatar);
 internal sealed record VrChatFavoriteRef(string AvatarId, string RemoteFavoriteId);
 internal sealed record VrChatFavoriteRecompileResult(string Tag, int Removed, int Added);
-internal sealed record VrChatFavoriteImport(List<VrChatRemoteGroup> Groups, List<VrChatGroupedAvatar> Avatars, List<VrChatGroupedAvatar> DeletedAvatars);
+internal sealed record VrChatFavoriteImport(List<VrChatRemoteGroup> Groups, List<VrChatGroupedAvatar> Avatars, List<VrChatGroupedAvatar> DeletedAvatars, int FavoriteGroupLimit);
 internal sealed record DeletedAvatarMoveSummary(string Name, string Status);
 internal sealed record VrChatSyncResult(LibraryData Library, int GroupsSynced, int AvatarsSynced, int MovedToDeleted, List<string> DeletedAvatarNames, List<DeletedAvatarMoveSummary> DeletedAvatarResults, int UpdatedAvatars, List<string> UpdatedAvatarNames, int UploadedAvatars, int FavoriteGroupLimit, int ConflictCount = 0, List<string>? ConflictSummaries = null);
 internal sealed record PersistedCookieSession(List<PersistedCookie> Cookies);

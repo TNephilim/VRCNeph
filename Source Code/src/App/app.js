@@ -1,8 +1,19 @@
-const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", hideLockedGroups: false, hideFullGroups: false, schemaVersion: 7 };
+const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", hideLockedGroups: false, hideFullGroups: false, schemaVersion: 8 };
+const LIVE_SYNC_TIMING = {
+  favoriteSyncMs: 45 * 1000,
+  safetySyncMs: 10 * 60 * 1000,
+  foregroundRefreshMs: 2 * 60 * 1000,
+  worldHydrationSpacingMs: 900,
+  friendDetailRefreshDelayMs: 8 * 1000,
+  pipelineRestartMs: 30 * 1000,
+  favoriteFailureBackoffBaseMs: 30 * 1000,
+  favoriteFailureBackoffMaxMs: 5 * 60 * 1000
+};
 const AVATAR_PAGE_SIZE = 50;
 const SYNCED_GROUP_AVATAR_LIMIT = 50;
 const DEFAULT_WORLD_GROUP_KEY = "local_world_favorites";
 const FRIEND_DETAIL_CACHE_KEY = "vrcneph.friendDetailCache";
+const PIPELINE_EVENT_LOG_KEY = "vrcneph.pipelineEvents";
 const FRIEND_DETAIL_CACHE_LIMIT = 250;
 const FRIEND_DETAIL_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const FRIEND_DETAIL_REFRESH_MS = 5 * 60 * 1000;
@@ -55,6 +66,8 @@ const state = {
   syncQueue: [],
   syncQueueRunning: false,
   syncQueueStatus: { state: "idle", message: "" },
+  pendingSyncedAvatarRemovals: new Set(),
+  pendingSyncedFavoriteActions: new Map(),
   pendingMoveAvatarId: "",
   pendingMoveAvatarIds: [],
   pendingAvatarGroupAction: "",
@@ -76,6 +89,8 @@ const state = {
   vrchatFavoriteLiveSyncTimer: null,
   vrchatFavoriteLiveSyncDebounce: null,
   vrchatLastFavoriteLiveSyncAt: 0,
+  vrchatFavoriteSyncFailures: 0,
+  vrchatFavoriteSyncBackoffUntil: 0,
   vrchatLastForegroundSyncAt: 0,
   socialLastFocusRefreshAt: 0,
   vrchatLogAvatarPollTimer: null,
@@ -83,8 +98,13 @@ const state = {
   vrchatStartupSyncDone: false,
   vrchatSyncBusy: false,
   vrchatSyncLoggedIn: false,
-  vrchatPipeline: { connected: false, state: "Stopped", eventsReceived: 0, lastEventType: "" },
+  vrchatLoggingOut: false,
+  vrchatPipeline: { connected: false, state: "Stopped", eventsReceived: 0, lastEventType: "", lastReceivedAt: "", reconnectAttempts: 0, lastError: "" },
+  vrchatPipelineRestartTimer: null,
+  vrchatPipelineEvents: [],
+  liveValidation: { lastFriendMoveAt: "", lastStatusAt: "", lastAvatarAt: "", lastNotificationAt: "", lastFavoriteSyncAt: "", lastFavoriteSyncStatus: "" },
   vrchatAvatarFavoriteGroupLimit: 1,
+  vrchatWorldFavoriteGroupLimit: 4,
   settingsLogFilter: "all",
   settingsSaveTimer: null,
   settingsDraft: null,
@@ -111,6 +131,12 @@ const state = {
   playerNameHistory: {},
   playerEncounterHistory: {},
   friendPresenceById: {},
+  liveWorldCache: new Map(),
+  liveWorldHydrating: new Set(),
+  liveWorldHydrationQueue: [],
+  liveWorldHydrationTimer: null,
+  friendLiveRefreshTimers: new Map(),
+  friendLiveRefreshLastAt: new Map(),
   activityFilter: "players",
   socialActivity: [],
   messageHistory: [],
@@ -317,6 +343,7 @@ async function refreshCurrentLocationSilent() {
       state.vrchat.user.worldId = location?.worldId || location?.world?.id || "";
       state.vrchat.user.instanceId = location?.instanceId || "";
     }
+    if (location?.world?.id) rememberLiveWorld(location.world);
     renderAccount();
     if (state.social.selectedType === "profile") renderVrchatSocial();
     return location;
@@ -327,13 +354,24 @@ async function refreshCurrentLocationSilent() {
 }
 async function logoutVrChat() {
   state.syncedAvatarEdit = { groupId: "", avatarIds: [], backupPath: "", applying: false };
+  state.pendingSyncedAvatarRemovals.clear();
+  state.pendingSyncedFavoriteActions.clear();
+  state.vrchatLoggingOut = true;
   updateVrChatBackgroundSyncTimer(false);
-  state.vrchat = await api("vrchatLogout");
-  state.vrchatPipeline = { connected: false, state: "Stopped", eventsReceived: 0, lastEventType: "" };
-  state.library = await api("list");
-  state.activeGroupId = state.library.groups[0]?.id ?? null;
-  state.avatarPage = 0;
-  render();
+  clearTimeout(state.vrchatPipelineRestartTimer);
+  state.vrchatPipelineRestartTimer = null;
+  try {
+    state.vrchat = await api("vrchatLogout");
+    state.vrchatPipeline = { connected: false, state: "Stopped", eventsReceived: 0, lastEventType: "", lastReceivedAt: "", reconnectAttempts: 0, lastError: "" };
+    state.library = await api("list");
+    state.activeGroupId = state.library.groups[0]?.id ?? null;
+    state.avatarPage = 0;
+    render();
+  } finally {
+    state.vrchatLoggingOut = false;
+    clearTimeout(state.vrchatPipelineRestartTimer);
+    state.vrchatPipelineRestartTimer = null;
+  }
 }
 async function checkForUpdates({ automatic = false } = {}) {
   if (automatic && updatePromptShown) return;
@@ -394,18 +432,35 @@ async function loadBackground() {
   } catch { renderBackground(null); }
 }
 async function startVrchatPipeline() {
+  clearTimeout(state.vrchatPipelineRestartTimer);
+  state.vrchatPipelineRestartTimer = null;
+  if (!state.vrchat?.isLoggedIn) return;
   try {
     state.vrchatPipeline = await api("vrchatPipelineStart", {}, 45000);
     updatePipelineStatusText();
   } catch (e) {
-    state.vrchatPipeline = { connected: false, state: e.message, eventsReceived: 0, lastEventType: "" };
+    state.vrchatPipeline = { connected: false, state: e.message, eventsReceived: 0, lastEventType: "", lastReceivedAt: "", reconnectAttempts: 0, lastError: e.message };
     updatePipelineStatusText();
+    scheduleVrchatPipelineRestart();
   }
+}
+function scheduleVrchatPipelineRestart(delay = LIVE_SYNC_TIMING.pipelineRestartMs) {
+  if (!state.vrchat?.isLoggedIn || state.vrchatLoggingOut || state.vrchatPipelineRestartTimer) return;
+  state.vrchatPipelineRestartTimer = setTimeout(() => {
+    state.vrchatPipelineRestartTimer = null;
+    void startVrchatPipeline();
+  }, delay);
+}
+function pipelineNeedsFrontendRestart(status = state.vrchatPipeline) {
+  if (!state.vrchat?.isLoggedIn || state.vrchatLoggingOut || status?.connected) return false;
+  const label = String(status?.state || "").toLowerCase();
+  return label === "stopped" || label === "unavailable" || label.startsWith("failed") || label.startsWith("error");
 }
 function updatePipelineStatusText() {
   if (!state.vrchat?.isLoggedIn) return;
   const suffix = state.vrchatPipeline?.connected ? " Live sync connected." : state.vrchatPipeline?.state ? ` Live sync: ${state.vrchatPipeline.state}.` : "";
   if (state.activePage === "friends" && state.social.friendsLoaded) setSocialHeaderStatus("friends", `${state.social.friends.length} friends loaded.${suffix}`);
+  if (state.activePage === "worlds" && state.social.worldsLoaded) setSocialHeaderStatus("worlds", `${worldSocialStatusBase()}.${suffix}`);
 }
 function handleAppEvent(name, data) {
   if (name === "vrchatPipeline") handleVrchatPipelineEvent(data);
@@ -463,6 +518,8 @@ function loadFriendDetailCache() {
   return cache;
 }
 state.friendNotes = loadLocalJson("vrcneph.friendNotes", {});
+state.vrchatPipelineEvents = loadLocalJson(PIPELINE_EVENT_LOG_KEY, []);
+state.liveValidation = { ...state.liveValidation, ...loadLocalJson("vrcneph.liveValidation", {}) };
 state.friendDetailCache = loadFriendDetailCache();
 state.socialActivity = loadLocalJson("vrcneph.socialActivity", []);
 {
@@ -505,22 +562,47 @@ function isVrcPlusGroup(groupId) {
   const match = /^vrc_avatars(\d+)$/i.exec(String(groupId || ""));
   return Boolean(match && Number(match[1]) > 1);
 }
-function hasVrcPlusFavoriteGroups() { return Number(state.vrchatAvatarFavoriteGroupLimit || 1) > 1; }
+function favoriteGroupLimit(value, fallback = 1) {
+  const limit = Number(value);
+  return Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : fallback;
+}
+function currentUserHasVrcPlus() { return userHasVrcPlus(state.vrchat?.user || {}); }
+function hasVrcPlusFavoriteGroups() { return currentUserHasVrcPlus() && favoriteGroupLimit(state.vrchatAvatarFavoriteGroupLimit, 1) > 1; }
 function canAccessSyncedGroup(groupId) { return !isVrcPlusGroup(groupId) || hasVrcPlusFavoriteGroups(); }
 function shouldHideVrcPlusGroup(group) {
   if (!isVrcPlusGroup(group?.id)) return false;
-  return !canAccessSyncedGroup(group.id) || groupAvatars(group.id).length === 0;
+  return !canAccessSyncedGroup(group.id) && groupAvatars(group.id).length === 0;
+}
+function worldFavoriteGroupIndex(key = "") {
+  const match = /^worlds(\d+)$/i.exec(String(key || ""));
+  return match ? Number(match[1]) : 0;
+}
+function canAccessSyncedWorldGroup(key = "") {
+  const index = worldFavoriteGroupIndex(key);
+  if (!index || index <= 4) return true;
+  return currentUserHasVrcPlus() && index <= favoriteGroupLimit(state.vrchatWorldFavoriteGroupLimit, 4);
+}
+function shouldHideSyncedWorldGroup(group) {
+  return group?.type === "synced" && !canAccessSyncedWorldGroup(group.key) && !(group.worlds || []).length;
 }
 function isPinnedSystemGroup(groupId) { return isRecentGroup(groupId) || isDeletedGroup(groupId) || isUploadedGroup(groupId) || isUpdatedGroup(groupId); }
 function isDefaultReorderLockedGroup(groupId) { return isSyncedGroup(groupId) || isPinnedSystemGroup(groupId); }
-function canManuallyAddToGroup(groupId) { return !isPinnedSystemGroup(groupId); }
+function canManuallyAddToGroup(groupId) { return !isPinnedSystemGroup(groupId) && (!isSyncedGroup(groupId) || canAccessSyncedGroup(groupId)); }
 function canCopyGroupIntoGroup(groupId) { return !isSyncedGroup(groupId) && !isPinnedSystemGroup(groupId); }
-function readOnlyFavoriteGroupMessage() { return "Recent, Deleted, Uploaded, and Updated groups are managed automatically."; }
+function isReadOnlySyncedGroup(groupId = "") { return isSyncedGroup(groupId) && !canAccessSyncedGroup(groupId); }
+function sourceGroupCopyOnlyMessage(groupId = "") {
+  if (isReadOnlySyncedGroup(groupId)) return "You need VRC+ to move avatars out of this synced group. Copy them to a local group instead.";
+  return "Recent and Deleted avatars can only be copied to another group.";
+}
+function readOnlyFavoriteGroupMessage(groupId = "") {
+  if (isSyncedGroup(groupId) && !canAccessSyncedGroup(groupId)) return "You need VRC+ to edit this synced favorite group.";
+  return "Recent, Deleted, Uploaded, and Updated groups are managed automatically.";
+}
 function currentAvatarFavoriteTargetStatus(groupId = state.activeGroupId, avatarId = "") {
   const group = state.library.groups.find((item) => item.id === groupId);
   const id = String(avatarId || state.vrchat?.user?.currentAvatarId || state.currentAvatarSummary?.id || "").trim();
   if (!group) return { ok: false, code: "missing", group, reason: "Choose a valid group." };
-  if (!canManuallyAddToGroup(groupId)) return { ok: false, code: "readonly", group, reason: readOnlyFavoriteGroupMessage() };
+  if (!canManuallyAddToGroup(groupId)) return { ok: false, code: "readonly", group, reason: readOnlyFavoriteGroupMessage(groupId) };
   if (id && avatarAlreadyInGroup({ avatarId: id, id }, groupId)) return { ok: false, code: "duplicate", group, reason: "This avatar is already in that group." };
   if (isSyncedGroup(groupId) && groupAvatars(groupId).length >= SYNCED_GROUP_AVATAR_LIMIT) return { ok: false, code: "full", group, reason: `Synced VRChat groups can only contain ${SYNCED_GROUP_AVATAR_LIMIT} avatars.` };
   return { ok: true, code: "", group, reason: "" };
@@ -561,7 +643,6 @@ function exitSyncedAvatarEditMode(message = "") {
 }
 function groupMatchesFilter(group) {
   if (shouldHideVrcPlusGroup(group)) return false;
-  if (isSyncedGroup(group.id) && !canAccessSyncedGroup(group.id)) return false;
   if (state.groupFilter === "synced") return isSyncedGroup(group.id) || isUploadedGroup(group.id) || isUpdatedGroup(group.id) || isRecentGroup(group.id) || isDeletedGroup(group.id);
   if (state.groupFilter === "local") return isDefaultLocalGroup(group) || isCustomLocalGroup(group);
   return true;
@@ -935,7 +1016,7 @@ function renderGroups() {
         if (!canManuallyAddToGroup(group.id)) {
           state.dragSort = null;
           clearDragSortIndicators();
-          toast(readOnlyFavoriteGroupMessage());
+          toast(readOnlyFavoriteGroupMessage(group.id));
           return;
         }
         const draggedIds = state.dragSort.ids?.length ? [...state.dragSort.ids] : [state.dragSort.id];
@@ -1005,6 +1086,7 @@ function renderToolbar() {
   const synced = isSyncedGroup(group?.id);
   const systemGroup = isPinnedSystemGroup(group?.id);
   const managedReadOnlyGroup = isUploadedGroup(group?.id) || isUpdatedGroup(group?.id);
+  const syncedReadOnlyGroup = synced && !canAccessSyncedGroup(group?.id);
   const syncedEditVisible = canEditSyncedAvatarOrder(group);
   const syncedEditActive = isSyncedAvatarEditActive(group?.id);
   $("activeGroupName").textContent = group?.name ?? "Favorites";
@@ -1017,10 +1099,10 @@ function renderToolbar() {
   $("applySyncedAvatarOrderBtn").disabled = state.syncedAvatarEdit.applying;
   $("replaceSyncedGroupBtn").disabled = state.syncedAvatarEdit.applying;
   $("sortMenuBtn").disabled = syncedEditActive;
-  $("editGroupBtn").hidden = systemGroup || managedReadOnlyGroup;
+  $("editGroupBtn").hidden = systemGroup || managedReadOnlyGroup || syncedReadOnlyGroup;
   $("copyGroupBtn").hidden = systemGroup || managedReadOnlyGroup;
   $("deleteGroupBtn").hidden = systemGroup || synced || managedReadOnlyGroup;
-  $("addAvatarBtn").hidden = systemGroup || managedReadOnlyGroup;
+  $("addAvatarBtn").hidden = systemGroup || managedReadOnlyGroup || syncedReadOnlyGroup;
   $("equipRandomFavoriteBtn").hidden = isRecentGroup(group?.id) || isDeletedGroup(group?.id);
   $("favRouletteBtn").hidden = isRecentGroup(group?.id) || isDeletedGroup(group?.id);
   $("editGroupBtn").disabled = false;
@@ -1078,9 +1160,9 @@ function toolbarGroupDescription(group) {
   const count = group?.id ? groupAvatars(group.id).length : 0;
   if (!description) return "";
   const synced = /^Synced from VRChat favorite group ([^.]+)\.\s*(\d+) avatars\.\s*Last synced\s+(.+)$/i.exec(description);
-  if (synced) return { main: `VRChat ${synced[1]} - ${synced[2]} avatars`, sync: `Last synced ${synced[3]}` };
+  if (synced) return { main: `VRChat ${synced[1]} - ${count} avatar${count === 1 ? "" : "s"}`, sync: `Last synced ${synced[3]}` };
   const uploaded = /^Uploaded avatars from your VRChat account\.\s*(\d+) avatars\.\s*Last synced\s+(.+)$/i.exec(description);
-  if (uploaded) return { main: `Uploaded - ${uploaded[1]} avatars`, sync: `Last synced ${uploaded[2]}` };
+  if (uploaded) return { main: `Uploaded - ${count} avatar${count === 1 ? "" : "s"}`, sync: `Last synced ${uploaded[2]}` };
   if (isRecentGroup(group?.id)) return `Recent - ${count} avatar${count === 1 ? "" : "s"} detected`;
   if (isDeletedGroup(group?.id)) return `Deleted/private - ${count} archived avatar${count === 1 ? "" : "s"}`;
   if (isUpdatedGroup(group?.id)) return `Updated metadata - ${count} avatar${count === 1 ? "" : "s"} this sync`;
@@ -1143,12 +1225,15 @@ function renderAvatars() {
     const card = document.createElement("article");
     card.className = `avatar-card ${canReorderCurrentGroup ? "avatar-reorder-enabled" : "avatar-reorder-locked"} ${syncedEditActive ? "synced-edit-card" : ""}`;
     card.classList.toggle("selected", state.selectedAvatarIds.has(avatar.id));
+    const pendingFavorite = pendingSyncedFavoriteActionForAvatar(avatar);
+    card.classList.toggle("favorite-syncing", Boolean(pendingFavorite));
     card.dataset.avatarId = avatar.id;
     card.draggable = canReorderCurrentGroup || syncedReorderBlocked || canDragAvatarsToGroup;
     const image = avatar.thumbnailImageUrl || avatar.imageUrl;
     const reorderTitle = canReorderCurrentGroup ? "Drag to reorder" : canDragAvatarsToGroup ? "Drag to copy to another group" : "Enable edit mode to reorder synced avatars";
     const release = releaseStatusBadge(avatar.releaseStatus);
-    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name)}</div><div class="meta-line">${escapeHtml(displayAvatarAuthorName(avatar) || "Author unavailable")}</div><div class="badges">${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${platformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}</div></div></button><div class="avatar-card-footer"><button class="avatar-position" type="button" title="${reorderTitle}" ${canReorderCurrentGroup ? "" : "disabled"}>#${listPosition(orderedAvatars, avatar.id)}</button><button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
+    const syncBadge = pendingFavorite ? `<span class="avatar-sync-badge" title="${escapeAttr(pendingFavorite.desired === "remove" ? "Unfavorite syncing" : "Favorite syncing")}">${pendingFavorite.desired === "remove" ? "Removing" : "Syncing"}</span>` : "";
+    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name)}</div><div class="meta-line">${escapeHtml(displayAvatarAuthorName(avatar) || "Author unavailable")}</div><div class="badges">${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${platformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}</div></div></button><div class="avatar-card-footer"><button class="avatar-position" type="button" title="${reorderTitle}" ${canReorderCurrentGroup ? "" : "disabled"}>#${listPosition(orderedAvatars, avatar.id)}</button>${syncBadge}<button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
     bindAvatarImageFallback(card);
     card.querySelector("button").addEventListener("click", (event) => {
       if (event.ctrlKey || event.metaKey || event.shiftKey) {
@@ -3048,13 +3133,16 @@ function openAddDatabaseAvatarDialog(avatar) {
 async function saveDatabaseAvatarToGroup(avatar, groupId, { focusTarget = false, confirm = false } = {}) {
   const group = state.library.groups.find((x) => x.id === groupId);
   if (!avatar || !group) return;
-  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage()); return; }
+  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage(groupId)); return; }
   if (avatarAlreadyInGroup(avatar, groupId)) return showAvatarAlreadyInGroup(avatar, group);
   if (!syncedGroupHasCapacity(groupId, avatar.avatarId || avatar.id)) return;
+  const avatarId = avatar.avatarId || avatar.id;
+  if (toastDuplicatePendingFavoriteAction(avatarId, groupId, "add")) return;
   if (confirm && !await confirmAction({ title: "Save Avatar", message: `Save "${avatar.name || avatar.avatarId || "this avatar"}" to "${group.name}"?`, confirmLabel: "Save", confirmClass: "primary" })) return;
   try {
-    await pushSyncedAvatarAdd(avatar.avatarId || avatar.id, groupId);
     state.library = await api("saveAvatar", { ...avatar, id: "", groupId, source: avatar.source || (avatarDatabaseProvider() === "avtrzip" ? "avtrzip" : "avatar-database") });
+    const local = findLocalAvatarByFavorite(groupId, avatarId);
+    enqueueSyncedAvatarAdd(avatarId, groupId, { localId: local?.id || "", name: avatar.name || avatarId });
     if (focusTarget) {
       state.activeGroupId = groupId;
       state.avatarPage = 0;
@@ -4081,8 +4169,8 @@ async function moveAvatarToGroup(id, groupId, { confirm = true, focusTarget = tr
   const avatar = state.library.avatars.find((x) => x.id === id);
   const group = state.library.groups.find((x) => x.id === groupId);
   if (!avatar || !group || avatar.groupId === groupId) return;
-  if (isPinnedSystemGroup(avatar.groupId)) { toast("Recent and Deleted avatars can only be copied to another group."); return; }
-  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage()); return; }
+  if (isPinnedSystemGroup(avatar.groupId) || isReadOnlySyncedGroup(avatar.groupId)) { toast(sourceGroupCopyOnlyMessage(avatar.groupId)); return; }
+  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage(groupId)); return; }
   if (avatarAlreadyInGroup(avatar, groupId, id)) return showAvatarAlreadyInGroup(avatar, group);
   if (!syncedGroupHasCapacity(groupId, avatar.avatarId || avatar.id, id)) return;
   if (confirm && !await confirmAction({ title: "Move Avatar", message: `Move "${avatar.name || avatar.avatarId}" to "${group.name}"?`, confirmLabel: "Move", confirmClass: "primary" })) return;
@@ -4106,8 +4194,8 @@ async function moveAvatarsRelativeToTarget(ids, targetAvatar, placement, copy = 
   const targetGroupId = targetAvatar?.groupId;
   const targetGroup = state.library.groups.find((x) => x.id === targetGroupId);
   if (!sourceAvatar || !targetAvatar || !targetGroup || sourceAvatar.groupId === targetGroupId) return;
-  if (!copy && isPinnedSystemGroup(sourceAvatar.groupId)) { toast("Recent and Deleted avatars can only be copied to another group."); return; }
-  if (!canManuallyAddToGroup(targetGroupId)) { toast(readOnlyFavoriteGroupMessage()); return; }
+  if (!copy && (isPinnedSystemGroup(sourceAvatar.groupId) || isReadOnlySyncedGroup(sourceAvatar.groupId))) { toast(sourceGroupCopyOnlyMessage(sourceAvatar.groupId)); return; }
+  if (!canManuallyAddToGroup(targetGroupId)) { toast(readOnlyFavoriteGroupMessage(targetGroupId)); return; }
   if (isSyncedGroup(targetGroupId)) { toast("Move before, move after, copy before, and copy after are only available for local groups."); return; }
   if (avatarAlreadyInGroup(sourceAvatar, targetGroupId, id)) return showAvatarAlreadyInGroup(sourceAvatar, targetGroup);
   const targetPosition = listPosition(orderedGroupAvatars(targetGroupId), targetAvatar.id);
@@ -4137,8 +4225,9 @@ async function moveOrCopyAvatarsRelativeToTarget(sourceAvatars, targetAvatar, pl
   const targetGroupId = targetAvatar?.groupId;
   const targetGroup = state.library.groups.find((x) => x.id === targetGroupId);
   if (!sourceAvatars.length || !targetAvatar || !targetGroup) return;
-  if (!copy && sourceAvatars.some((avatar) => isPinnedSystemGroup(avatar.groupId))) { toast("Recent and Deleted avatars can only be copied to another group."); return; }
-  if (!canManuallyAddToGroup(targetGroupId)) { toast(readOnlyFavoriteGroupMessage()); return; }
+  const copyOnlySource = sourceAvatars.find((avatar) => isPinnedSystemGroup(avatar.groupId) || isReadOnlySyncedGroup(avatar.groupId));
+  if (!copy && copyOnlySource) { toast(sourceGroupCopyOnlyMessage(copyOnlySource.groupId)); return; }
+  if (!canManuallyAddToGroup(targetGroupId)) { toast(readOnlyFavoriteGroupMessage(targetGroupId)); return; }
   if (isSyncedGroup(targetGroupId)) { toast("Move before, move after, copy before, and copy after are only available for local groups."); return; }
   const movable = sourceAvatars.filter((avatar) => avatar.groupId !== targetGroupId && !avatarAlreadyInGroup(avatar, targetGroupId, avatar.id));
   if (!movable.length) { showAvatarAlreadyInGroup(sourceAvatars[0], targetGroup); return; }
@@ -4180,8 +4269,8 @@ async function placeAvatarInGroupEnd(id, groupId, copy = false, { focusTarget = 
     if (position > 0) await reorderAvatar(id, groupId, position);
     return;
   }
-  if (!copy && isPinnedSystemGroup(sourceAvatar.groupId)) { toast("Recent and Deleted avatars can only be copied to another group."); return; }
-  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage()); return; }
+  if (!copy && (isPinnedSystemGroup(sourceAvatar.groupId) || isReadOnlySyncedGroup(sourceAvatar.groupId))) { toast(sourceGroupCopyOnlyMessage(sourceAvatar.groupId)); return; }
+  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage(groupId)); return; }
   if (isSyncedGroup(groupId)) { toast("Place here and copy here are only available for local groups."); return; }
   if (sourceAvatar.groupId !== groupId && avatarAlreadyInGroup(sourceAvatar, groupId, id)) return showAvatarAlreadyInGroup(sourceAvatar, targetGroup);
   try {
@@ -4203,8 +4292,9 @@ async function moveAvatarsToGroup(ids, groupId, { confirm = true, focusTarget = 
   const avatars = ids.map((id) => state.library.avatars.find((x) => x.id === id)).filter(Boolean).filter((avatar) => avatar.groupId !== groupId);
   const group = state.library.groups.find((x) => x.id === groupId);
   if (!avatars.length || !group) return;
-  if (avatars.some((avatar) => isPinnedSystemGroup(avatar.groupId))) { toast("Recent and Deleted avatars can only be copied to another group."); return; }
-  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage()); return; }
+  const copyOnlySource = avatars.find((avatar) => isPinnedSystemGroup(avatar.groupId) || isReadOnlySyncedGroup(avatar.groupId));
+  if (copyOnlySource) { toast(sourceGroupCopyOnlyMessage(copyOnlySource.groupId)); return; }
+  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage(groupId)); return; }
   const movable = avatars.filter((avatar) => !avatarAlreadyInGroup(avatar, groupId, avatar.id));
   if (!movable.length) { showAvatarAlreadyInGroup(avatars[0], group); return; }
   if (!syncedGroupHasCapacityForAvatars(groupId, movable.map((avatar) => avatar.avatarId || avatar.id))) return;
@@ -4233,8 +4323,8 @@ async function moveOrCopyAvatarsToGroup(ids, groupId, { focusTarget = true } = {
   const avatars = uniqueIds.map((id) => state.library.avatars.find((x) => x.id === id)).filter(Boolean);
   const group = state.library.groups.find((x) => x.id === groupId);
   if (!avatars.length || !group) return;
-  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage()); return; }
-  const copyOnly = avatars.some((avatar) => isPinnedSystemGroup(avatar.groupId));
+  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage(groupId)); return; }
+  const copyOnly = avatars.some((avatar) => isPinnedSystemGroup(avatar.groupId) || isReadOnlySyncedGroup(avatar.groupId));
   const movable = avatars.filter((avatar) => avatar.groupId !== groupId && !avatarAlreadyInGroup(avatar, groupId, avatar.id));
   if (!movable.length) { showAvatarAlreadyInGroup(avatars[0], group); return; }
   if (!syncedGroupHasCapacityForAvatars(groupId, movable.map((avatar) => avatar.avatarId || avatar.id))) return;
@@ -4246,10 +4336,10 @@ async function moveOrCopySingleAvatarToGroup(id, groupId, { focusTarget = true }
   const avatar = state.library.avatars.find((x) => x.id === id);
   const group = state.library.groups.find((x) => x.id === groupId);
   if (!avatar || !group || avatar.groupId === groupId) return;
-  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage()); return; }
+  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage(groupId)); return; }
   if (avatarAlreadyInGroup(avatar, groupId, id)) return showAvatarAlreadyInGroup(avatar, group);
   if (!syncedGroupHasCapacity(groupId, avatar.avatarId || avatar.id)) return;
-  const choice = await chooseMoveOrCopyAvatar(avatar, group, { copyOnly: isPinnedSystemGroup(avatar.groupId) });
+  const choice = await chooseMoveOrCopyAvatar(avatar, group, { copyOnly: isPinnedSystemGroup(avatar.groupId) || isReadOnlySyncedGroup(avatar.groupId) });
   if (choice === "copy") await copyAvatarToGroup(id, groupId, { focusTarget });
   else if (choice === "move") await moveAvatarToGroup(id, groupId, { confirm: false, focusTarget });
 }
@@ -4257,12 +4347,15 @@ async function copyAvatarToGroup(id, groupId, { focusTarget = true } = {}) {
   const avatar = state.library.avatars.find((x) => x.id === id);
   const group = state.library.groups.find((x) => x.id === groupId);
   if (!avatar || !group || avatar.groupId === groupId) return;
-  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage()); return; }
+  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage(groupId)); return; }
   if (avatarAlreadyInGroup(avatar, groupId, id)) return showAvatarAlreadyInGroup(avatar, group);
   if (!syncedGroupHasCapacity(groupId, avatar.avatarId || avatar.id)) return;
+  const avatarId = avatar.avatarId || avatar.id;
+  if (toastDuplicatePendingFavoriteAction(avatarId, groupId, "add")) return;
   try {
-    await pushSyncedAvatarAdd(avatar.avatarId || avatar.id, groupId);
     state.library = await api("copyAvatar", { avatarId: id, groupId });
+    const local = findLocalAvatarByFavorite(groupId, avatarId);
+    enqueueSyncedAvatarAdd(avatarId, groupId, { localId: local?.id || "", name: avatar.name || avatarId });
     if (focusTarget) state.activeGroupId = groupId;
     state.avatarPage = 0;
     $("sortSelect").value = "manual";
@@ -4316,7 +4409,151 @@ function createSyncAction(kind, label, payload = {}, attempt = 1) {
     attempt
   };
 }
-function enqueueVrChatAction({ kind, label, run, retries = 3, payload = {} }) {
+function syncedFavoriteKey(avatarId, groupId) {
+  const avatarKey = String(avatarId || "").trim().toLowerCase();
+  const groupKey = String(groupId || "").trim().toLowerCase();
+  return avatarKey && groupKey ? `${groupKey}::${avatarKey}` : "";
+}
+function syncedRemovalKey(avatarId, groupId) { return syncedFavoriteKey(avatarId, groupId); }
+function trackPendingSyncedAvatarRemoval(avatarId, groupId) {
+  trackPendingSyncedFavoriteAction({ avatarId, groupId, desired: "remove" });
+}
+function clearPendingSyncedAvatarRemoval(avatarId, groupId) {
+  clearPendingSyncedFavoriteAction(avatarId, groupId, "", "remove");
+}
+function trackPendingSyncedAvatarRemovals(removals) {
+  removals.filter(Boolean).forEach((removal) => trackPendingSyncedAvatarRemoval(removal.avatarId, removal.groupId));
+}
+function pendingSyncedFavoriteAction(avatarId, groupId) {
+  const key = syncedFavoriteKey(avatarId, groupId);
+  return key ? state.pendingSyncedFavoriteActions.get(key) || null : null;
+}
+function pendingSyncedFavoriteActionForAvatar(avatar) {
+  return pendingSyncedFavoriteAction(avatar?.avatarId || avatar?.id, avatar?.groupId);
+}
+function trackPendingSyncedFavoriteAction({ avatarId, groupId, desired, actionId = "", localId = "", label = "" } = {}) {
+  if (!state.vrchat?.isLoggedIn || !isSyncedGroup(groupId) || !avatarId || !desired) return null;
+  const key = syncedFavoriteKey(avatarId, groupId);
+  if (!key) return null;
+  const entry = { avatarId, groupId, desired, actionId, localId, label, startedAt: Date.now() };
+  state.pendingSyncedFavoriteActions.set(key, entry);
+  if (desired === "remove") state.pendingSyncedAvatarRemovals.add(key);
+  else state.pendingSyncedAvatarRemovals.delete(key);
+  renderSyncQueueStatus();
+  return entry;
+}
+function isCurrentPendingFavoriteAction(item) {
+  const favorite = syncActionFavoritePayload(item);
+  if (!favorite) return false;
+  const pending = pendingSyncedFavoriteAction(favorite.avatarId, favorite.groupId);
+  return Boolean(pending && pending.actionId === item.id && pending.desired === favorite.desired);
+}
+function clearPendingSyncedFavoriteAction(avatarId, groupId, actionId = "", desired = "") {
+  const key = syncedFavoriteKey(avatarId, groupId);
+  if (!key) return;
+  const current = state.pendingSyncedFavoriteActions.get(key);
+  if (!current) {
+    state.pendingSyncedAvatarRemovals.delete(key);
+    return;
+  }
+  if (actionId && current.actionId && current.actionId !== actionId) return;
+  if (desired && current.desired !== desired) return;
+  state.pendingSyncedFavoriteActions.delete(key);
+  state.pendingSyncedAvatarRemovals.delete(key);
+  renderSyncQueueStatus();
+}
+function syncActionFavoritePayload(item) {
+  const kind = String(item?.kind || "").toLowerCase();
+  if (kind !== "favorite-remove" && kind !== "favorite-add") return null;
+  const avatarId = item?.payload?.avatarId || item?.payload?.id || "";
+  const groupId = item?.payload?.groupId || "";
+  return avatarId && groupId ? { avatarId, groupId, desired: kind === "favorite-remove" ? "remove" : "add" } : null;
+}
+function clearPendingSyncActionFavorite(item) {
+  const favorite = syncActionFavoritePayload(item);
+  if (favorite) clearPendingSyncedFavoriteAction(favorite.avatarId, favorite.groupId, item.id, favorite.desired);
+}
+function reconcileFavoriteLibrary(library) {
+  if (!Array.isArray(library?.avatars)) return library;
+  const pending = state.pendingSyncedFavoriteActions;
+  const localPendingAdds = new Map();
+  if (pending.size) {
+    for (const action of pending.values()) {
+      if (action.desired !== "add") continue;
+      const local = state.library.avatars.find((avatar) => {
+        const key = syncedFavoriteKey(avatar.avatarId || avatar.id, avatar.groupId);
+        return key && key === syncedFavoriteKey(action.avatarId, action.groupId);
+      });
+      if (local) localPendingAdds.set(syncedFavoriteKey(action.avatarId, action.groupId), local);
+    }
+  }
+  const seen = new Set();
+  const avatars = [];
+  let changed = false;
+  for (const avatar of library.avatars) {
+    const key = syncedFavoriteKey(avatar?.avatarId || avatar?.id, avatar?.groupId);
+    const pendingAction = key ? pending.get(key) : null;
+    if (pendingAction?.desired === "remove") { changed = true; continue; }
+    if (key && seen.has(key)) { changed = true; continue; }
+    avatars.push(avatar);
+    if (key) seen.add(key);
+  }
+  for (const [key, avatar] of localPendingAdds) {
+    if (!seen.has(key)) {
+      avatars.push(avatar);
+      seen.add(key);
+      changed = true;
+    }
+  }
+  return changed ? { ...library, avatars } : library;
+}
+async function rollbackFailedSyncedFavoriteAdd(item) {
+  const payload = item.payload || {};
+  const avatarId = payload.avatarId || "";
+  const groupId = payload.groupId || "";
+  const localId = payload.localId || "";
+  const local = state.library.avatars.find((avatar) =>
+    (localId && avatar.id === localId) ||
+    (avatar.groupId === groupId && String(avatar.avatarId || avatar.id || "").toLowerCase() === String(avatarId || "").toLowerCase())
+  );
+  if (!local) return;
+  state.library = await api("deleteAvatar", { id: local.id });
+  render();
+}
+async function rollbackFailedSyncedFavoriteRemove(item) {
+  const result = await api("vrchatSyncFavorites");
+  state.library = reconcileFavoriteLibrary(result.library);
+  state.vrchatAvatarFavoriteGroupLimit = favoriteGroupLimit(result.favoriteGroupLimit, 1);
+  render();
+}
+async function handleFavoriteSyncActionFailure(item, error) {
+  const favorite = syncActionFavoritePayload(item);
+  const shouldRollback = favorite && isCurrentPendingFavoriteAction(item);
+  clearPendingSyncActionFavorite(item);
+  if (!shouldRollback || typeof item.onFailure !== "function") return;
+  try {
+    await item.onFailure(error, item);
+  } catch (rollbackError) {
+    toast(rollbackError?.message || String(rollbackError || "Favorite rollback failed."));
+  }
+}
+function syncedFavoriteActionAlreadyPending(avatarId, groupId, desired = "") {
+  const pending = pendingSyncedFavoriteAction(avatarId, groupId);
+  return Boolean(pending?.actionId && (!desired || pending.desired === desired));
+}
+function toastDuplicatePendingFavoriteAction(avatarId, groupId, desired) {
+  if (!syncedFavoriteActionAlreadyPending(avatarId, groupId, desired)) return false;
+  toast(desired === "add" ? "That favorite is already syncing." : "That unfavorite is already syncing.");
+  return true;
+}
+function findLocalAvatarByFavorite(groupId, avatarId) {
+  const normalized = String(avatarId || "").trim().toLowerCase();
+  return state.library.avatars.find((avatar) =>
+    avatar.groupId === groupId &&
+    String(avatar.avatarId || avatar.id || "").trim().toLowerCase() === normalized
+  );
+}
+function enqueueVrChatAction({ kind, label, run, retries = 3, payload = {}, onFailure = null, onSuccess = null }) {
   const item = {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     kind,
@@ -4324,8 +4561,21 @@ function enqueueVrChatAction({ kind, label, run, retries = 3, payload = {} }) {
     run,
     retries,
     payload,
+    onFailure,
+    onSuccess,
     attempt: 0
   };
+  const pendingFavorite = syncActionFavoritePayload(item);
+  if (pendingFavorite) {
+    trackPendingSyncedFavoriteAction({
+      avatarId: pendingFavorite.avatarId,
+      groupId: pendingFavorite.groupId,
+      desired: pendingFavorite.desired,
+      actionId: item.id,
+      localId: payload.localId || "",
+      label
+    });
+  }
   state.syncQueue.push(item);
   recordSyncAction(item, "queued");
   state.syncQueueStatus = { state: "waiting", message: `Queued: ${syncActionDisplayLabel(item)}` };
@@ -4351,6 +4601,8 @@ async function processVrChatSyncQueue() {
           const result = await item.run();
           recordSyncAction(item, "completed");
           done = true;
+          clearPendingSyncActionFavorite(item);
+          if (typeof item.onSuccess === "function") await item.onSuccess(result, item);
           if (result?.groups && result?.avatars) {
             state.library = result;
             renderGroups();
@@ -4361,7 +4613,9 @@ async function processVrChatSyncQueue() {
             const message = `${syncActionDisplayLabel(item)} failed: ${error.message || error}`;
             state.syncQueueStatus = { state: "failed", message };
             recordSyncAction(item, "failed", error.message || String(error));
-            showSyncFailureDialog(item, error);
+            const showFailure = !syncActionFavoritePayload(item) || isCurrentPendingFavoriteAction(item);
+            await handleFavoriteSyncActionFailure(item, error);
+            if (showFailure) showSyncFailureDialog(item, error);
             done = true;
           } else {
             const wait = syncRetryDelay(error, item.attempt - 1);
@@ -4413,10 +4667,10 @@ function showAvatarAlreadyInGroup(avatar, group) {
 }
 function chooseMoveOrCopyAvatar(avatar, group, { copyOnly = false } = {}) {
   return queueConfirmDialog(() => new Promise((resolve) => {
-    const moveDisabled = isPinnedSystemGroup(avatar.groupId);
+    const moveDisabled = isPinnedSystemGroup(avatar.groupId) || isReadOnlySyncedGroup(avatar.groupId);
     $("confirmDialogTitle").textContent = copyOnly ? "Copy Avatar" : "Move or Copy Avatar";
     $("confirmDeleteMessage").textContent = moveDisabled
-      ? `Recent and Deleted avatars can only be copied. Copy "${avatar.name || avatar.avatarId}" to "${group.name}"?`
+      ? `${sourceGroupCopyOnlyMessage(avatar.groupId)} Copy "${avatar.name || avatar.avatarId}" to "${group.name}"?`
       : `Move or copy "${avatar.name || avatar.avatarId}" to "${group.name}"?`;
     $("runConfirmBtn").textContent = "Move";
     $("runConfirmBtn").className = "primary";
@@ -4493,9 +4747,11 @@ async function pushSyncedAvatarAdd(avatarId, groupId) {
   const action = createSyncAction("favorite-add", `Favorite ${avatarId} to ${group?.name || groupId}`, { avatarId, groupId });
   state.syncQueueStatus = { state: "running", message: `${syncActionDisplayLabel(action)}...` };
   renderSyncQueueStatus();
+  trackPendingSyncedFavoriteAction({ avatarId, groupId, desired: "add", actionId: action.id, label: action.label });
   try {
     return await runRecordedSyncAction(action, () => api("vrchatFavoriteAdd", { avatarId, groupId }));
   } finally {
+    clearPendingSyncedFavoriteAction(avatarId, groupId, action.id, "add");
     if (state.syncQueueStatus.state !== "failed") state.syncQueueStatus = { state: "idle", message: "" };
     renderSyncQueueStatus();
   }
@@ -4506,21 +4762,37 @@ async function pushSyncedAvatarRemove(avatarId, groupId) {
   const action = createSyncAction("favorite-remove", `Unfavorite ${avatarId} from ${group?.name || groupId}`, { avatarId, groupId });
   state.syncQueueStatus = { state: "running", message: `${syncActionDisplayLabel(action)}...` };
   renderSyncQueueStatus();
+  trackPendingSyncedFavoriteAction({ avatarId, groupId, desired: "remove", actionId: action.id, label: action.label });
   try {
     return await runRecordedSyncAction(action, () => api("vrchatFavoriteRemove", { avatarId, groupId }));
   } finally {
+    clearPendingSyncedFavoriteAction(avatarId, groupId, action.id, "remove");
     if (state.syncQueueStatus.state !== "failed") state.syncQueueStatus = { state: "idle", message: "" };
     renderSyncQueueStatus();
   }
 }
+function enqueueSyncedAvatarAdd(avatarId, groupId, { localId = "", name = "" } = {}) {
+  if (!isSyncedGroup(groupId) || !state.vrchat?.isLoggedIn || !avatarId) return;
+  if (toastDuplicatePendingFavoriteAction(avatarId, groupId, "add")) return;
+  const group = state.library.groups.find((item) => item.id === groupId);
+  enqueueVrChatAction({
+    kind: "favorite-add",
+    label: `Favorite ${name || avatarId} to ${group?.name || groupId}`,
+    payload: { avatarId, groupId, localId },
+    run: () => api("vrchatFavoriteAdd", { avatarId, groupId }),
+    onFailure: rollbackFailedSyncedFavoriteAdd
+  });
+}
 function enqueueSyncedAvatarRemove(avatarId, groupId) {
   if (!isSyncedGroup(groupId) || !state.vrchat?.isLoggedIn || !avatarId) return;
+  if (toastDuplicatePendingFavoriteAction(avatarId, groupId, "remove")) return;
   const group = state.library.groups.find((item) => item.id === groupId);
   enqueueVrChatAction({
     kind: "favorite-remove",
     label: `Unfavorite ${avatarId} from ${group?.name || groupId}`,
     payload: { avatarId, groupId },
-    run: () => api("vrchatFavoriteRemove", { avatarId, groupId })
+    run: () => api("vrchatFavoriteRemove", { avatarId, groupId }),
+    onFailure: rollbackFailedSyncedFavoriteRemove
   });
 }
 function syncedAvatarRemovalPayload(avatar) {
@@ -4568,13 +4840,13 @@ async function refreshCurrentAvatarSummarySilent() {
   }
 }
 async function syncVrChatFavoritesSilent() {
-  if (!state.vrchat?.isLoggedIn || state.vrchatSyncBusy || state.syncedAvatarEdit.groupId || state.syncQueueRunning || state.syncQueue.length) return;
+  if (!state.vrchat?.isLoggedIn || state.vrchatSyncBusy || state.syncedAvatarEdit.groupId || state.syncQueueRunning || state.syncQueue.length || state.pendingSyncedFavoriteActions.size) return false;
   state.vrchatSyncBusy = true;
   try {
     const previousActiveId = state.activeGroupId;
     const result = await api("vrchatSyncFavorites");
-    state.library = result.library;
-    state.vrchatAvatarFavoriteGroupLimit = Number(result.favoriteGroupLimit || result.groupsSynced || 1);
+    state.library = reconcileFavoriteLibrary(result.library);
+    state.vrchatAvatarFavoriteGroupLimit = favoriteGroupLimit(result.favoriteGroupLimit, 1);
     if (result.movedToDeleted > 0) {
       showDeletedScanResult(result, { showEmpty: false });
     }
@@ -4595,31 +4867,63 @@ async function syncVrChatFavoritesSilent() {
       state.activeGroupId = desiredActiveId;
     }
     render();
-  } catch {
+    state.vrchatFavoriteSyncFailures = 0;
+    state.vrchatFavoriteSyncBackoffUntil = 0;
+    markLiveValidation("favoriteSync", "OK");
+    return true;
+  } catch (e) {
+    state.vrchatFavoriteSyncFailures = Math.min(8, Number(state.vrchatFavoriteSyncFailures || 0) + 1);
+    const backoff = Math.min(LIVE_SYNC_TIMING.favoriteFailureBackoffMaxMs, LIVE_SYNC_TIMING.favoriteFailureBackoffBaseMs * (2 ** (state.vrchatFavoriteSyncFailures - 1)));
+    state.vrchatFavoriteSyncBackoffUntil = Date.now() + backoff;
+    markLiveValidation("favoriteSync", e?.message || "Failed");
+    return false;
   } finally {
     state.vrchatSyncBusy = false;
+  }
+}
+async function syncVrChatFavoritesManual() {
+  if (!state.vrchat?.isLoggedIn) { toast("Log in to VRChat first."); return; }
+  if (state.syncQueueRunning || state.syncQueue.length || state.pendingSyncedFavoriteActions.size) { toast("Wait for favorite sync to finish first."); return; }
+  if (state.vrchatSyncBusy) return;
+  $("syncNowBtn").disabled = true;
+  $("syncNowBtn").textContent = "Syncing...";
+  try {
+    const synced = await syncVrChatFavoritesSilent();
+    await loadSyncCenter();
+    toast(synced ? "VRChat favorites synced." : "VRChat favorites did not sync.");
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    $("syncNowBtn").disabled = false;
+    $("syncNowBtn").textContent = "Sync Now";
   }
 }
 function requestLiveFavoriteSync(reason = "timer", { delay = 2500, minInterval = 30000 } = {}) {
   if (!state.vrchat?.isLoggedIn || state.syncedAvatarEdit.groupId || state.syncQueueRunning || state.syncQueue.length) return;
   if (document.hidden && reason !== "startup") return;
-  if ((reason === "focus" || reason === "visible") && state.vrchatPipeline?.connected) return;
+  const now = Date.now();
+  if (state.vrchatFavoriteSyncBackoffUntil && now < state.vrchatFavoriteSyncBackoffUntil && reason !== "startup") return;
+  const defaultMin = LIVE_SYNC_TIMING.favoriteSyncMs;
+  if (reason === "visible-interval" || reason === "timer") minInterval = defaultMin;
+  if (reason === "focus" || reason === "visible") minInterval = Math.max(defaultMin, LIVE_SYNC_TIMING.foregroundRefreshMs);
   clearTimeout(state.vrchatFavoriteLiveSyncDebounce);
   state.vrchatFavoriteLiveSyncDebounce = setTimeout(() => {
-    const now = Date.now();
-    if (state.vrchatSyncBusy || now - state.vrchatLastFavoriteLiveSyncAt < minInterval) return;
-    state.vrchatLastFavoriteLiveSyncAt = now;
+    const runAt = Date.now();
+    if (state.vrchatFavoriteSyncBackoffUntil && runAt < state.vrchatFavoriteSyncBackoffUntil && reason !== "startup") return;
+    if (state.vrchatSyncBusy || runAt - state.vrchatLastFavoriteLiveSyncAt < minInterval) return;
+    state.vrchatLastFavoriteLiveSyncAt = runAt;
     syncVrChatFavoritesSilent();
   }, delay);
 }
 function requestForegroundRefresh() {
   if (!state.vrchat?.isLoggedIn || document.hidden) return;
   const now = Date.now();
-  if (now - state.vrchatLastForegroundSyncAt < 120000) return;
+  const foregroundMs = LIVE_SYNC_TIMING.foregroundRefreshMs;
+  if (now - state.vrchatLastForegroundSyncAt < foregroundMs) return;
   state.vrchatLastForegroundSyncAt = now;
   void refreshCurrentLocationSilent();
-  requestLiveFavoriteSync("focus", { delay: 600, minInterval: 120000 });
-  if ((state.activePage === "friends" || state.activePage === "worlds") && now - state.socialLastFocusRefreshAt > 120000) {
+  requestLiveFavoriteSync("focus", { delay: 600, minInterval: foregroundMs });
+  if ((state.activePage === "friends" || state.activePage === "worlds") && now - state.socialLastFocusRefreshAt > foregroundMs) {
     state.socialLastFocusRefreshAt = now;
     if (state.activePage === "friends") void loadVrchatSocial();
     if (state.activePage === "worlds") void loadVrchatSocial({ worldsOnly: true });
@@ -4698,16 +5002,16 @@ function updateVrChatBackgroundSyncTimer(enabled = Boolean(state.vrchat?.isLogge
   };
   const liveSyncFavorites = () => {
     if (!state.vrchat?.isLoggedIn || document.hidden) return;
-    requestLiveFavoriteSync("visible-interval", { delay: 500, minInterval: 45000 });
+    requestLiveFavoriteSync("visible-interval", { delay: 500 });
   };
   pollLogAvatar();
   state.vrchatLogAvatarPollTimer = setInterval(pollLogAvatar, 8 * 1000);
   state.vrchatAvatarPollTimer = setInterval(pollCurrentAvatar, 45 * 1000);
-  state.vrchatFavoriteLiveSyncTimer = setInterval(liveSyncFavorites, 60 * 1000);
+  state.vrchatFavoriteLiveSyncTimer = setInterval(liveSyncFavorites, LIVE_SYNC_TIMING.favoriteSyncMs);
   state.vrchatBackgroundSyncTimer = setInterval(() => {
     if (!state.vrchat?.isLoggedIn) return;
     requestLiveFavoriteSync("safety", { delay: 500, minInterval: 60000 });
-  }, 10 * 60 * 1000);
+  }, LIVE_SYNC_TIMING.safetySyncMs);
 }
 function openPositionDialog(type, item) {
   if (type === "group" && isGroupReorderLocked(item)) return;
@@ -4749,6 +5053,7 @@ function stepBackgroundOpacity(delta) {
 }
 async function checkDeletedFavoritesManual() {
   if (!state.vrchat?.isLoggedIn) { toast("Log in to VRChat first."); return; }
+  if (state.syncQueueRunning || state.syncQueue.length || state.pendingSyncedFavoriteActions.size) { toast("Wait for favorite sync to finish first."); return; }
   if (state.vrchatSyncBusy) return;
   state.vrchatSyncBusy = true;
   const selectedGroupId = state.activeGroupId;
@@ -4757,8 +5062,8 @@ async function checkDeletedFavoritesManual() {
   toast("Checking VRChat favorites for deleted or private avatars...");
   try {
     const result = await api("vrchatSyncFavorites");
-    state.library = result.library;
-    state.vrchatAvatarFavoriteGroupLimit = Number(result.favoriteGroupLimit || result.groupsSynced || 1);
+    state.library = reconcileFavoriteLibrary(result.library);
+    state.vrchatAvatarFavoriteGroupLimit = favoriteGroupLimit(result.favoriteGroupLimit, 1);
     await refreshVrchatSessionSafe();
     if (state.library.groups.some((group) => group.id === "deleted_avatars")) state.activeGroupId = "deleted_avatars";
     else if (state.library.groups.some((group) => group.id === selectedGroupId)) state.activeGroupId = selectedGroupId;
@@ -5062,11 +5367,13 @@ async function loadSyncCenter() {
   const conflicts = $("syncCenterConflicts");
   const actions = $("syncCenterActions");
   health.innerHTML = `<div class="sync-health-main"><strong>Sync status</strong><span>Loading...</span></div>`;
+  renderPipelineDiagnostics();
   conflicts.innerHTML = `<div class="settings-empty"><h4>Loading VRChat changes</h4></div>`;
   actions.innerHTML = `<div class="settings-empty"><h4>Loading sync actions</h4></div>`;
   try {
     const [syncHealth, actionResult, conflictResult] = await Promise.all([api("syncHealth"), api("syncActionsList"), api("syncConflictsList")]);
     health.innerHTML = syncHealthHtml(syncHealth);
+    renderPipelineDiagnostics();
     const conflictRows = conflictResult.conflicts || [];
     conflicts.innerHTML = conflictRows.length
       ? syncConflictSectionHtml(conflictRows)
@@ -5081,6 +5388,71 @@ async function loadSyncCenter() {
     health.innerHTML = "";
     actions.innerHTML = `<div class="settings-empty"><h4>Could not load Sync Center</h4><p>${escapeHtml(e.message)}</p></div>`;
   }
+}
+function renderPipelineDiagnostics() {
+  const panel = $("pipelineDiagnostics");
+  if (!panel) return;
+  panel.innerHTML = pipelineDiagnosticsHtml();
+  bindPipelineDiagnostics(panel);
+}
+function pipelineDiagnosticsHtml() {
+  const status = state.vrchatPipeline || {};
+  const events = state.vrchatPipelineEvents || [];
+  const unknown = events.filter((event) => !event.handled);
+  const unknownTypes = groupedEventCounts(unknown);
+  const recent = events.slice(0, 20);
+  const connected = Boolean(status.connected);
+  return `<section class="pipeline-card">
+    <div class="pipeline-card-head"><strong>Live Pipeline</strong><span class="${connected ? "ok" : "bad"}">${escapeHtml(connected ? "Connected" : status.state || "Stopped")}</span></div>
+    <div class="pipeline-metrics"><span>Events</span><strong>${Number(status.eventsReceived || 0)}</strong><span>Last event</span><strong>${escapeHtml(status.lastEventType || "None")}</strong><span>Last received</span><strong>${escapeHtml(relativeTime(status.lastReceivedAt) || "Not seen")}</strong><span>Reconnects</span><strong>${Number(status.reconnectAttempts || 0)}</strong><span>World queue</span><strong>${state.liveWorldHydrationQueue.length} queued / ${state.liveWorldHydrating.size} loading</strong><span>Favorite backoff</span><strong>${escapeHtml(favoriteSyncBackoffLabel())}</strong><span>Unknown</span><strong>${unknown.length}</strong>${status.lastError ? `<span>Last error</span><strong>${escapeHtml(status.lastError)}</strong>` : ""}</div>
+    ${pipelineValidationHtml()}
+    <div class="pipeline-actions"><button type="button" data-pipeline-copy>Copy Events</button><button type="button" data-pipeline-clear>Clear Events</button></div>
+    ${unknownTypes.length ? `<details class="pipeline-events" open><summary>Unknown event types</summary>${unknownTypeSummaryHtml(unknownTypes)}${pipelineEventsHtml(unknown.slice(0, 10))}</details>` : ""}
+    <details class="pipeline-events"><summary>Recent pipeline events (${recent.length})</summary>${recent.length ? pipelineEventsHtml(recent) : `<p>No pipeline events received yet.</p>`}</details>
+  </section>`;
+}
+function favoriteSyncBackoffLabel() {
+  const remaining = Math.max(0, Number(state.vrchatFavoriteSyncBackoffUntil || 0) - Date.now());
+  if (!remaining) return "None";
+  const seconds = Math.ceil(remaining / 1000);
+  return seconds < 60 ? `${seconds}s` : `${Math.ceil(seconds / 60)}m`;
+}
+function pipelineValidationHtml() {
+  const v = state.liveValidation || {};
+  const item = (label, value, status = value ? "ok" : "") => `<span>${escapeHtml(label)}</span><strong class="${escapeAttr(status)}">${escapeHtml(value || "Not seen")}</strong>`;
+  return `<div class="pipeline-validation">
+    ${item("Friend movement", relativeTime(v.lastFriendMoveAt))}
+    ${item("Status changes", relativeTime(v.lastStatusAt))}
+    ${item("Avatar hints", relativeTime(v.lastAvatarAt))}
+    ${item("Notifications", relativeTime(v.lastNotificationAt))}
+    ${item("Favorite sync", [v.lastFavoriteSyncAt ? relativeTime(v.lastFavoriteSyncAt) : "", v.lastFavoriteSyncStatus].filter(Boolean).join(" - "), v.lastFavoriteSyncStatus === "OK" ? "ok" : v.lastFavoriteSyncStatus ? "bad" : "")}
+  </div>`;
+}
+function groupedEventCounts(events = []) {
+  const counts = new Map();
+  for (const event of events) counts.set(event.type || "unknown", (counts.get(event.type || "unknown") || 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+}
+function unknownTypeSummaryHtml(groups = []) {
+  return `<div class="pipeline-type-summary">${groups.map(([type, count]) => `<span>${escapeHtml(type)} <strong>${Number(count)}</strong></span>`).join("")}</div>`;
+}
+function pipelineEventsHtml(events = []) {
+  return `<div class="pipeline-event-list">${events.map((event) => `<article class="${event.handled ? "handled" : "unknown"}"><strong>${escapeHtml(event.type || "unknown")}</strong><span>${escapeHtml(event.handled ? "handled" : "unknown")}</span><small>${escapeHtml([relativeTime(event.receivedAt) || formatDateTime(event.receivedAt), event.userId, event.worldId || event.location].filter(Boolean).join(" - "))}</small>${event.keys?.length ? `<small>Keys: ${escapeHtml(event.keys.join(", "))}</small>` : ""}${event.sample ? `<code>${escapeHtml(event.sample)}</code>` : ""}</article>`).join("")}</div>`;
+}
+function bindPipelineDiagnostics(panel) {
+  panel.querySelector("[data-pipeline-copy]")?.addEventListener("click", copyPipelineEvents);
+  panel.querySelector("[data-pipeline-clear]")?.addEventListener("click", clearPipelineEvents);
+}
+async function copyPipelineEvents() {
+  const payload = JSON.stringify({ status: state.vrchatPipeline, validation: state.liveValidation, events: state.vrchatPipelineEvents || [] }, null, 2);
+  toast(await copyTextToClipboard(payload) ? "Pipeline events copied." : "Could not copy pipeline events.");
+}
+function clearPipelineEvents() {
+  state.vrchatPipelineEvents = [];
+  state.liveValidation = { lastFriendMoveAt: "", lastStatusAt: "", lastAvatarAt: "", lastNotificationAt: "", lastFavoriteSyncAt: "", lastFavoriteSyncStatus: "" };
+  saveLocalJson(PIPELINE_EVENT_LOG_KEY, state.vrchatPipelineEvents);
+  saveLocalJson("vrcneph.liveValidation", state.liveValidation);
+  renderPipelineDiagnostics();
 }
 async function dismissSyncAction(id) {
   try {
@@ -5114,9 +5486,9 @@ async function retrySyncAction(id) {
   }
   await dismissSyncAction(id);
   if (kind === "favorite-add") {
-    enqueueVrChatAction({ kind: "favorite-add", label: action.label || `Favorite ${avatarId}`, payload: { avatarId, groupId }, run: () => api("vrchatFavoriteAdd", { avatarId, groupId }) });
+    enqueueVrChatAction({ kind: "favorite-add", label: action.label || `Favorite ${avatarId}`, payload: { avatarId, groupId }, run: () => api("vrchatFavoriteAdd", { avatarId, groupId }), onFailure: rollbackFailedSyncedFavoriteAdd });
   } else if (kind === "favorite-remove") {
-    enqueueVrChatAction({ kind: "favorite-remove", label: action.label || `Unfavorite ${avatarId}`, payload: { avatarId, groupId }, run: () => api("vrchatFavoriteRemove", { avatarId, groupId }) });
+    enqueueVrChatAction({ kind: "favorite-remove", label: action.label || `Unfavorite ${avatarId}`, payload: { avatarId, groupId }, run: () => api("vrchatFavoriteRemove", { avatarId, groupId }), onFailure: rollbackFailedSyncedFavoriteRemove });
   } else if (kind === "equip-avatar") {
     enqueueVrChatAction({ kind: "equip-avatar", label: action.label || `Equip ${avatarId}`, payload: { avatarId }, run: () => api("vrchatSelectAvatar", { id: avatarId }) });
   } else if (kind === "synced-order") {
@@ -5224,6 +5596,11 @@ function setSocialHeaderStatus(kind, message) {
   const element = $(id);
   if (element) element.textContent = message;
 }
+function worldSocialStatusBase() {
+  const query = $("worldSearchInput")?.value?.trim?.() || "";
+  if (query) return state.social.worlds.length ? `${state.social.worlds.length} world search results` : "No world search results";
+  return `${state.social.worldSections.length || 0} world sections loaded`;
+}
 async function loadVrchatSocial({ worldsOnly = false } = {}) {
   if (!state.vrchat?.isLoggedIn) {
     clearTimeout(state.friendDetailLoadTimer);
@@ -5256,6 +5633,7 @@ async function loadVrchatSocial({ worldsOnly = false } = {}) {
       if (!query && state.social.worldSections.length) state.social.worldDiscoverySectionsCache = state.social.worldSections;
       state.social.favoriteWorlds = favorites.worlds || state.social.favoriteWorlds || [];
       state.social.favoriteWorldGroups = favoriteGroups.groups || state.social.favoriteWorldGroups || [];
+      state.vrchatWorldFavoriteGroupLimit = favoriteGroupLimit(favoriteGroups.favoriteGroupLimit, 4);
       state.social.worldsLoaded = true;
       state.social.loaded = state.social.friendsLoaded || state.social.worldsLoaded;
       setSocialHeaderStatus("worlds", query ? (state.social.worlds.length ? `${state.social.worlds.length} world search results.` : "No world search results.") : `${state.social.worldSections.length || 0} world sections loaded.`);
@@ -5285,33 +5663,120 @@ async function loadVrchatSocial({ worldsOnly = false } = {}) {
     renderVrchatSocial();
   }
 }
+function pipelineRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function pipelineFirstRecord(...values) {
+  return values.map(pipelineRecord).find((value) => Object.keys(value).length) || {};
+}
+function pipelineUserObject(content = {}) {
+  const item = pipelineRecord(content);
+  return pipelineFirstRecord(item.user, item.friend, item.sender, item.player, item.targetUser, item);
+}
+function pipelineWorldObject(content = {}, user = {}) {
+  const item = pipelineRecord(content);
+  const person = pipelineRecord(user);
+  return pipelineFirstRecord(item.world, item.locationWorld, person.world, person.currentWorld);
+}
+function pipelineText(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+  }
+  return "";
+}
 function handleVrchatPipelineEvent(event) {
   const type = String(event?.type || "").trim();
-  const content = event?.content || {};
+  const content = pipelineRecord(event?.content || {});
   state.vrchatPipeline = {
     connected: true,
     state: "Connected",
     eventsReceived: Number(state.vrchatPipeline?.eventsReceived || 0) + 1,
-    lastEventType: type
+    lastEventType: type,
+    lastReceivedAt: event?.receivedAt || new Date().toISOString(),
+    reconnectAttempts: Number(state.vrchatPipeline?.reconnectAttempts || 0),
+    lastError: ""
   };
   if (!type) return;
+  let handled = true;
   if (type.startsWith("friend-")) applyPipelineFriendEvent(type, content);
-  else if (type === "user-update") applyPipelineUserUpdate(content);
+  else if (type === "user-update" || type.startsWith("user-")) applyPipelineUserUpdate(content);
   else if (type.startsWith("notification")) applyPipelineNotificationEvent(type, content);
+  else handled = false;
+  recordVrchatPipelineEvent(type, content, { handled });
+  renderPipelineDiagnostics();
   updatePipelineStatusText();
+}
+function recordVrchatPipelineEvent(type, content = {}, { handled = false } = {}) {
+  const user = pipelineUserObject(content);
+  const world = pipelineWorldObject(content, user);
+  const location = pipelineText(content.location, user.location);
+  const worldId = pipelineText(content.worldId, user.worldId, world.id, worldIdFromLocation(location));
+  const userId = pipelineText(content.userId, content.senderUserId, content.id, user.id, user.userId);
+  const sample = pipelineEventSample(content);
+  state.vrchatPipelineEvents = [{
+    type,
+    handled,
+    userId,
+    worldId,
+    location,
+    keys: pipelineEventKeys(content),
+    sample,
+    receivedAt: new Date().toISOString()
+  }, ...(state.vrchatPipelineEvents || [])].slice(0, 250);
+  markLiveValidationForEvent(type, content);
+  saveLocalJson(PIPELINE_EVENT_LOG_KEY, state.vrchatPipelineEvents);
+}
+function pipelineEventKeys(content = {}) {
+  const user = pipelineUserObject(content);
+  const world = pipelineWorldObject(content, user);
+  return uniqueStrings([...Object.keys(content || {}), ...Object.keys(user || {}).map((key) => `user.${key}`), ...Object.keys(world || {}).map((key) => `world.${key}`)]).slice(0, 28);
+}
+function pipelineEventSample(content = {}) {
+  try {
+    return JSON.stringify(content).slice(0, 900);
+  } catch {
+    return "";
+  }
+}
+function markLiveValidationForEvent(type, content = {}) {
+  const user = pipelineUserObject(content);
+  const world = pipelineWorldObject(content, user);
+  if (type === "friend-location" || user.location || user.worldId || world.id || content.location || content.worldId) markLiveValidation("friendMove");
+  if (type === "friend-online" || type === "friend-offline" || type === "friend-active" || type === "friend-update" || user.status || content.status || user.statusDescription || content.statusDescription) markLiveValidation("status");
+  if (user.currentAvatarId || user.currentAvatarName || user.currentAvatarImageUrl || user.currentAvatarThumbnailImageUrl || content.currentAvatarId || content.currentAvatarName || content.currentAvatarImageUrl || content.currentAvatarThumbnailImageUrl) markLiveValidation("avatar");
+  if (type.startsWith("notification")) markLiveValidation("notification");
+}
+function markLiveValidation(kind, status = "") {
+  const now = new Date().toISOString();
+  if (kind === "friendMove") state.liveValidation.lastFriendMoveAt = now;
+  if (kind === "status") state.liveValidation.lastStatusAt = now;
+  if (kind === "avatar") state.liveValidation.lastAvatarAt = now;
+  if (kind === "notification") state.liveValidation.lastNotificationAt = now;
+  if (kind === "favoriteSync") {
+    state.liveValidation.lastFavoriteSyncAt = now;
+    state.liveValidation.lastFavoriteSyncStatus = status || "";
+  }
+  saveLocalJson("vrcneph.liveValidation", state.liveValidation);
+  renderPipelineDiagnostics();
 }
 function handleVrchatPipelineStatus(status = {}) {
   state.vrchatPipeline = {
     connected: Boolean(status.connected),
     state: status.state || "Unknown",
     eventsReceived: Number(status.eventsReceived || state.vrchatPipeline?.eventsReceived || 0),
-    lastEventType: status.lastEventType || state.vrchatPipeline?.lastEventType || ""
+    lastEventType: status.lastEventType || state.vrchatPipeline?.lastEventType || "",
+    lastReceivedAt: status.lastReceivedAt || state.vrchatPipeline?.lastReceivedAt || "",
+    reconnectAttempts: Number(status.reconnectAttempts || 0),
+    lastError: status.lastError || ""
   };
+  renderPipelineDiagnostics();
   updatePipelineStatusText();
+  if (pipelineNeedsFrontendRestart(state.vrchatPipeline)) scheduleVrchatPipelineRestart();
 }
 function applyPipelineFriendEvent(type, content = {}) {
-  const user = content.user || content;
-  const userId = content.userId || content.id || user.id || "";
+  const user = pipelineUserObject(content);
+  const userId = pipelineText(content.userId, content.senderUserId, content.id, user.id, user.userId);
   if (!userId) return;
   const existing = findListedFriendById(userId) || {};
   const patch = pipelineFriendPatch(type, user, content, existing);
@@ -5326,15 +5791,23 @@ function applyPipelineFriendEvent(type, content = {}) {
     worldId: patch.worldId || "",
     source: "Pipeline"
   });
+  hydrateLiveWorldForFriend(userId, patch);
+  requestPipelineFriendDetailRefresh(userId, patch);
   if (state.social.selectedType === "friend" && state.social.selectedItem?.id === userId) {
     state.social.selectedItem = applyFriendPresenceAuthority({ ...state.social.selectedItem, ...patch });
   }
-  if (state.activePage === "friends") renderVrchatSocial();
+  if (["friends", "messages", "notifications"].includes(state.activePage)) {
+    renderVrchatSocial();
+    renderMessagesPage();
+    renderNotificationsPage();
+  }
 }
 function pipelineFriendPatch(type, user = {}, content = {}, existing = {}) {
-  const directLocation = content.location || user.location || "";
+  const world = pipelineWorldObject(content, user);
+  if (world?.id) rememberLiveWorld(world);
+  const directLocation = pipelineText(content.location, user.location);
   const location = type === "friend-offline" ? "offline" : directLocation || (type === "friend-active" || type === "friend-online" ? "" : existing.location || "");
-  const stateValue = user.state || existing.state || "";
+  const stateValue = pipelineText(user.state, content.state, existing.state);
   const presenceSource = type === "friend-offline"
     ? "pipeline-offline"
     : type === "friend-online" || (type === "friend-location" && directLocation)
@@ -5344,15 +5817,18 @@ function pipelineFriendPatch(type, user = {}, content = {}, existing = {}) {
         : existing.presenceSource || "";
   const presence = normalizeFriendPresence({ ...existing, ...user, location, state: stateValue, presenceSource }, type);
   const online = presence !== "offline";
-  const worldId = worldIdFromLocation(location) || (directLocation ? user.worldId || "" : "") || (type === "friend-active" ? "" : existing.worldId || "");
+  const worldId = worldIdFromLocation(location) || (directLocation ? pipelineText(user.worldId, content.worldId, world.id) : "") || (type === "friend-active" ? "" : existing.worldId || "");
+  const worldName = pipelineText(user.worldName, user.currentWorldName, content.worldName, world.name, existing.worldName, existing.currentWorldName);
   return {
     ...user,
-    id: user.id || content.userId || existing.id || "",
-    displayName: user.displayName || content.displayName || existing.displayName || "",
+    id: pipelineText(user.id, user.userId, content.userId, content.senderUserId, content.id, existing.id),
+    displayName: pipelineText(user.displayName, user.username, content.displayName, content.senderUsername, content.senderName, existing.displayName),
     status: user.status || existing.status || "",
     statusDescription: user.statusDescription || existing.statusDescription || "",
     location,
     worldId,
+    worldName,
+    currentWorldName: worldName,
     imageUrl: user.currentAvatarThumbnailImageUrl || user.profilePicOverrideThumbnail || user.userIcon || user.profileImageUrl || existing.imageUrl || "",
     profileImageUrl: user.profileImageUrl || existing.profileImageUrl || "",
     profilePicOverride: user.profilePicOverride || existing.profilePicOverride || "",
@@ -5375,12 +5851,122 @@ function upsertSocialFriend(userId, patch) {
   const index = state.social.friends.findIndex((friend) => friend.id === userId);
   if (index >= 0) state.social.friends[index] = { ...state.social.friends[index], ...normalizedPatch };
   else state.social.friends.unshift(normalizedPatch);
+  state.social.favoriteFriends = (state.social.favoriteFriends || []).map((friend) => friend.id === userId ? { ...friend, ...normalizedPatch } : friend);
 }
 function worldIdFromLocation(location = "") {
   const text = String(location || "");
   if (!text.startsWith("wrld_")) return "";
   const colon = text.indexOf(":");
   return colon > 0 ? text.slice(0, colon) : text;
+}
+function rememberLiveWorld(world) {
+  if (!world?.id) return null;
+  const existing = state.liveWorldCache.get(String(world.id).toLowerCase()) || {};
+  const merged = { ...existing, ...world };
+  state.liveWorldCache.set(String(merged.id).toLowerCase(), merged);
+  rememberRecentWorld(merged);
+  return merged;
+}
+function hydrateLiveWorldForFriend(userId, friend = {}) {
+  const presence = friendPresence(friend);
+  if (presence === "offline") return;
+  const worldId = friend.worldId || worldIdFromLocation(friend.location || "");
+  if (!worldId) return;
+  const known = findKnownActivityWorld(worldId);
+  if (known?.name && known?.imageUrl) {
+    applyHydratedWorldToFriend(userId, known);
+    return;
+  }
+  queueLiveWorldHydration(worldId, { userId });
+}
+function queueLiveWorldHydration(worldId, options = {}) {
+  const id = String(worldId || "").trim();
+  const key = id.toLowerCase();
+  if (!id || state.liveWorldHydrationQueue.some((item) => item.key === key)) return;
+  state.liveWorldHydrationQueue.push({ key, worldId: id, options });
+  if (state.liveWorldHydrationTimer) return;
+  state.liveWorldHydrationTimer = setTimeout(processLiveWorldHydrationQueue, 350);
+}
+async function processLiveWorldHydrationQueue() {
+  state.liveWorldHydrationTimer = null;
+  const next = state.liveWorldHydrationQueue.shift();
+  if (next) await hydrateLiveWorld(next.worldId, next.options);
+  if (state.liveWorldHydrationQueue.length) state.liveWorldHydrationTimer = setTimeout(processLiveWorldHydrationQueue, LIVE_SYNC_TIMING.worldHydrationSpacingMs);
+  renderPipelineDiagnostics();
+}
+async function hydrateLiveWorld(worldId, { userId = "", currentLocation = false } = {}) {
+  const id = String(worldId || "").trim();
+  const key = id.toLowerCase();
+  if (!id || state.liveWorldHydrating.has(key)) return;
+  const known = findKnownActivityWorld(id);
+  if (known?.name && known?.imageUrl) {
+    if (userId) applyHydratedWorldToFriend(userId, known);
+    if (currentLocation) applyHydratedWorldToCurrentLocation(known);
+    return;
+  }
+  state.liveWorldHydrating.add(key);
+  if (!known) rememberLiveWorld({ id, name: id });
+  try {
+    const world = await api("vrchatWorldDetail", { id }, 45000);
+    if (world?.id) {
+      const cached = rememberLiveWorld(world);
+      if (userId) applyHydratedWorldToFriend(userId, cached);
+      if (currentLocation) applyHydratedWorldToCurrentLocation(cached);
+      if (state.activePage === "friends" || state.activePage === "worlds" || state.activePage === "notifications") {
+        renderVrchatSocial();
+        renderNotificationsPage();
+      }
+    }
+  } catch {
+  } finally {
+    state.liveWorldHydrating.delete(key);
+  }
+}
+function applyHydratedWorldToFriend(userId, world) {
+  const id = String(userId || "").trim();
+  if (!id || !world?.id) return;
+  const patchFriend = (friend) => String(friend.id || "") === id
+    ? { ...friend, worldId: world.id, worldName: world.name || friend.worldName || world.id, currentWorldName: world.name || friend.currentWorldName || world.id }
+    : friend;
+  state.social.friends = (state.social.friends || []).map(patchFriend);
+  state.social.favoriteFriends = (state.social.favoriteFriends || []).map(patchFriend);
+  if (state.social.selectedType === "friend" && state.social.selectedItem?.id === id) state.social.selectedItem = patchFriend(state.social.selectedItem);
+}
+function applyHydratedWorldToCurrentLocation(world) {
+  if (!world?.id || !state.social.location) return;
+  const currentId = state.social.location.worldId || state.social.location.world?.id || worldIdFromLocation(state.social.location.location || "");
+  if (String(currentId || "").toLowerCase() !== String(world.id).toLowerCase()) return;
+  state.social.location = { ...state.social.location, worldId: world.id, worldName: world.name || world.id, world };
+}
+function requestPipelineFriendDetailRefresh(userId, friend = {}) {
+  const id = String(userId || "").trim();
+  if (!id || !state.vrchat?.isLoggedIn) return;
+  const selected = state.social.selectedType === "friend" && state.social.selectedItem?.id === id;
+  const usefulPage = ["friends", "messages", "notifications"].includes(state.activePage);
+  const hasAvatarHint = Boolean(friend.currentAvatarId || friend.currentAvatarName || friend.currentAvatarImageUrl || friend.currentAvatarThumbnailImageUrl);
+  if (!selected && !usefulPage && !hasAvatarHint) return;
+  const last = state.friendLiveRefreshLastAt.get(id) || 0;
+  if (Date.now() - last < 60000) return;
+  clearTimeout(state.friendLiveRefreshTimers.get(id));
+  state.friendLiveRefreshTimers.set(id, setTimeout(async () => {
+    state.friendLiveRefreshTimers.delete(id);
+    state.friendLiveRefreshLastAt.set(id, Date.now());
+    try {
+      const detail = await api("vrchatFriendDetail", { id }, 45000);
+      if (!detail?.id) return;
+      const existing = findSocialFriend(id, detail.displayName || "") || {};
+      const merged = applyFriendPresenceAuthority({ ...existing, ...detail, presenceSource: existing.presenceSource || "pipeline-detail-refresh" });
+      cacheFriendDetail(merged);
+      upsertSocialFriend(id, merged);
+      if (state.social.selectedType === "friend" && state.social.selectedItem?.id === id) state.social.selectedItem = { ...state.social.selectedItem, ...merged };
+      if (state.activePage === "friends" || state.activePage === "messages" || state.activePage === "notifications") {
+        renderVrchatSocial();
+        renderMessagesPage();
+        renderNotificationsPage();
+      }
+    } catch {
+    }
+  }, LIVE_SYNC_TIMING.friendDetailRefreshDelayMs));
 }
 function instanceIdFromLocation(location = "") {
   const text = String(location || "");
@@ -5390,17 +5976,24 @@ function instanceIdFromLocation(location = "") {
 }
 function applyPipelineUserUpdate(content = {}) {
   if (!state.vrchat?.user) return;
-  const user = content.user || content;
-  if (user.id && user.id !== state.vrchat.user.id) return;
+  const user = pipelineUserObject(content);
+  const world = pipelineWorldObject(content, user);
+  const userId = pipelineText(user.id, user.userId, content.userId, content.id);
+  if (userId && userId !== state.vrchat.user.id) return;
+  if (world?.id) rememberLiveWorld(world);
   state.vrchat.user = { ...state.vrchat.user, ...user };
-  if (user.location || user.worldId || user.instanceId) {
+  updateCurrentAvatarFromLiveUser(user);
+  if (user.location || user.worldId || user.instanceId || world.id || content.location || content.worldId) {
+    const location = pipelineText(user.location, content.location, state.social.location?.location);
+    const worldId = pipelineText(user.worldId, content.worldId, world.id, worldIdFromLocation(location), state.social.location?.worldId, state.social.location?.world?.id);
     state.social.location = {
       ...(state.social.location || {}),
-      location: user.location || state.social.location?.location || "",
-      worldId: user.worldId || worldIdFromLocation(user.location || "") || state.social.location?.worldId || state.social.location?.world?.id || "",
-      instanceId: user.instanceId || instanceIdFromLocation(user.location || "") || state.social.location?.instanceId || "",
-      world: state.social.location?.world || null
+      location,
+      worldId,
+      instanceId: pipelineText(user.instanceId, content.instanceId, instanceIdFromLocation(location), state.social.location?.instanceId),
+      world: world?.id ? { ...(state.social.location?.world || {}), ...world } : state.social.location?.world || null
     };
+    if (worldId) queueLiveWorldHydration(worldId, { currentLocation: true });
   }
   if (state.social.selectedType === "profile") {
     state.social.selectedItem = {
@@ -5412,13 +6005,32 @@ function applyPipelineUserUpdate(content = {}) {
     renderVrchatSocial();
   }
   renderAccount();
+  if (state.activePage === "friends" || state.activePage === "worlds" || state.activePage === "notifications") renderVrchatSocial();
   void refreshCurrentLocationSilent();
 }
+function updateCurrentAvatarFromLiveUser(user = {}) {
+  const avatarId = user.currentAvatarId || avatarPublicId(user.currentAvatar || {}) || "";
+  const name = user.currentAvatarName || user.currentAvatar?.name || state.currentAvatarSummary?.name || avatarId;
+  const imageUrl = user.currentAvatarImageUrl || user.currentAvatar?.imageUrl || state.currentAvatarSummary?.imageUrl || "";
+  const thumbnailImageUrl = user.currentAvatarThumbnailImageUrl || user.currentAvatar?.thumbnailImageUrl || imageUrl || state.currentAvatarSummary?.thumbnailImageUrl || "";
+  if (!avatarId && !imageUrl && !thumbnailImageUrl) return;
+  state.currentAvatarSummary = {
+    id: avatarId || state.currentAvatarSummary?.id || "",
+    name: name || avatarId || state.currentAvatarSummary?.name || "",
+    imageUrl,
+    thumbnailImageUrl
+  };
+  if (avatarId && avatarId !== state.lastLoggedCurrentAvatarId) {
+    requestLiveFavoriteSync("pipeline-avatar-change", { delay: 1000, minInterval: 20000 });
+    void ensureCurrentAvatarLogged();
+  }
+}
 function applyPipelineNotificationEvent(type, content = {}) {
+  const senderUser = pipelineFirstRecord(content.sender, content.user, content.friend);
   const title = content.title || content.type || type;
-  const sender = content.senderUsername || content.senderName || content.sender?.displayName || "";
+  const sender = pipelineText(content.senderUsername, content.senderName, senderUser.displayName, senderUser.username);
   const message = notificationMessageText(content);
-  const item = normalizeNotification({ ...content, type, title, senderUsername: sender, message, seen: isNotificationPopoverOpen() });
+  const item = normalizeNotification({ ...content, type, title, senderUsername: sender, senderUserId: pipelineText(content.senderUserId, content.userId, senderUser.id, senderUser.userId), sender: senderUser, message, seen: isNotificationPopoverOpen() });
   recordPlayerName(item.senderUserId, item.senderUsername, item.createdAt, "Notification");
   state.notifications.items = dedupeNotifications([item, ...state.notifications.items]);
   state.notifications.loaded = true;
@@ -5455,7 +6067,8 @@ function friendEventTitle(type, friend) {
 }
 function friendEventDetail(type, friend) {
   if (type === "friend-offline") return "Offline";
-  return [friend.statusDescription, friend.worldId || friend.location, friend.state].filter(Boolean).join(" - ");
+  const knownWorld = findKnownActivityWorld(friend.worldId || worldIdFromLocation(friend.location || ""));
+  return [friend.statusDescription, friend.worldName || knownWorld?.name || friend.worldId || friend.location, friend.state].filter(Boolean).join(" - ");
 }
 function normalizeNotification(item = {}) {
   const id = item.id || item.notificationId || item.messageId || `${item.type || "notification"}-${item.createdAt || item.created_at || Date.now()}-${item.senderUserId || item.senderUsername || ""}`;
@@ -6149,6 +6762,7 @@ function findKnownActivityWorld(worldId = "", worldName = "") {
   const id = String(worldId || "").trim().toLowerCase();
   const name = String(worldName || "").trim().toLowerCase();
   const worlds = [
+    ...state.liveWorldCache.values(),
     ...(state.worldRecentWorlds || []),
     ...allLoadedWorlds(),
     state.social.location?.world,
@@ -7150,7 +7764,7 @@ function favoriteWorldGroupsModel(favorites = [], favoriteGroups = []) {
   const grouped = new Map();
   const groupOrder = [];
   const groupLabels = new Map();
-  for (let index = 1; index <= 4; index++) {
+  for (let index = 1; index <= favoriteGroupLimit(state.vrchatWorldFavoriteGroupLimit, 4); index++) {
     const key = `worlds${index}`;
     groupOrder.push(key);
     groupLabels.set(key, `Worlds ${index}`);
@@ -7179,8 +7793,9 @@ function favoriteWorldGroupsModel(favorites = [], favoriteGroups = []) {
     key,
     label: groupLabels.get(String(key).toLowerCase()) || favoriteGroupLabel(key, "Favorite Worlds"),
     worlds: grouped.get(key) || [],
-    type: "synced"
-  }));
+    type: "synced",
+    canAccess: canAccessSyncedWorldGroup(key)
+  })).filter((group) => !shouldHideSyncedWorldGroup(group));
 }
 function loadWorldLocalGroups() {
   try {
@@ -7375,6 +7990,7 @@ function canEditWorldGroup(group = selectedWorldGroupModel()) { return Boolean(g
 function canCopyWorldGroup(group = selectedWorldGroupModel()) { return Boolean(group && (group.type === "local" || group.type === "synced")); }
 function canDeleteWorldGroup(group = selectedWorldGroupModel()) { return Boolean(group && group.type === "local" && !isDefaultWorldLocalGroup(group.key)); }
 function canReorderWorldGroup(group = selectedWorldGroupModel()) { return Boolean(group && group.type === "local"); }
+function canEditSyncedWorldGroup(group = selectedWorldGroupModel()) { return Boolean(group && group.type === "synced" && canAccessSyncedWorldGroup(group.key)); }
 function sortedWorldGroupWorlds(group = selectedWorldGroupModel()) {
   const worlds = [...(group?.worlds || [])];
   const sort = group?.type === "local" ? state.worldGroupSort : state.worldGroupSort === "manual" ? "updatedDesc" : state.worldGroupSort;
@@ -7403,7 +8019,7 @@ function renderWorldGroupToolbar() {
   $("deleteWorldGroupBtn").hidden = !canDeleteWorldGroup(group);
   $("unfavoriteAllWorldsBtn").hidden = !inGroup;
   $("unfavoriteAllWorldsBtn").textContent = group?.type === "recent" ? "Clear Recents" : group?.type === "deleted" ? "Clear Deleted" : "Unfavorite All";
-  $("unfavoriteAllWorldsBtn").disabled = !group || !(group.worlds || []).length || group.type === "updated";
+  $("unfavoriteAllWorldsBtn").disabled = !group || !(group.worlds || []).length || group.type === "updated" || (group.type === "synced" && !canEditSyncedWorldGroup(group));
   $("copyWorldGroupBtn").disabled = !canCopyWorldGroup(group);
   if (inGroup) {
     $("worldSocialStatus").textContent = `${(group.worlds || []).length} world${(group.worlds || []).length === 1 ? "" : "s"} in this group.`;
@@ -7425,6 +8041,10 @@ function copyWorldGroup(group = selectedWorldGroupModel()) {
 async function unfavoriteAllWorldsInSelectedGroup() {
   const group = selectedWorldGroupModel();
   if (!group || !(group.worlds || []).length) return;
+  if (group.type === "synced" && !canEditSyncedWorldGroup(group)) {
+    toast("You need VRC+ to edit this synced favorite world group.");
+    return;
+  }
   const count = group.worlds.length;
   if (group.type === "recent") {
     state.worldRecentWorlds = [];
@@ -7457,16 +8077,16 @@ async function unfavoriteAllWorldsInSelectedGroup() {
 function writableWorldFavoriteGroups(worldId = "") {
   const id = String(worldId || "").toLowerCase();
   const syncedModels = favoriteWorldGroupsModel(state.social.favoriteWorlds, state.social.favoriteWorldGroups);
-  const synced = (state.social.favoriteWorldGroups || []).map((group) => {
-    const tag = group.name || group.id || "";
-    const model = syncedModels.find((item) => String(item.key || "").toLowerCase() === String(tag).toLowerCase());
-    const worlds = model?.worlds || [];
+  const synced = syncedModels.map((group) => {
+    const tag = group.key || "";
+    const worlds = group.worlds || [];
     return {
       key: tag,
       tag,
       type: "synced",
-      label: group.displayName || favoriteGroupLabel(group.name, "Favorite Worlds"),
+      label: group.label || favoriteGroupLabel(tag, "Favorite Worlds"),
       worlds,
+      canAccess: group.canAccess !== false,
       duplicate: Boolean(id && worlds.some((world) => String(world.id || "").toLowerCase() === id)),
       full: worlds.length >= SYNCED_GROUP_AVATAR_LIMIT
     };
@@ -7486,6 +8106,7 @@ function writableWorldFavoriteGroups(worldId = "") {
 }
 function currentWorldFavoriteTargetStatus(group, worldId = "") {
   if (!group) return { ok: false, reason: "Choose a valid world group." };
+  if (group.type === "synced" && !canAccessSyncedWorldGroup(group.key || group.tag)) return { ok: false, reason: "VRC+ required" };
   if (group.duplicate) return { ok: false, reason: "This world is already in that group." };
   if (group.full) return { ok: false, reason: `Synced VRChat groups can only contain ${SYNCED_GROUP_AVATAR_LIMIT} worlds.` };
   return { ok: true, reason: "" };
@@ -7685,7 +8306,8 @@ function userLocationCardData(user, presence = "") {
   const location = String(user?.location || "").trim();
   const worldId = String(user?.worldId || "").trim() || worldIdFromLocation(location);
   const instanceId = String(user?.instanceId || "").trim();
-  const worldName = String(user?.worldName || user?.currentWorldName || "").trim();
+  const knownWorld = findKnownActivityWorld(worldId);
+  const worldName = String(user?.worldName || user?.currentWorldName || knownWorld?.name || "").trim();
   const label = worldName || worldId || location || (normalizedPresence ? "Private location" : "");
   if (!label && !instanceId) return null;
   return {
@@ -7764,12 +8386,23 @@ function friendHtml(friend) {
   const presence = friendPresence(friend);
   const available = presence !== "offline";
   const rawLocation = String(friend.location || "").toLowerCase();
-  const location = available ? (rawLocation === "offline" ? presenceLabel(presence) : (friend.worldId || friend.location || presenceLabel(presence))) : "Offline";
+  const knownWorld = findKnownActivityWorld(friend.worldId || worldIdFromLocation(friend.location || ""));
+  const location = available ? (rawLocation === "offline" ? presenceLabel(presence) : (friend.worldName || knownWorld?.name || friend.worldId || friend.location || presenceLabel(presence))) : "Offline";
+  const freshness = friendFreshnessLabel(friend);
+  const locationLine = [location, freshness].filter(Boolean).join(" - ");
   const image = friendProfileImage(friend) || friend.imageUrl || "";
   const rankClass = trustClassName(trustRankLabel(splitCsv(friend.tags).map((tag) => tag.toLowerCase()))) || "visitor";
   const statusLine = available && friend.statusDescription ? `<span>${escapeHtml(friend.statusDescription)}</span>` : "";
   const selected = state.social.selectedType === "friend" && state.social.selectedItem?.id === friend.id;
-  return `<button type="button" class="social-card friend-card ${escapeAttr(presence)} ${selected ? "selected" : ""}" data-friend-id="${escapeAttr(friend.id)}" data-presence="${escapeAttr(presence)}"><span class="friend-card-avatar">${image ? `<img src="${escapeAttr(image)}" alt="">` : ""}${userStatusDotHtml(friend.status, presence, friendStatusLimited(friend, presence))}</span><div><strong class="friend-card-title"><span class="friend-name-rank ${escapeAttr(rankClass)}">${escapeHtml(friend.displayName || friend.id)}</span></strong>${statusLine}<small>${escapeHtml(location)}</small></div></button>`;
+  return `<button type="button" class="social-card friend-card ${escapeAttr(presence)} ${selected ? "selected" : ""}" data-friend-id="${escapeAttr(friend.id)}" data-presence="${escapeAttr(presence)}"><span class="friend-card-avatar">${image ? `<img src="${escapeAttr(image)}" alt="">` : ""}${userStatusDotHtml(friend.status, presence, friendStatusLimited(friend, presence))}</span><div><strong class="friend-card-title"><span class="friend-name-rank ${escapeAttr(rankClass)}">${escapeHtml(friend.displayName || friend.id)}</span></strong>${statusLine}<small>${escapeHtml(locationLine)}</small></div></button>`;
+}
+function friendFreshnessLabel(friend = {}) {
+  const authority = state.friendPresenceById?.[String(friend.id || "").toLowerCase()];
+  const source = String(friend.presenceSource || authority?.presenceSource || "").toLowerCase();
+  const seen = authority?.lastSeen || friend.lastSeen || "";
+  if (source.includes("pipeline")) return seen ? `Live ${relativeTime(seen)}` : "Live";
+  if (source.includes("friend-list") || source.includes("detail")) return seen ? `Updated ${relativeTime(seen)}` : "From refresh";
+  return "";
 }
 function friendProfileImage(friend) {
   return preferredUserCardImage(friend);
@@ -9623,6 +10256,7 @@ async function refreshFavoriteWorlds() {
   ]);
   state.social.favoriteWorlds = favorites.worlds || [];
   state.social.favoriteWorldGroups = groups.groups || [];
+  state.vrchatWorldFavoriteGroupLimit = favoriteGroupLimit(groups.favoriteGroupLimit, 4);
   renderVrchatSocial();
 }
 function currentInstanceIdForInvite() {
@@ -9781,9 +10415,12 @@ async function copyAvatarsToGroup(ids, groupId, { focusTarget = true } = {}) {
   if (!syncedGroupHasCapacityForAvatars(groupId, candidates.map((avatar) => avatar.avatarId || avatar.id))) return;
   let copied = 0;
   for (const avatar of candidates) {
+    const avatarId = avatar.avatarId || avatar.id;
+    if (syncedFavoriteActionAlreadyPending(avatarId, groupId, "add")) continue;
     try {
-      await pushSyncedAvatarAdd(avatar.avatarId || avatar.id, groupId);
       state.library = await api("copyAvatar", { avatarId: avatar.id, groupId });
+      const local = findLocalAvatarByFavorite(groupId, avatarId);
+      enqueueSyncedAvatarAdd(avatarId, groupId, { localId: local?.id || "", name: avatar.name || avatarId });
       copied++;
     } catch (e) { handleAvatarAddError(e); break; }
   }
@@ -9959,6 +10596,7 @@ async function clearBackgrounds(groupId = "") {
 async function applySettingsDialog() {
   state.settingsDraft = { ...(state.settingsDraft || {}), applied: true };
   await saveSettings();
+  updateVrChatBackgroundSyncTimer();
   $("customizationDialog").close();
 }
 function cancelSettingsDialog() {
@@ -9967,6 +10605,7 @@ function cancelSettingsDialog() {
     state.settings = { ...state.settingsDraft.original };
     state.settings.backgroundEffect = backgroundEffect;
     applySettings();
+    updateVrChatBackgroundSyncTimer();
   }
   state.settingsDraft = null;
   $("customizationDialog").close();
@@ -10062,26 +10701,39 @@ async function deleteGroup(group) {
 async function deleteAvatarById(id, name) {
   const avatar = state.library.avatars.find((x) => x.id === id);
   if (!await confirmAction({ title: "Delete Avatar", message: `Are you sure you want to delete "${name || id}"?` })) return;
+  const syncedRemoval = syncedAvatarRemovalPayload(avatar);
+  if (syncedRemoval && toastDuplicatePendingFavoriteAction(syncedRemoval.avatarId, syncedRemoval.groupId, "remove")) return;
   try {
-    const syncedRemoval = syncedAvatarRemovalPayload(avatar);
+    trackPendingSyncedAvatarRemovals([syncedRemoval]);
     state.library = await api("deleteAvatar", { id });
     render();
     enqueueSyncedAvatarRemovals([syncedRemoval]);
-  } catch (e) { toast(e.message); }
+  } catch (e) {
+    if (syncedRemoval) clearPendingSyncedAvatarRemoval(syncedRemoval.avatarId, syncedRemoval.groupId);
+    toast(e.message);
+  }
 }
 async function deleteSelectedAvatars(ids) {
   const avatars = ids.map((id) => state.library.avatars.find((x) => x.id === id)).filter(Boolean);
   if (!avatars.length) return;
   if (!await confirmAction({ title: "Delete Selected Avatars", message: `Delete ${avatars.length} selected avatars?`, confirmLabel: "Delete", confirmClass: "danger" })) return;
+  const syncedRemovals = avatars.map(syncedAvatarRemovalPayload);
+  if (syncedRemovals.filter(Boolean).some((removal) => syncedFavoriteActionAlreadyPending(removal.avatarId, removal.groupId, "remove"))) {
+    toast("One or more selected avatars are already syncing an unfavorite.");
+    return;
+  }
   try {
-    const syncedRemovals = avatars.map(syncedAvatarRemovalPayload);
+    trackPendingSyncedAvatarRemovals(syncedRemovals);
     for (const avatar of avatars) {
       state.library = await api("deleteAvatar", { id: avatar.id });
     }
     clearAvatarSelection();
     render();
     enqueueSyncedAvatarRemovals(syncedRemovals);
-  } catch (e) { toast(e.message); }
+  } catch (e) {
+    syncedRemovals.filter(Boolean).forEach((removal) => clearPendingSyncedAvatarRemoval(removal.avatarId, removal.groupId));
+    toast(e.message);
+  }
 }
 async function equipAvatar(id, avatarMeta = null) {
   try {
@@ -11087,6 +11739,7 @@ $("customizationDialog").addEventListener("close", () => {
     state.settings = { ...state.settingsDraft.original };
     state.settings.backgroundEffect = backgroundEffect;
     applySettings();
+    updateVrChatBackgroundSyncTimer();
   }
   clearTimeout(settingsLivePreviewTimer);
   document.body.classList.remove("settings-live-preview");
@@ -11137,6 +11790,7 @@ $("restoreBackupNewBtn").addEventListener("click", () => restoreBackup("new"));
 $("restoreBackupReplaceBtn").addEventListener("click", () => restoreBackup("replace"));
 $("refreshLogsBtn").addEventListener("click", loadSettingsLogs);
 $("refreshSyncCenterBtn").addEventListener("click", loadSyncCenter);
+$("syncNowBtn").addEventListener("click", syncVrChatFavoritesManual);
 $("refreshDiagnosticsBtn").addEventListener("click", loadDiagnostics);
 $("refreshMetadataHistoryBtn").addEventListener("click", loadMetadataHistory);
 const refreshVrchatSocialBtn = $("refreshVrchatSocialBtn");
@@ -11251,7 +11905,7 @@ $("confirmSaveAvatarGroupBtn").addEventListener("click", async (event) => {
   try {
     const groupId = $("saveAvatarGroupInput").value;
     if (!groupId) { toast("Choose a group."); return; }
-    if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage()); return; }
+    if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage(groupId)); return; }
     if (state.pendingAvatarGroupAction === "saveCurrent") {
       const avatar = state.pendingCurrentAvatarSave;
       if (!avatar) { toast("Current avatar was not loaded."); return; }
@@ -11264,8 +11918,10 @@ $("confirmSaveAvatarGroupBtn").addEventListener("click", async (event) => {
       }
       resetAvatarGroupDialogMode();
       $("saveAvatarGroupDialog").close();
-      await pushSyncedAvatarAdd(avatar.avatarId || avatar.id, groupId);
+      const avatarId = avatar.avatarId || avatar.id;
       state.library = await api("saveAvatar", { ...avatar, groupId, source: "vrchat" });
+      const local = findLocalAvatarByFavorite(groupId, avatarId);
+      enqueueSyncedAvatarAdd(avatarId, groupId, { localId: local?.id || "", name: avatar.name || avatarId });
       state.activeGroupId = groupId || state.activeGroupId;
       state.avatarPage = 0;
       render();
@@ -11284,9 +11940,12 @@ $("confirmSaveAvatarGroupBtn").addEventListener("click", async (event) => {
     const oldAvatar = state.editingAvatarId ? state.library.avatars.find((x) => x.id === state.editingAvatarId) : null;
     if (oldAvatar?.groupId !== groupId && !syncedGroupHasCapacity(groupId, avatarId || oldAvatar?.avatarId, oldAvatar?.id)) return;
     if (oldAvatar?.groupId !== groupId) await pushSyncedAvatarMove(avatarId || oldAvatar?.avatarId, oldAvatar?.groupId, groupId);
-    else await pushSyncedAvatarAdd(avatarId || oldAvatar?.avatarId, groupId);
     state.avatarDialogGroupId = groupId;
     state.library = await api("saveAvatar", readAvatarForm(groupId));
+    if (!oldAvatar) {
+      const local = findLocalAvatarByFavorite(groupId, avatarId);
+      enqueueSyncedAvatarAdd(avatarId, groupId, { localId: local?.id || "", name: $("avatarNameInput").value.trim() || avatarId });
+    }
     state.activeGroupId = groupId || state.activeGroupId;
     state.avatarPage = 0;
     $("saveAvatarGroupDialog").close();
