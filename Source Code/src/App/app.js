@@ -1,4 +1,4 @@
-const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", hideLockedGroups: false, hideFullGroups: false, schemaVersion: 8 };
+const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", schemaVersion: 8 };
 const LIVE_SYNC_TIMING = {
   favoriteSyncMs: 45 * 1000,
   safetySyncMs: 10 * 60 * 1000,
@@ -254,10 +254,6 @@ function linkServiceLabel(value) {
   if (host.includes("vrchat") || host.includes("vrc.group")) return "VRChat";
   return host ? host.split(".")[0].replace(/[-_]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase()) : "Link";
 }
-function linkIconText(value) {
-  const label = linkServiceLabel(value);
-  return label === "Discord" ? "DC" : label === "YouTube" ? "YT" : label === "Twitch" ? "TW" : label === "GitHub" ? "GH" : label === "VRChat" ? "VR" : label;
-}
 function linkIconSvg(value) {
   const label = linkServiceLabel(value);
   if (label === "Discord") return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 5.6A16.2 16.2 0 0 0 15.4 4l-.2.4a14.9 14.9 0 0 1 3.6 1.8 12.2 12.2 0 0 0-4.7-1.4 13 13 0 0 0-4.2 0 12.2 12.2 0 0 0-4.7 1.4 14.9 14.9 0 0 1 3.6-1.8L8.6 4a16.2 16.2 0 0 0-4.1 1.6C1.9 9.5 1.2 13.3 1.5 17.1A16.4 16.4 0 0 0 6.6 20l.9-1.2a10.7 10.7 0 0 1-1.4-.7l.3-.2a11.6 11.6 0 0 0 11.2 0l.3.2a10.7 10.7 0 0 1-1.4.7l.9 1.2a16.4 16.4 0 0 0 5.1-2.9c.4-4.4-.7-8.1-3-11.5ZM8.4 14.8c-1 0-1.8-.9-1.8-2s.8-2 1.8-2 1.8.9 1.8 2-.8 2-1.8 2Zm7.2 0c-1 0-1.8-.9-1.8-2s.8-2 1.8-2 1.8.9 1.8 2-.8 2-1.8 2Z"/></svg>`;
@@ -408,8 +404,6 @@ async function loadSettings() {
       backgroundOpacity: Number.isFinite(saved.backgroundOpacity) ? Math.min(100, Math.max(0, Number(saved.backgroundOpacity))) : DEFAULT_SETTINGS.backgroundOpacity,
       panelOpacity: Number.isFinite(saved.panelOpacity) ? Math.min(100, Math.max(0, Number(saved.panelOpacity))) : DEFAULT_SETTINGS.panelOpacity,
       backgroundEffect: String(saved.backgroundEffect || ""),
-      hideLockedGroups: false,
-      hideFullGroups: false,
       schemaVersion: DEFAULT_SETTINGS.schemaVersion
     };
   } catch { state.settings = { ...DEFAULT_SETTINGS }; }
@@ -963,7 +957,6 @@ function renderGroups() {
   $("exportBtn").hidden = false;
   $("groupFilterSelect").value = state.groupFilter;
   updateSortButton("groupFilterSelect", "groupFilterMenuBtn");
-  updateGroupVisibilityButtons();
   ensureActiveGroupExists();
   const allGroups = orderedGroups();
   const groups = filteredGroups();
@@ -1153,18 +1146,6 @@ function setActiveGroupDescription(group) {
     return;
   }
   el.innerHTML = `<span class="toolbar-main-status">${escapeHtml(description.main)}</span><span class="toolbar-sync-status">${escapeHtml(description.sync)}</span>`;
-}
-function updateGroupVisibilityButtons() {
-  state.settings.hideLockedGroups = false;
-  state.settings.hideFullGroups = false;
-}
-function setGroupVisibilityFilter(kind, enabled) {
-  state.settings.hideLockedGroups = false;
-  state.settings.hideFullGroups = false;
-  updateGroupVisibilityButtons();
-  ensureActiveGroupExists();
-  render();
-  queueSaveSettings();
 }
 function renderWorldDiscoveryFilter() {
   const wrap = $("worldDiscoveryFilterWrap");
@@ -1590,15 +1571,6 @@ function openGroupDialog(group = null) {
 async function pickGroupIcon() {
   const result = await api("pickGroupIcon");
   return result?.canceled ? "" : String(result?.icon || "");
-}
-function openGroupIconMenu(x, y, group = null) {
-  const target = group || (state.editingGroupId ? state.library.groups.find((item) => item.id === state.editingGroupId) : null);
-  if (!target) return;
-  const draftIcon = $("groupDialog").open && state.editingGroupId === target.id ? $("groupIconInput").value : target.icon || "";
-  showContextMenu(x, y, [
-    { label: "Change Icon", action: () => changeGroupIcon(target) },
-    { label: "Remove Icon", disabled: !String(draftIcon || "").trim(), action: () => removeGroupIcon(target) }
-  ]);
 }
 function openGroupIconDialog(group = null) {
   const target = group || (state.editingGroupId ? state.library.groups.find((item) => item.id === state.editingGroupId) : null);
@@ -2653,12 +2625,6 @@ function excludedRandomAvatarIds() {
     if (id) excluded.add(id);
   }
   return excluded;
-}
-function isAvatarBlockedFromRandom(avatar, excluded = excludedRandomAvatarIds()) {
-  const id = avatarRandomId(avatar);
-  if (!id || excluded.has(id)) return true;
-  const groupId = String(avatar?.groupId || "").toLowerCase();
-  return isRecentGroup(groupId) || isDeletedGroup(groupId);
 }
 function filterRandomDatabaseAvatars(results = []) {
   const excluded = excludedRandomAvatarIds();
@@ -4470,7 +4436,6 @@ function syncedFavoriteKey(avatarId, groupId) {
   const groupKey = String(groupId || "").trim().toLowerCase();
   return avatarKey && groupKey ? `${groupKey}::${avatarKey}` : "";
 }
-function syncedRemovalKey(avatarId, groupId) { return syncedFavoriteKey(avatarId, groupId); }
 function trackPendingSyncedAvatarRemoval(avatarId, groupId) {
   trackPendingSyncedFavoriteAction({ avatarId, groupId, desired: "remove" });
 }
@@ -4858,10 +4823,6 @@ function syncedAvatarRemovalPayload(avatar) {
 }
 function enqueueSyncedAvatarRemovals(removals) {
   removals.filter(Boolean).forEach((removal) => enqueueSyncedAvatarRemove(removal.avatarId, removal.groupId));
-}
-async function pushSyncedAvatarRemovals(removals) {
-  const queue = removals.filter(Boolean);
-  for (const removal of queue) await pushSyncedAvatarRemove(removal.avatarId, removal.groupId);
 }
 async function pushSyncedAvatarMove(avatarId, oldGroupId, newGroupId) {
   if (isSyncedGroup(newGroupId)) await pushSyncedAvatarAdd(avatarId, newGroupId);
@@ -7015,16 +6976,6 @@ function toggleInlineMessageCollapsed(userId) {
   else state.collapsedMessageUserIds.add(id);
   renderMessagePopupDock();
 }
-function resetInlineMessagePanelSize() {
-  const panel = $("inlineMessagePanel");
-  if (!panel) return;
-  panel.style.left = "";
-  panel.style.top = "";
-  panel.style.right = "";
-  panel.style.bottom = "";
-  panel.style.width = "";
-  panel.style.height = "";
-}
 function setupInlineMessageResize() {
   const panel = $("inlineMessagePanel");
   if (!panel) return;
@@ -7159,17 +7110,6 @@ function chatPopupCollapsedHeaderHtml(conversation) {
   const image = messageConversationImage(conversation, friend);
   const presence = friendPresence(friend) || conversation.presence || "offline";
   return `<button type="button" class="chat-collapsed-main" data-chat-expand="${escapeAttr(conversation.userId)}"><span class="message-avatar">${image ? `<img src="${escapeAttr(image)}" alt="">` : ""}${presenceDotHtml(presence)}</span><span><strong>${escapeHtml(conversation.name || conversation.userId)}</strong><small>${escapeHtml(messageConversationPreview(conversation.last) || presenceLabel(presence))}</small></span></button><button type="button" class="icon-button" data-chat-close="${escapeAttr(conversation.userId)}" title="Close">x</button>`;
-}
-function messageConversationHtml(conversation) {
-  const active = conversation.userId === state.selectedMessageUserId;
-  const detail = messageConversationPreview(conversation.last) || notificationTitle(conversation.last);
-  const friend = conversation.friend || findSocialFriend(conversation.userId, conversation.name) || {};
-  const image = messageConversationImage(conversation, friend);
-  return `<button type="button" class="message-conversation ${active ? "active" : ""}" data-message-user="${escapeAttr(conversation.userId)}">
-    <span class="message-avatar">${image ? `<img src="${escapeAttr(image)}" alt="">` : ""}${presenceDotHtml(conversation.presence)}</span>
-    <span><strong>${escapeHtml(conversation.name)}</strong><small>${escapeHtml(detail || "Notification")}</small></span>
-    <time>${escapeHtml(formatDateTime(conversation.last?.createdAt))}</time>
-  </button>`;
 }
 function messageThreadHeaderHtml(conversation) {
   const friend = conversation.friend || findSocialFriend(conversation.userId, conversation.name) || {};
@@ -7451,23 +7391,6 @@ function userPopupFriendDetailsHtml(friend, notification = null) {
       </div></section>
     </div>
   </div>`;
-}
-function userPopupNameHistoryCompactHtml(friend, limit = 2) {
-  const allNames = playerNameHistoryItems(friend?.id, friend?.displayName);
-  const names = allNames.slice(0, limit);
-  if (!names.length) return `<p class="friend-info-empty">-</p>`;
-  const attrs = `data-player-name-history="${escapeAttr(friend?.id || "")}" data-player-name="${escapeAttr(friend?.displayName || "")}"`;
-  return `<div class="user-popup-name-history">${names.map((item, index) => `<button type="button" class="user-popup-text-link history" ${attrs}>${escapeHtml(item.name)}${index === 0 ? ` (current/latest)` : ""}${item.count > 1 ? ` - ${escapeHtml(`${item.count} sightings`)}` : ""}</button>`).join("")}${allNames.length > limit ? `<button type="button" class="user-popup-text-link history muted" ${attrs}>${escapeHtml(allNames.length - limit)} older names hidden. Click for all.</button>` : ""}</div>`;
-}
-function userPopupMetHistoryCompactHtml(friend, limit = 2) {
-  const items = playerEncounterItems(friend?.id, friend?.displayName, friend?.encounters || []);
-  if (friend?.id && items.length) state.playerEncounterHistory[friend.id] = items;
-  if (!items.length) return `<p class="friend-info-empty">No shared world history found in local VRChat logs.</p>`;
-  return `<div class="user-popup-mini-list">${items.slice(0, limit).map((item) => {
-    const world = item.worldName || worldIdFromLocation(item.location) || "Unknown world";
-    const detail = [formatDateTime(item.timestamp), item.action].filter(Boolean).join(" - ");
-    return `<button type="button" class="user-popup-mini-row" data-player-met-history="${escapeAttr(friend?.id || "")}" data-player-name="${escapeAttr(friend?.displayName || "")}"><strong>${escapeHtml(world)}</strong><span>${escapeHtml(detail)}</span></button>`;
-  }).join("")}${items.length > limit ? `<button type="button" class="user-popup-mini-row muted" data-player-met-history="${escapeAttr(friend?.id || "")}" data-player-name="${escapeAttr(friend?.displayName || "")}">${escapeHtml(items.length - limit)} older entries hidden. Click for all.</button>` : ""}</div>`;
 }
 function isFriendRequestNotification(notification) {
   const type = String(notification?.type || "").toLowerCase();
@@ -7799,11 +7722,6 @@ async function loadWorldDiscoverySections() {
   }
   return [];
 }
-function worldsSectionHtml(favorites, searchResults) {
-  const favoriteIds = new Set((favorites || []).map((world) => String(world.id || "").toLowerCase()).filter(Boolean));
-  const searchOnly = (searchResults || []).filter((world) => !favoriteIds.has(String(world.id || "").toLowerCase()));
-  return `${favorites?.length ? `<div class="social-list-section"><h4>Favorite Worlds</h4>${favorites.map((world) => worldHtml(world, true)).join("")}</div>` : ""}${searchOnly.length ? `<div class="social-list-section"><h4>Search Results</h4>${searchOnly.map(worldHtml).join("")}</div>` : ""}`;
-}
 function searchWorldsSectionHtml(searchResults, favorites = []) {
   const favoriteIds = new Set((favorites || []).map((world) => String(world.id || "").toLowerCase()).filter(Boolean));
   return `<div class="social-list-section"><h4>Search Results</h4>${(searchResults || []).map((world) => worldHtml(world, favoriteIds.has(String(world.id || "").toLowerCase()))).join("")}</div>`;
@@ -7972,15 +7890,6 @@ function openLocalWorldGroupIconMenu(x, y, group) {
     { label: "Change Icon", action: () => changeLocalWorldGroupIcon(group) },
     { label: "Remove Icon", disabled: !String(group.icon || "").trim(), action: () => removeLocalWorldGroupIcon(group) }
   ]);
-}
-function reorderLocalWorldGroup(key, direction) {
-  const groups = state.worldLocalGroups || [];
-  const index = groups.findIndex((item) => item.key === key);
-  const next = index + direction;
-  if (index < 0 || next < 0 || next >= groups.length) return;
-  [groups[index], groups[next]] = [groups[next], groups[index]];
-  saveWorldLocalGroups();
-  renderSocialSidebar();
 }
 function reorderLocalWorldGroupToPosition(key, position) {
   const groups = state.worldLocalGroups || [];
@@ -8183,16 +8092,6 @@ function saveLocalWorldFavorite(worldId, groupKey) {
 function localWorldGroupByKey(key = "") {
   return (state.worldLocalGroups || []).find((group) => group.key === key) || null;
 }
-function removeLocalWorldFromGroup(groupKey = "", worldId = "") {
-  const group = localWorldGroupByKey(groupKey);
-  if (!group || !worldId) return false;
-  const id = String(worldId).toLowerCase();
-  const before = (group.worlds || []).length;
-  group.worlds = (group.worlds || []).filter((world) => String(world.id || "").toLowerCase() !== id);
-  if (group.worlds.length === before) return false;
-  saveWorldLocalGroups();
-  return true;
-}
 function reorderLocalWorldInGroup(groupKey = "", worldId = "", targetWorldId = "", after = false) {
   const group = localWorldGroupByKey(groupKey);
   if (!group || !worldId || !targetWorldId || worldId === targetWorldId) return false;
@@ -8339,13 +8238,6 @@ function allLoadedWorlds() {
   const localWorlds = (state.worldLocalGroups || []).flatMap((group) => group.worlds || []);
   return mergeWorldLists(mergeWorldLists(mergeWorldLists(mergeWorldLists(mergeWorldLists(mergeWorldLists(mergeWorldLists(state.social.favoriteWorlds, state.social.worlds), sectionWorlds), localWorlds), state.worldUploadedWorlds || []), state.worldUpdatedWorlds || []), state.worldDeletedWorlds || []), state.worldRecentWorlds || []);
 }
-function currentLocationHtml(location) {
-  if (!location) return `<div class="settings-empty"><h4>No location loaded</h4><p>Your current location appears here while VRChat is running.</p></div>`;
-  const world = location.world;
-  const title = world?.name || location.worldId || location.location || "Private or offline";
-  const detail = world ? `${world.authorName || "Unknown author"} - ${Number(world.occupants || 0)} users` : (location.location || "No public world details available.");
-  return `<button type="button" class="social-card" ${world?.id ? `data-world-id="${escapeAttr(world.id)}"` : ""}>${world?.imageUrl ? `<img src="${escapeAttr(world.imageUrl)}" alt="">` : ""}<div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(detail)}</span><small>${escapeHtml(location.instanceId || location.location || "")}</small></div></button>`;
-}
 function currentLocationLabel(location) {
   if (!location) return "";
   return location.world?.name || location.worldName || location.worldId || location.location || "";
@@ -8391,9 +8283,6 @@ function currentUserLocation(user = state.vrchat?.user || {}) {
 }
 function presenceDotHtml(presence) {
   return `<span class="presence-dot ${escapeAttr(presence)}" aria-hidden="true"></span>`;
-}
-function presenceBadgeHtml(presence, label = presenceLabel(presence)) {
-  return `<span class="presence-badge ${escapeAttr(presence)}">${presenceDotHtml(presence)}${escapeHtml(label)}</span>`;
 }
 function userStatusClass(status, presence = "") {
   if (presence === "offline") return "offline";
@@ -8997,19 +8886,6 @@ function selectFavoriteWorldGroup(key) {
   renderVrchatSocial();
   pushAppHistory();
 }
-async function openHomeWorld() {
-  if (!state.vrchat?.isLoggedIn || state.social.selectedType === "world") return;
-  if (!state.social.worldsLoaded) await loadVrchatSocial({ worldsOnly: true });
-  const homeWorldId = state.vrchat.user?.homeWorldId || "";
-  if (homeWorldId) {
-    await selectSocialWorld(homeWorldId);
-    return;
-  }
-  state.social.selectedType = "";
-  state.social.selectedItem = null;
-  renderVrchatSocial();
-  setSocialHeaderStatus("worlds", "Home world was not exposed by VRChat.");
-}
 async function ensureDefaultWorldDetails() {
   if (state.activePage !== "worlds" || !state.vrchat?.isLoggedIn || state.social.selectedType === "world") return;
   try {
@@ -9378,29 +9254,6 @@ function profileDetailTabsHtml() {
   ];
   return `<div class="social-detail-tabs">${tabs.map(([id, label]) => `<button type="button" data-friend-tab="${escapeAttr(id)}" class="${active === id ? "active" : ""}">${escapeHtml(label)}</button>`).join("")}</div>`;
 }
-function profileEditTabHtml(profile) {
-  const status = String(profile.status || "active").toLowerCase();
-  const bioLinks = splitCsv(profile.bioLinks).join("\n");
-  const statuses = [
-    ["active", "Active"],
-    ["join me", "Join Me"],
-    ["ask me", "Ask Me"],
-    ["busy", "Busy"]
-  ];
-  return `<form class="profile-edit-form" data-profile-edit-form>
-    <section class="social-detail-section">
-      <h5>Profile</h5>
-      <div class="profile-edit-grid">
-        <label><span>Status</span><select name="status">${statuses.map(([value, label]) => `<option value="${escapeAttr(value)}" ${status === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>
-        <label><span>Status Message</span><input name="statusDescription" maxlength="64" value="${escapeAttr(profile.statusDescription || "")}" placeholder="What are you up to?"></label>
-      </div>
-      <label class="profile-edit-wide"><span>Pronouns</span><input name="pronouns" maxlength="32" value="${escapeAttr(profile.pronouns || "")}"></label>
-      <label class="profile-edit-wide"><span>Bio</span><textarea name="bio" rows="8" maxlength="512">${escapeHtml(profile.bio || "")}</textarea></label>
-      <label class="profile-edit-wide"><span>Bio Links</span><textarea name="bioLinks" rows="4" placeholder="One link per line">${escapeHtml(bioLinks)}</textarea></label>
-      <div class="profile-edit-actions"><button type="submit" class="primary">Save Profile</button></div>
-    </section>
-  </form>`;
-}
 function friendTabContentHtml(friend, parts) {
   const tab = state.social.friendTab || "info";
   if (tab === "mutual") return friendMutualTabHtml(friend);
@@ -9461,14 +9314,6 @@ function friendMutualTabHtml(friend) {
   const mutual = Array.isArray(friend.mutualFriends) ? friend.mutualFriends : [];
   if (!mutual.length) return emptyFriendTab("Mutual Friends", "No mutual friends were returned by VRChat.");
   return `<section class="social-detail-section mutual-friends-section"><h5>Mutual Friends</h5><div class="social-list embedded-list">${mutual.map(friendHtml).join("")}</div></section>`;
-}
-function friendEncountersHtml(items) {
-  if (!items?.length) return `<p class="friend-info-empty">No shared world history found in local VRChat logs.</p>`;
-  return `<div class="encounter-list">${items.slice(0, 5).map((item) => {
-    const world = item.worldName || worldIdFromLocation(item.location) || "Unknown world";
-    const detail = [item.action, item.location].filter(Boolean).join(" - ");
-    return `<div class="encounter-item"><strong>${escapeHtml(world)}</strong><span>${escapeHtml(formatDateTime(item.timestamp))}</span><small>${escapeHtml(detail)}</small></div>`;
-  }).join("")}</div>`;
 }
 function friendInfoMetric(label, value) {
   return `<span><strong>${escapeHtml(label)}</strong><em>${escapeHtml(value || "-")}</em></span>`;
@@ -9605,22 +9450,6 @@ function worldActionButtonsHtml(world, launchLocation, favorite, options = {}) {
   const openButton = options.includeOpenInWorlds ? `<button type="button" data-social-action="openWorldInWorldsTab" data-world-id="${escapeAttr(world.id)}">Open in Worlds</button>` : "";
   const copyButton = options.includeCopyId === false ? "" : `<button type="button" data-social-action="copyWorldId" data-world-id="${escapeAttr(world.id)}">Copy World ID</button>`;
   return `<button type="button" data-social-action="favoriteWorld" data-world-id="${escapeAttr(world.id)}" ${favorite ? "hidden" : ""}>Add to Favorites</button><button type="button" data-social-action="unfavoriteWorld" data-world-id="${escapeAttr(world.id)}" class="danger" ${favorite ? "" : "hidden"}>Unfavorite</button>${openButton}${copyButton}`;
-}
-function worldRawJsonHtml(world) {
-  return world.rawJson ? `<section class="social-detail-section world-json-details"><h5>Raw JSON</h5><pre>${escapeHtml(world.rawJson)}</pre></section>` : "";
-}
-function worldSelectedInstanceHtml(world, instance, launchLocation) {
-  const location = instance?.location || launchLocation || "";
-  const current = String(state.social.location?.location || "").toLowerCase() === String(location || "").toLowerCase();
-  const label = worldInstanceDisplayLabel(instance, location);
-  const type = instance?.type || (location ? "Instance" : "No instance selected");
-  const groupLabel = instance?.groupName || instance?.groupId || "";
-  const count = `${Number(instance?.occupants ?? world.occupants ?? 0)} / ${Number(world.capacity || 0) || "?"}`;
-  const meta = [type, instance?.region, groupLabel ? `Group: ${groupLabel}` : "", current ? "You are here" : ""].filter(Boolean).join(" - ");
-  return `<section class="social-detail-section world-selected-instance-section"><h5>Selected Instance</h5><div class="world-selected-instance-card">
-    <div class="world-selected-instance-main"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(meta || "Choose an instance from the list.")}</span><small>${escapeHtml(count)} users</small></div>
-    <button type="button" class="primary" data-social-action="joinWorld" data-world-id="${escapeAttr(world.id)}" data-location="${escapeAttr(location)}" ${location ? "" : "disabled"}>Join</button>
-  </div></section>`;
 }
 function worldInstanceDisplayLabel(instance, location = "") {
   const id = instance?.id || worldInstanceIdFromLocation(location);
@@ -9970,11 +9799,6 @@ function detailRow(label, value) {
   const text = value === 0 ? "0" : String(value || "").trim();
   if (!text) return "";
   return `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(text)}</dd>`;
-}
-function detailRowHtml(label, html) {
-  const content = String(html || "").trim();
-  if (!content) return "";
-  return `<dt>${escapeHtml(label)}</dt><dd>${content}</dd>`;
 }
 function userDetailButtonHtml(userId, displayName = "", options = {}) {
   const id = String(userId || "").trim();
@@ -10553,29 +10377,8 @@ async function openAccountBackupsFolder() {
     toast(e.message);
   }
 }
-async function openBackgroundFolder() {
-  try {
-    const result = await api("backgroundFolder", { groupId: "" });
-    await api("openFolder", { path: result.path });
-  } catch (e) {
-    toast(e.message);
-  }
-}
 function backgroundTargetPayload(groupId = "") {
   return { groupId: groupId || "" };
-}
-function openBackgroundMenu(x, y, groupId = "") {
-  const isGroup = Boolean(groupId);
-  showContextMenu(x, y, [
-    { label: "Import Backgrounds", action: () => importBackgrounds(groupId) },
-    { label: "Open Background Folder", action: () => openBackgroundFolderForTarget(groupId) },
-    { label: "Clear Backgrounds", className: "danger", action: () => clearBackgrounds(groupId) }
-  ]);
-}
-function openGlobalBackgroundMenu(event) {
-  event?.stopPropagation();
-  const rect = $("openBackgroundFolderBtn").getBoundingClientRect();
-  openBackgroundMenu(rect.left, rect.bottom + 6, "");
 }
 function configureBackgroundEffectDialog(groupId = "") {
   const select = $("backgroundEffectSelect");

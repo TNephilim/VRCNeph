@@ -612,30 +612,6 @@ internal static class Program
         return Store.ListGroupBackups();
     }
 
-    private static string BackupDisplayName(string path)
-    {
-        try
-        {
-            var summary = JsonSerializer.Deserialize<GroupFileSummary>(File.ReadAllText(path), ProgramJson.Options);
-            if (!string.IsNullOrWhiteSpace(summary?.Name)) return summary.Name.Trim();
-        }
-        catch
-        {
-        }
-        return Path.GetFileNameWithoutExtension(path);
-    }
-
-    private static string BackupReason(string fileName)
-    {
-        var name = Path.GetFileNameWithoutExtension(fileName);
-        if (name.EndsWith("-pre-save", StringComparison.OrdinalIgnoreCase)) return "Edit mode";
-        if (name.EndsWith("-pre-replace", StringComparison.OrdinalIgnoreCase)) return "Replace synced group";
-        if (name.EndsWith("-edit", StringComparison.OrdinalIgnoreCase)) return "Edit mode";
-        if (name.EndsWith("-unfavorited", StringComparison.OrdinalIgnoreCase)) return "Unfavorite All";
-        if (name.EndsWith("-deleted", StringComparison.OrdinalIgnoreCase)) return "Deleted group";
-        return "Cleanup backup";
-    }
-
     private static async Task<LibraryData> SelectAndLogAvatarAsync(string id)
     {
         await VrChat.SelectAvatarAsync(id);
@@ -2571,17 +2547,6 @@ internal sealed class AvatarStore
             foreach (var avatar in set.OrderBy(x => x.Order).ThenBy(x => x.CreatedAt)) avatar.Order = order++;
         }
     }
-    private static void OrderSyncedGroupsFirst(LibraryData lib)
-    {
-        var order = 0;
-        foreach (var group in lib.Groups
-            .OrderBy(GroupBucket)
-            .ThenBy(x => x.Order)
-            .ThenBy(x => x.CreatedAt))
-        {
-            group.Order = order++;
-        }
-    }
     private static int GroupBucket(AvatarGroup group)
     {
         if (IsSyncedGroupId(group.Id)) return 0;
@@ -2596,9 +2561,6 @@ internal sealed class AvatarStore
         var match = System.Text.RegularExpressions.Regex.Match(group.Id, @"^vrc_avatars(?<index>\d+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         return match.Success && int.TryParse(match.Groups["index"].Value, out var index) ? index : 0;
     }
-    private static bool IsDefaultLocalGroup(AvatarGroup group) =>
-        group.Description.Equals("Default local avatar favorites.", StringComparison.OrdinalIgnoreCase) ||
-        group.Name.Equals("Favorites", StringComparison.OrdinalIgnoreCase);
     private static int NextGroupOrder(LibraryData lib) => lib.Groups.Count == 0 ? 0 : lib.Groups.Max(x => x.Order) + 1;
     private static int NextAvatarOrder(LibraryData lib, string groupId) => lib.Avatars.Where(x => x.GroupId == groupId).DefaultIfEmpty().Max(x => x?.Order ?? -1) + 1;
     private static void ShiftAvatarOrdersDown(LibraryData lib, string groupId, string excludeId = "")
@@ -2726,7 +2688,7 @@ internal sealed class AvatarStore
 
 internal sealed class AppSettingsStore
 {
-    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", false, false, 7);
+    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", 8);
     private readonly string _settingsPath = AppPaths.SettingsPath;
     public AppSettings Get()
     {
@@ -2750,7 +2712,7 @@ internal sealed class AppSettingsStore
         var panelOpacity = s.SchemaVersion < 6 && s.PanelOpacity == 0 ? DefaultSettings.PanelOpacity : Math.Clamp(s.PanelOpacity, 0, 100);
         var panelColor = string.IsNullOrWhiteSpace(s.PanelColor) || !System.Text.RegularExpressions.Regex.IsMatch(s.PanelColor, "^#[0-9a-fA-F]{6}$") ? color : s.PanelColor;
         var panelSynced = s.SchemaVersion < 6 || s.PanelColorSynced;
-        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", s.HideLockedGroups, s.HideFullGroups, 7);
+        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", 8);
     }
 }
 
@@ -2952,34 +2914,6 @@ internal sealed class AppDataStore
                 openConflicts,
                 recentChanges,
                 totalChanges);
-        }
-    }
-
-    public void RecordSyncConflicts(IEnumerable<SyncConflictInput> conflicts)
-    {
-        var rows = conflicts.Where(x => !string.IsNullOrWhiteSpace(x.Kind) && !string.IsNullOrWhiteSpace(x.GroupId)).ToList();
-        lock (_gate)
-        {
-            EnsureInitialized();
-            using var connection = OpenConnection();
-            foreach (var conflict in rows)
-            {
-                using var command = connection.CreateCommand();
-                command.CommandText = """
-                    INSERT INTO sync_conflicts
-                        (detected_at, kind, group_id, group_name, avatar_id, avatar_name, detail, resolved)
-                    VALUES
-                        ($detectedAt, $kind, $groupId, $groupName, $avatarId, $avatarName, $detail, 0)
-                    """;
-                command.Parameters.AddWithValue("$detectedAt", DateTimeOffset.UtcNow.ToString("O"));
-                command.Parameters.AddWithValue("$kind", conflict.Kind);
-                command.Parameters.AddWithValue("$groupId", conflict.GroupId);
-                command.Parameters.AddWithValue("$groupName", conflict.GroupName ?? "");
-                command.Parameters.AddWithValue("$avatarId", conflict.AvatarId ?? "");
-                command.Parameters.AddWithValue("$avatarName", conflict.AvatarName ?? "");
-                command.Parameters.AddWithValue("$detail", conflict.Detail ?? "");
-                command.ExecuteNonQuery();
-            }
         }
     }
 
@@ -6288,49 +6222,6 @@ internal sealed class AvatarDatabaseClient
     private static string AllCountProgressKey(AvatarSearchInput input) =>
         $"all-count\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}";
 
-    private async Task<List<AvatarInput>> LoadSearchWindowAsync(AvatarSearchInput input, VrChatClient? vrchat, int maxPages)
-    {
-        var results = new List<AvatarInput>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        for (var page = 1; page <= Math.Max(1, maxPages); page++)
-        {
-            var result = await SearchAsync(input with { Page = page }, vrchat);
-            var added = 0;
-            foreach (var avatar in result.Results)
-            {
-                var key = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
-                if (string.IsNullOrWhiteSpace(key) || !seen.Add(key)) continue;
-                results.Add(avatar);
-                added++;
-            }
-            if (!result.HasMore) break;
-            if (added == 0) break;
-        }
-        return results;
-    }
-
-    private static async Task<List<AvatarInput>> LoadPasSearchWindowAsync(AvatarSearchInput input)
-    {
-        var query = input.Query?.Trim() ?? "";
-        if (query.Length > 0 && query.Length < 3 && !IsAuthorIdOnlySearch(input) && !HasOptionFilter(input)) throw new InvalidOperationException("Enter at least 3 characters to search the Prismic PAS database.");
-        if (!HasSearchField(input)) throw new InvalidOperationException("Enable at least one search field.");
-        await QueryGate.WaitAsync();
-        try
-        {
-            var database = await LoadPasDatabaseAsync();
-            var results = new List<AvatarInput>();
-            for (var i = 0; i < database.FileAvatarCount; i++)
-            {
-                if (PasRecordMatches(database, i, input)) results.Add(ReadPasAvatar(database, i));
-            }
-            return results;
-        }
-        finally
-        {
-            QueryGate.Release();
-        }
-    }
-
     private async Task<AvatarDatabaseSearchResult> RandomAllAsync(AvatarSearchInput input, VrChatClient? vrchat)
     {
         var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
@@ -6940,35 +6831,12 @@ internal sealed class AvatarDatabaseClient
         _ => $"PAS {platform}"
     };
     private static string PasTags(PasDatabaseData database) => $"prismic pas, avatarsearch, {database.PlatformLabel}";
-    private static bool LooksLikeAvatarIdQuery(string query) => query.StartsWith("avtr", StringComparison.OrdinalIgnoreCase);
     private static string PasDatabasePath() => Path.Combine(AppPaths.DatabaseDirectory, PasDatabaseFileName);
     private static string PasCacheKey(AvatarSearchInput input, int page, int limit)
     {
         var path = PasDatabasePath();
         var stamp = File.Exists(path) ? File.GetLastWriteTimeUtc(path).Ticks : 0;
         return $"pas\n{path}\n{stamp}\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}\n{page}\n{limit}";
-    }
-
-    private static List<AvatarInput> MergeAvatarResults(IEnumerable<AvatarInput> results, int limit)
-    {
-        var merged = new List<AvatarInput>();
-        var byAvatarId = new Dictionary<string, AvatarInput>(StringComparer.OrdinalIgnoreCase);
-        foreach (var avatar in results)
-        {
-            var key = avatar.AvatarId;
-            if (string.IsNullOrWhiteSpace(key)) key = avatar.Id;
-            if (string.IsNullOrWhiteSpace(key)) continue;
-            if (byAvatarId.TryGetValue(key, out var existing))
-            {
-                MergeAvatarResultData(existing, avatar);
-                continue;
-            }
-
-            if (merged.Count >= limit) continue;
-            byAvatarId[key] = avatar;
-            merged.Add(avatar);
-        }
-        return merged;
     }
 
     private static void Shuffle<T>(IList<T> items)
@@ -6978,16 +6846,6 @@ internal sealed class AvatarDatabaseClient
             var j = Random.Shared.Next(i + 1);
             (items[i], items[j]) = (items[j], items[i]);
         }
-    }
-
-    private static List<AvatarInput> HideDuplicateAvatarResults(IReadOnlyList<AvatarDatabaseSearchResult> providerPages, int limit, out bool hiddenOverflow)
-    {
-        var unique = new List<AvatarInput>();
-        var byDuplicateKey = new Dictionary<string, AvatarInput>(StringComparer.OrdinalIgnoreCase);
-        AddDedupedAvatarResults(providerPages, unique, byDuplicateKey);
-
-        hiddenOverflow = unique.Count > limit;
-        return unique.Take(limit).ToList();
     }
 
     private static void AddDedupedAvatarResults(IEnumerable<AvatarDatabaseSearchResult> providerPages, List<AvatarInput> unique, Dictionary<string, AvatarInput> byDuplicateKey)
@@ -7067,29 +6925,6 @@ internal sealed class AvatarDatabaseClient
         if (string.IsNullOrWhiteSpace(target.Version)) target.Version = hidden.Version;
         if (string.IsNullOrWhiteSpace(target.SourceUrl)) target.SourceUrl = hidden.SourceUrl;
         if (string.IsNullOrWhiteSpace(target.RawJson)) target.RawJson = hidden.RawJson;
-    }
-
-    private static void MergeAvatarResultData(AvatarInput target, AvatarInput incoming)
-    {
-        target.Source = MergeSourceTags(target.Source, incoming.Source);
-        if (string.IsNullOrWhiteSpace(target.Id)) target.Id = incoming.Id;
-        if (string.IsNullOrWhiteSpace(target.GroupId)) target.GroupId = incoming.GroupId;
-        if (string.IsNullOrWhiteSpace(target.Name)) target.Name = incoming.Name;
-        if (string.IsNullOrWhiteSpace(target.Description)) target.Description = incoming.Description;
-        if (string.IsNullOrWhiteSpace(target.AuthorId)) target.AuthorId = incoming.AuthorId;
-        if (string.IsNullOrWhiteSpace(target.AuthorName)) target.AuthorName = incoming.AuthorName;
-        if (string.IsNullOrWhiteSpace(target.ImageUrl)) target.ImageUrl = incoming.ImageUrl;
-        if (string.IsNullOrWhiteSpace(target.ThumbnailImageUrl)) target.ThumbnailImageUrl = incoming.ThumbnailImageUrl;
-        target.ReleaseStatus = PreferredReleaseStatus(target.ReleaseStatus, incoming.ReleaseStatus);
-        if (string.IsNullOrWhiteSpace(target.Version)) target.Version = incoming.Version;
-        target.Platforms = MergeTagText(target.Platforms, incoming.Platforms);
-        target.Tags = MergeTagText(target.Tags, incoming.Tags);
-        if (string.IsNullOrWhiteSpace(target.SourceUrl)) target.SourceUrl = incoming.SourceUrl;
-        if (string.IsNullOrWhiteSpace(target.Notes)) target.Notes = incoming.Notes;
-        if (string.IsNullOrWhiteSpace(target.RawJson)) target.RawJson = incoming.RawJson;
-        if (string.IsNullOrWhiteSpace(target.RemoteCreatedAt)) target.RemoteCreatedAt = incoming.RemoteCreatedAt;
-        if (string.IsNullOrWhiteSpace(target.RemoteUpdatedAt)) target.RemoteUpdatedAt = incoming.RemoteUpdatedAt;
-        if (string.IsNullOrWhiteSpace(target.RemoteFavoriteId)) target.RemoteFavoriteId = incoming.RemoteFavoriteId;
     }
 
     private static string PreferredReleaseStatus(string? current, string? incoming)
@@ -7838,43 +7673,6 @@ internal sealed class AvatarDatabaseClient
     private static string QuoteSqliteIdentifier(string value) =>
         "\"" + value.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
-    private static async Task<AvatarDatabaseSearchResult> QuerySearchAsync(string databasePath, AvatarSearchInput input, int page, int limit)
-    {
-        using var connection = OpenReadOnlyConnection(databasePath);
-        using var command = connection.CreateCommand();
-        var where = BuildWhereClause(input, command);
-        command.CommandText = $"""
-            {SelectAvatarSql}
-            {where}
-            ORDER BY
-                CASE
-                    WHEN lower(coalesce(a.name, '')) = lower(@query) THEN 0
-                    WHEN lower(coalesce(a.name, '')) LIKE lower(@queryPrefix) ESCAPE '\' THEN 1
-                    WHEN lower(coalesce(a.author_name, '')) LIKE lower(@queryPrefix) ESCAPE '\' THEN 2
-                    ELSE 3
-                END,
-                coalesce(a.updated_at, a.created_at, a.added_at, '') DESC,
-                a.name COLLATE NOCASE ASC
-            LIMIT @limit OFFSET @offset
-            """;
-        var query = input.Query?.Trim() ?? "";
-        command.Parameters.AddWithValue("@query", query);
-        command.Parameters.AddWithValue("@queryPrefix", $"{EscapeLike(query)}%");
-        command.Parameters.AddWithValue("@limit", limit + 1);
-        command.Parameters.AddWithValue("@offset", (page - 1) * limit);
-
-        var results = new List<AvatarInput>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
-        {
-            results.Add(ReadDatabaseAvatar(reader));
-        }
-
-        var hasMore = results.Count > limit;
-        if (hasMore) results.RemoveAt(results.Count - 1);
-        return new AvatarDatabaseSearchResult(results, page, hasMore, DateTimeOffset.UtcNow);
-    }
-
     private const string SelectAvatarSql = """
         SELECT
             a.id,
@@ -7892,80 +7690,6 @@ internal sealed class AvatarDatabaseClient
             coalesce((SELECT m.memo FROM avatar_memos m WHERE m.avatar_id = a.id), '') AS memo
         FROM cache_avatar a
         """;
-
-    private static string BuildWhereClause(AvatarSearchInput input, SqliteCommand command)
-    {
-        if (IsAuthorIdOnlySearch(input))
-        {
-            command.Parameters.AddWithValue("@authorId", input.AuthorId.Trim());
-            return "WHERE lower(coalesce(a.author_id, '')) = lower(@authorId)";
-        }
-
-        var query = input.Query?.Trim() ?? "";
-        var clauses = new List<string>();
-        var textFields = new List<string>();
-        if (!string.IsNullOrWhiteSpace(query) && input.SearchAvatar) textFields.Add(SearchSqlGroup(["a.name", "a.id"], input, command, "avatar"));
-        if (!string.IsNullOrWhiteSpace(query) && input.SearchAuthor) textFields.Add(SearchSqlGroup(["a.author_name", "a.author_id"], input, command, "author"));
-        if (!string.IsNullOrWhiteSpace(query) && input.SearchDescription) textFields.Add(SearchSqlGroup(["a.description"], input, command, "description"));
-        if (!string.IsNullOrWhiteSpace(query) && input.SearchTags)
-        {
-            textFields.Add(SearchSqlGroup([
-                "coalesce((SELECT group_concat(t.tag, ' ') FROM avatar_tags t WHERE t.avatar_id = a.id), '')",
-                "coalesce((SELECT m.memo FROM avatar_memos m WHERE m.avatar_id = a.id), '')"
-            ], input, command, "tags"));
-        }
-        if (textFields.Count > 0)
-        {
-            clauses.Add($"({string.Join(" OR ", textFields)})");
-        }
-
-        var platformFilters = OptionFilterValues(input.PlatformFilters);
-        if (platformFilters.Count > 0)
-        {
-            var platformClauses = new List<string>();
-            var platformAliases = platformFilters.SelectMany(PlatformFilterAliases).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            for (var i = 0; i < platformAliases.Count; i++)
-            {
-                var parameter = $"@platform{i}";
-                command.Parameters.AddWithValue(parameter, $"%{EscapeLike(platformAliases[i])}%");
-                platformClauses.Add($"EXISTS (SELECT 1 FROM avatar_tags t WHERE t.avatar_id = a.id AND lower(t.tag) LIKE {parameter} ESCAPE '\\')");
-            }
-            clauses.Add($"({string.Join(" OR ", platformClauses)})");
-        }
-
-        return clauses.Count == 0 ? "" : $"WHERE {string.Join(" AND ", clauses)}";
-    }
-
-    private static string SearchSqlGroup(string[] fields, AvatarSearchInput input, SqliteCommand command, string prefix)
-    {
-        var query = input.Query?.Trim() ?? "";
-        var mode = NormalizeSearchMode(input.SearchMode);
-        if (mode == "allWords")
-        {
-            var wordClauses = new List<string>();
-            var words = SearchWords(query);
-            if (words.Count == 0) return "1 = 1";
-            for (var i = 0; i < words.Count; i++)
-            {
-                var parameter = $"@{prefix}Word{i}";
-                command.Parameters.AddWithValue(parameter, $"%{EscapeLike(words[i])}%");
-                wordClauses.Add($"({string.Join(" OR ", fields.Select(field => $"{field} LIKE {parameter} ESCAPE '\\'"))})");
-            }
-            return $"({string.Join(" AND ", wordClauses)})";
-        }
-
-        var valueParameter = $"@{prefix}Search";
-        var escaped = EscapeLike(query);
-        command.Parameters.AddWithValue(valueParameter, mode switch
-        {
-            "exact" => query,
-            "startsWith" => $"{escaped}%",
-            "endsWith" => $"%{escaped}",
-            _ => $"%{escaped}%"
-        });
-        if (mode == "exact") return $"({string.Join(" OR ", fields.Select(field => $"lower({field}) = lower({valueParameter})"))})";
-        return $"({string.Join(" OR ", fields.Select(field => $"{field} LIKE {valueParameter} ESCAPE '\\'"))})";
-    }
 
     private static SqliteConnection OpenReadOnlyConnection(string databasePath)
     {
@@ -8125,9 +7849,6 @@ internal sealed class AvatarDatabaseClient
     private static bool HasSearchField(AvatarSearchInput input) => HasTextSearchField(input) || HasOptionFilter(input);
     private static bool IsAuthorIdOnlySearch(AvatarSearchInput input) =>
         input.SearchAuthor && !input.SearchAvatar && !input.SearchDescription && !input.SearchTags && !HasOptionFilter(input) && !string.IsNullOrWhiteSpace(input.AuthorId);
-    private static string SearchCacheKey(AvatarSearchInput input, int page, int limit, string databasePath) =>
-        $"{Path.GetFullPath(databasePath)}\n{File.GetLastWriteTimeUtc(databasePath).Ticks}\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}\n{page}\n{limit}";
-
     private static string EscapeLike(string value) =>
         value.Replace(@"\", @"\\", StringComparison.Ordinal)
             .Replace("%", @"\%", StringComparison.Ordinal)
@@ -8229,14 +7950,13 @@ internal sealed record SyncActionRecord(string Id, string Timestamp, string Kind
 internal sealed record SyncActionListResult(List<SyncActionRecord> Actions);
 internal sealed record SyncConflictRecord(long Id, string DetectedAt, string Kind, string GroupId, string GroupName, string AvatarId, string AvatarName, string Detail, bool Resolved);
 internal sealed record SyncConflictListResult(List<SyncConflictRecord> Conflicts);
-internal sealed record SyncConflictInput(string Kind, string GroupId, string GroupName, string AvatarId, string AvatarName, string Detail);
 internal sealed record MetadataHistoryRecord(string ChangedAt, string AvatarId, string ChangeType, string OldName, string NewName, string OldAuthor, string NewAuthor, string OldStatus, string NewStatus, string OldRemoteUpdatedAt, string NewRemoteUpdatedAt);
 internal sealed record MetadataHistoryListResult(List<MetadataHistoryRecord> Items);
 internal sealed record DiagnosticItem(string Name, string Status, string Detail, string Level = "info");
 internal sealed record DiagnosticsResult(List<DiagnosticItem> Items);
 internal sealed record ExportResult(string Path);
 internal sealed record GroupClearResult(LibraryData Library, int Removed, string BackupPath);
-internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", bool HideLockedGroups = false, bool HideFullGroups = false, int SchemaVersion = 7);
+internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", int SchemaVersion = 8);
 internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx", string SearchMode = "phrase");
 internal sealed record AvatarListResult(List<AvatarInput> Avatars);
 internal sealed record AvatarImageResolveInput(string AvatarId = "", string ImageUrl = "", string Name = "", string UserId = "", string DisplayName = "");
