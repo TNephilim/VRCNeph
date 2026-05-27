@@ -542,7 +542,7 @@ async function loadMessageHistory() {
   const local = Array.isArray(localHistory) ? localHistory : [];
   let persisted = [];
   try { persisted = await api("messageHistoryLoad", {}, 30000); } catch { persisted = []; }
-  state.messageHistory = dedupeNotifications([...(persisted || []).map(normalizeNotification), ...local.map(normalizeNotification)]).filter(isMessageHistoryItem).slice(0, 2000);
+  state.messageHistory = dedupeNotifications([...(persisted || []).map(normalizeNotification), ...local.map(normalizeNotification)]).filter((item) => isMessageHistoryItem(item) && !isSelfInviteNotification(item)).slice(0, 2000);
   persistMessageHistory();
   renderMessagesPage();
   if (state.activePage === "messages" || state.activePage === "notifications") renderSocialSidebar();
@@ -2021,7 +2021,6 @@ function clearAvatarDatabaseSearch({ keepHistoryOpen = false } = {}) {
   $("avatarDatabaseSearchInput").value = "";
   renderAvatarDatabaseResults();
   updateAvatarDatabaseCopy();
-  $("avatarDatabaseSearchInput").focus();
   if (keepHistoryOpen) {
     showDatabaseSearchHistory();
   } else {
@@ -2244,7 +2243,6 @@ function clearWorldSearch({ keepHistoryOpen = false } = {}) {
   }
   renderVrchatSocial();
   setSocialHeaderStatus("worlds", state.social.worldSections.length ? `${state.social.worldSections.length} world sections loaded.` : "Loading discover worlds...");
-  $("worldSearchInput").focus();
   if (keepHistoryOpen) {
     showWorldSearchHistory();
   } else {
@@ -3226,12 +3224,15 @@ function showContextMenu(x, y, actions) {
   const menuActions = actions.some((action) => /^cancel\b/i.test(action.label || ""))
     ? actions
     : [...actions, { label: "Cancel", action: hideContextMenu }];
-  menu.innerHTML = menuActions.map((a, i) => `<button type="button" data-index="${i}" class="${escapeAttr(a.className || "")}" ${a.disabled ? "disabled" : ""}>${escapeHtml(a.label)}</button>`).join("");
+  menu.innerHTML = menuActions.map((a, i) => a.heading
+    ? `<div class="context-menu-heading">${escapeHtml(a.label)}</div>`
+    : `<button type="button" data-index="${i}" class="${escapeAttr(a.className || "")}" ${a.disabled ? "disabled" : ""}>${escapeHtml(a.label)}</button>`).join("");
   menu.onclick = (event) => event.stopPropagation();
   menu.hidden = false;
-  menu.style.width = `${Math.ceil(Math.min(menu.scrollWidth, Math.min(260, window.innerWidth - 16)))}px`;
-  menu.style.left = `${Math.min(x, window.innerWidth - menu.offsetWidth - 8)}px`;
-  menu.style.top = `${Math.min(y, window.innerHeight - menu.offsetHeight - 8)}px`;
+  const width = Math.ceil(Math.min(menu.scrollWidth, Math.min(380, window.innerWidth - 16)));
+  menu.style.width = `${width}px`;
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8))}px`;
   menu.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
     const action = menuActions[Number(b.dataset.index)];
     if (!action || action.disabled) return;
@@ -6337,6 +6338,7 @@ function applyPipelineNotificationEvent(type, content = {}) {
   const sender = pipelineText(content.senderUsername, content.senderName, senderUser.displayName, senderUser.username);
   const message = notificationMessageText(content);
   const item = normalizeNotification({ ...content, type, title, senderUsername: sender, senderUserId: pipelineText(content.senderUserId, content.userId, senderUser.id, senderUser.userId), sender: senderUser, message, seen: isNotificationPopoverOpen() });
+  if (isSelfInviteNotification(item)) return;
   recordPlayerName(item.senderUserId, item.senderUsername, item.createdAt, "Notification");
   state.notifications.items = dedupeNotifications([item, ...state.notifications.items]);
   state.notifications.loaded = true;
@@ -6393,6 +6395,15 @@ function normalizeNotification(item = {}) {
     direction: item.direction || "",
     rawJson: item.rawJson || JSON.stringify(item, null, 2)
   };
+}
+function isSelfInviteNotification(item = {}) {
+  if (notificationBucket(item) !== "invite") return false;
+  const currentUser = state.vrchat?.user || {};
+  const currentId = String(currentUser.id || "").trim().toLowerCase();
+  const currentName = String(currentUser.displayName || currentUser.username || "").trim().toLowerCase();
+  const senderId = String(item.senderUserId || "").trim().toLowerCase();
+  const senderName = String(item.senderUsername || "").trim().toLowerCase();
+  return Boolean((currentId && senderId === currentId) || (currentName && senderName === currentName));
 }
 function notificationMessageText(item = {}) {
   const candidates = [item.message, item.details, item.inviteMessage, item.requestMessage, item.responseMessage, item.data, item.content];
@@ -6473,8 +6484,20 @@ function inviteDetailsHtml(item = {}) {
     ${info.worldId ? `<small>${escapeHtml(info.worldId)}</small>` : ""}
   </div>`;
 }
+function openImagePreview(image = "") {
+  const url = normalizeVrchatImageUrl(image);
+  if (!url) return;
+  $("imagePreviewFull").src = url;
+  $("imagePreviewDialog").showModal();
+}
+function previewImageButtonHtml(image = "", className = "image-preview-trigger", contents = "") {
+  const url = normalizeVrchatImageUrl(image);
+  if (!url) return contents;
+  return `<button type="button" class="${escapeAttr(className)}" data-image-preview="${escapeAttr(url)}" title="View full image">${contents}</button>`;
+}
 function addMessageNotification(item, { popup = false } = {}) {
   const normalized = normalizeNotification(item);
+  if (isSelfInviteNotification(normalized)) return false;
   if (!isMessageHistoryItem(normalized)) return false;
   if (!normalized.senderUserId && !normalized.senderUsername) return;
   recordPlayerName(normalized.senderUserId, normalized.senderUsername, normalized.createdAt, "Messages");
@@ -6488,6 +6511,14 @@ function addMessageNotification(item, { popup = false } = {}) {
   }
   renderPageTabs();
   return true;
+}
+function removeSelfInviteNotifications() {
+  const beforeNotifications = state.notifications.items?.length || 0;
+  const beforeMessages = state.messageHistory?.length || 0;
+  state.notifications.items = (state.notifications.items || []).filter((item) => !isSelfInviteNotification(item));
+  state.messageHistory = (state.messageHistory || []).filter((item) => !isSelfInviteNotification(item));
+  if (beforeMessages !== state.messageHistory.length) persistMessageHistory();
+  return beforeNotifications !== state.notifications.items.length || beforeMessages !== state.messageHistory.length;
 }
 function removeNotificationEverywhere(notificationId = "") {
   const id = String(notificationId || "").trim();
@@ -6535,7 +6566,7 @@ async function loadNotifications() {
   renderNotificationsPage();
   try {
     const result = await api("vrchatNotifications", { limit: 100, offset: 0 }, 45000);
-    state.notifications.items = dedupeNotifications((result.notifications || []).map(normalizeNotification));
+    state.notifications.items = dedupeNotifications((result.notifications || []).map(normalizeNotification).filter((item) => !isSelfInviteNotification(item)));
     if (isNotificationPopoverOpen()) state.notifications.items = state.notifications.items.map((item) => ({ ...item, seen: true }));
     state.notifications.items.forEach((item) => addMessageNotification(item));
     state.notifications.loaded = true;
@@ -7818,7 +7849,7 @@ function userPopupFriendDetailsHtml(friend, notification = null) {
     : "";
   return `<div class="social-detail friend-detail user-popup-detail">
     <div class="friend-profile-header">
-      <div class="friend-profile-avatar ${header.hasProfileImage ? "profile-picture" : ""}">${headerImage ? `<img ${headerImageAttrs} alt="">` : `<span>${escapeHtml((friend.displayName || friend.id || "?").slice(0, 1).toUpperCase())}</span>`}</div>
+      ${headerImage ? previewImageButtonHtml(headerImage, `friend-profile-avatar image-preview-trigger ${header.hasProfileImage ? "profile-picture" : ""}`, `<img ${headerImageAttrs} alt="">`) : `<div class="friend-profile-avatar ${header.hasProfileImage ? "profile-picture" : ""}"><span>${escapeHtml((friend.displayName || friend.id || "?").slice(0, 1).toUpperCase())}</span></div>`}
       <div class="friend-profile-main">
         <div class="friend-profile-title"><button type="button" class="user-popup-name-button" ${nameHistoryAttrs}>${escapeHtml(friend.displayName || friend.id)}</button>${userStatusBadgeHtml(friend.status, presence, friendStatusLimited(friend, presence))}</div>
         ${friendTagsHtml(friend)}
@@ -9670,8 +9701,9 @@ function myProfileDetailsHtml(profile) {
     representedGroupMemberCount: profile.representedGroupMemberCount
   });
   const nameHistoryAttrs = `data-player-name-history="${escapeAttr(profile.id || "")}" data-player-name="${escapeAttr(profile.displayName || "")}"`;
+  const profileImageHtml = image ? previewImageButtonHtml(image, "friend-profile-avatar image-preview-trigger", `<img src="${escapeAttr(image)}" alt="">`) : `<div class="friend-profile-avatar"></div>`;
   const hero = `<div class="friend-profile-header with-location">
-    <div class="friend-profile-avatar">${image ? `<img src="${escapeAttr(image)}" alt="">` : ""}</div>
+    ${profileImageHtml}
     <div class="friend-profile-main">
       <div class="friend-profile-title"><button type="button" class="user-history-name-button" ${nameHistoryAttrs}>${escapeHtml(profile.displayName || profile.id)}</button>${currentUserStatusBadgeHtml(profile.status, profilePresence, currentUserStatusLimited(profile, profilePresence))}</div>
       ${tagChips}
@@ -9749,8 +9781,11 @@ function friendDetailsHtml(friend) {
   const headerImageAttrs = header.image
     ? `src="${escapeAttr(header.image)}" data-image-fallbacks="${escapeAttr(JSON.stringify(header.candidates || []))}" title="${escapeAttr(header.image)}"`
     : "";
+  const friendImageHtml = header.image
+    ? previewImageButtonHtml(header.image, `friend-profile-avatar image-preview-trigger ${header.hasProfileImage ? "profile-picture" : ""}`, `<img ${headerImageAttrs} alt="">`)
+    : `<div class="friend-profile-avatar ${header.hasProfileImage ? "profile-picture" : ""}"></div>`;
   const hero = `<div class="friend-profile-header with-location">
-    <div class="friend-profile-avatar ${header.hasProfileImage ? "profile-picture" : ""}">${header.image ? `<img ${headerImageAttrs} alt="">` : ""}</div>
+    ${friendImageHtml}
     <div class="friend-profile-main">
       <div class="friend-profile-title"><button type="button" class="user-history-name-button" ${nameHistoryAttrs}>${escapeHtml(friend.displayName || friend.id)}</button>${userStatusBadgeHtml(friend.status, presence, friendStatusLimited(friend, presence))}</div>
       ${tagChips}
@@ -10039,11 +10074,23 @@ function worldDetailHeroHtml(world, favorite, options = {}) {
   const status = world.releaseStatus || "World";
   const favoriteChip = favorite ? `<span class="world-detail-chip favorite">Favorite</span>` : "";
   const author = worldAuthorSearchButtonHtml(world, { prefix: "By " }) || `By ${escapeHtml(world.authorName || "Unknown author")}`;
-  const actions = `<button type="button" class="world-actions-menu-btn" data-world-actions-menu="true" data-world-id="${escapeAttr(world.id || "")}" data-location="${escapeAttr(options.launchLocation || "")}" data-open-in-worlds="${options.includeOpenInWorlds ? "true" : "false"}" data-copy-id="${options.includeCopyId === false ? "false" : "true"}" title="World actions" aria-label="World actions"><span>Actions</span><strong>...</strong></button>`;
+  const worldId = world.id || "";
+  const launchLocation = options.launchLocation || "";
+  const chips = `<div class="world-detail-chips"><span class="world-detail-chip">${escapeHtml(status)}</span>${favoriteChip}</div>`;
+  const visibleActions = [
+    launchLocation ? `<button type="button" class="world-detail-action primary" data-social-action="joinWorld" data-world-id="${escapeAttr(worldId)}" data-location="${escapeAttr(launchLocation)}">Self Invite</button>` : "",
+    `<button type="button" class="world-detail-action" data-social-action="setHomeWorld" data-world-id="${escapeAttr(worldId)}">Make Home</button>`,
+    favorite
+      ? `<button type="button" class="world-detail-action danger" data-social-action="unfavoriteWorld" data-world-id="${escapeAttr(worldId)}">Unfavorite</button>`
+      : `<button type="button" class="world-detail-action" data-social-action="favoriteWorld" data-world-id="${escapeAttr(worldId)}">Favorite</button>`,
+    options.includeCopyId === false ? "" : `<button type="button" class="world-detail-action" data-social-action="copyWorldId" data-world-id="${escapeAttr(worldId)}">Copy ID</button>`,
+    options.includeOpenInWorlds ? `<button type="button" class="world-detail-action" data-social-action="openWorldInWorldsTab" data-world-id="${escapeAttr(worldId)}">Open in Worlds</button>` : ""
+  ].filter(Boolean).join("");
+  const actions = `<div class="world-detail-actions">${visibleActions}<button type="button" class="world-actions-menu-btn" data-world-actions-menu="true" data-world-id="${escapeAttr(worldId)}" data-location="${escapeAttr(launchLocation)}" title="New instance options" aria-label="New instance options">New Instance</button></div>`;
   return `<section class="world-detail-hero">
     <div class="world-detail-hero-copy">
       <div><h4>${escapeHtml(world.name || world.id || "World Details")}</h4><span>${author}</span></div>
-      <div class="world-detail-chips"><span class="world-detail-chip">${escapeHtml(status)}</span>${favoriteChip}${actions}</div>
+      <div class="world-detail-hero-side">${chips}${actions}</div>
     </div>
   </section>`;
 }
@@ -10073,25 +10120,27 @@ function showWorldActionsMenu(event, world = {}) {
   const worldId = String(button.dataset.worldId || world.id || "").trim();
   if (!worldId) return;
   const rect = button.getBoundingClientRect();
-  const location = String(button.dataset.location || "").trim();
-  const favorite = isFavoriteWorld(worldId);
-  const actions = [];
-  if (location) actions.push({ label: "Self Invite", action: () => runSocialActionDataset({ socialAction: "joinWorld", worldId, location }) });
-  actions.push(
-    { label: "New Invite", action: () => runSocialActionDataset({ socialAction: "createWorldInstance", worldId, instanceType: "private" }) },
-    { label: "New Friends+", action: () => runSocialActionDataset({ socialAction: "createWorldInstance", worldId, instanceType: "hidden" }) },
-    { label: "New Public", action: () => runSocialActionDataset({ socialAction: "createWorldInstance", worldId, instanceType: "public" }) },
-    { label: "Make Home", action: () => runSocialActionDataset({ socialAction: "setHomeWorld", worldId }) },
-    favorite
-      ? { label: "Unfavorite", className: "danger", action: () => runSocialActionDataset({ socialAction: "unfavoriteWorld", worldId }) }
-      : { label: "Add to Favorites", action: () => runSocialActionDataset({ socialAction: "favoriteWorld", worldId }) }
-  );
-  if (button.dataset.openInWorlds === "true") actions.push({ label: "Open in Worlds", action: () => runSocialActionDataset({ socialAction: "openWorldInWorldsTab", worldId }) });
-  if (button.dataset.copyId !== "false") actions.push({ label: "Copy World ID", action: () => runSocialActionDataset({ socialAction: "copyWorldId", worldId }) });
+  const actions = [
+    { label: "Create New Instance", heading: true },
+    { label: "Public", action: () => runSocialActionDataset({ socialAction: "createWorldInstance", worldId, instanceType: "public" }) },
+    { label: "Friends+", action: () => runSocialActionDataset({ socialAction: "createWorldInstance", worldId, instanceType: "hidden" }) },
+    { label: "Friends", action: () => runSocialActionDataset({ socialAction: "createWorldInstance", worldId, instanceType: "friends" }) },
+    { label: "Invite+", action: () => runSocialActionDataset({ socialAction: "createWorldInstance", worldId, instanceType: "invite-plus" }) },
+    { label: "Invite", action: () => runSocialActionDataset({ socialAction: "createWorldInstance", worldId, instanceType: "private" }) },
+    { label: "Create and Invite Friends in Current Lobby", heading: true },
+    { label: "Public", className: "with-badge", action: () => runSocialActionDataset({ socialAction: "createWorldInstance", worldId, instanceType: "public", inviteCurrentInstanceFriends: "true" }) },
+    { label: "Friends+", className: "with-badge", action: () => runSocialActionDataset({ socialAction: "createWorldInstance", worldId, instanceType: "hidden", inviteCurrentInstanceFriends: "true" }) },
+    { label: "Friends", className: "with-badge", action: () => runSocialActionDataset({ socialAction: "createWorldInstance", worldId, instanceType: "friends", inviteCurrentInstanceFriends: "true" }) },
+    { label: "Invite+", className: "with-badge", action: () => runSocialActionDataset({ socialAction: "createWorldInstance", worldId, instanceType: "invite-plus", inviteCurrentInstanceFriends: "true" }) },
+    { label: "Invite", className: "with-badge", action: () => runSocialActionDataset({ socialAction: "createWorldInstance", worldId, instanceType: "private", inviteCurrentInstanceFriends: "true" }) }
+  ];
   showContextMenu(rect.left, rect.bottom + 6, actions);
 }
 function worldDetailImageHtml(world) {
-  return `<div class="world-detail-image-card">${world.imageUrl ? `<img src="${escapeAttr(world.imageUrl)}" alt="">` : `<span>No image</span>`}</div>`;
+  const contents = world.imageUrl ? `<img src="${escapeAttr(world.imageUrl)}" alt="">` : `<span>No image</span>`;
+  return world.imageUrl
+    ? previewImageButtonHtml(world.imageUrl, "world-detail-image-card image-preview-trigger", contents)
+    : `<div class="world-detail-image-card">${contents}</div>`;
 }
 function worldAboutHtml(world) {
   const description = world.description || "No world description is available.";
@@ -10606,13 +10655,24 @@ async function handleSocialAction(event) {
   try {
     if (action === "joinWorld") {
       await api("vrchatOpenWorld", { worldId, location: button.dataset.location || "" }, 45000);
+      removeSelfInviteNotifications();
       toast("Invite sent to yourself. Accept it in VRChat to join.");
       return;
     }
     if (action === "createWorldInstance") {
       const type = button.dataset.instanceType || "private";
-      await api("vrchatCreateWorldInstance", { worldId, type, region: "use" }, 45000);
-      toast("Instance created and invite sent to yourself.");
+      const inviteCurrentInstanceFriends = button.dataset.inviteCurrentInstanceFriends === "true";
+      const result = await api("vrchatCreateWorldInstance", { worldId, type, region: "use", inviteCurrentInstanceFriends }, inviteCurrentInstanceFriends ? 90000 : 45000);
+      if (inviteCurrentInstanceFriends) {
+        const invites = result?.friendInvites || {};
+        const sent = Number(invites.sent || 0);
+        const matched = Number(invites.matched || 0);
+        const failed = Number(invites.failed || 0);
+        toast(`Instance created. Self invite sent. Friend invites: ${sent}/${matched}${failed ? `, ${failed} failed` : ""}.`);
+      } else {
+        toast("Instance created and invite sent to yourself.");
+      }
+      removeSelfInviteNotifications();
       await refreshCurrentLocationSilent();
       return;
     }
@@ -10648,6 +10708,7 @@ async function handleSocialAction(event) {
       const choice = await chooseInviteMessageSlot({ title: "Send Invite", message: "Send an invite using one of your VRChat invite messages?", confirmLabel: "Send Invite", messageType: "message" });
       if (!choice) return;
       await api("vrchatInviteUser", { userId, instanceId: currentInstanceIdForInvite(), messageSlot: choice.messageSlot }, 45000);
+      removeSelfInviteNotifications();
       toast("Invite sent.");
       return;
     }
@@ -12351,7 +12412,7 @@ $("unfavoriteAllWorldsBtn").addEventListener("click", unfavoriteAllWorldsInSelec
 $("clearWorldSearchBtn").addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();
-  clearWorldSearch({ keepHistoryOpen: true });
+  clearWorldSearch({ keepHistoryOpen: !$("worldSearchHistoryMenu").hidden });
 });
 $("randomWorldBtn").addEventListener("click", async () => {
   try {
@@ -12418,6 +12479,13 @@ $("editGroupBackgroundBtn").addEventListener("click", (event) => {
 ["tagsInput"].forEach((id) => $(id).addEventListener("input", updateAvatarDetailBadges));
 ["avatarIdInput", "tagsInput", "descriptionInput", "notesInput", "sourceUrlInput"].forEach((id) => $(id).addEventListener("input", updateAvatarDetailSearchHighlightsFromForm));
 $("avatarDetailThumbnailButton").addEventListener("click", () => { const image = $("imageInput").value.trim() || $("thumbnailInput").value.trim(); if (!image) return; $("imagePreviewFull").src = image; $("imagePreviewDialog").showModal(); });
+document.addEventListener("click", (event) => {
+  const button = event.target.closest?.("[data-image-preview]");
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openImagePreview(button.dataset.imagePreview || "");
+});
 $("avatarDetailAuthorBtn").addEventListener("click", showAvatarAuthorSearchOptions);
 $("avatarDetailUpdated").addEventListener("click", showAvatarUpdateHistory);
 ["avatarNameInput", "avatarIdInput", "authorNameInput", "authorIdInput"].forEach((id) => $(id).addEventListener("input", () => { updateAvatarAuthorAction(); updateAvatarDetailSearchHighlightsFromForm(); }));
@@ -12554,7 +12622,7 @@ $("searchAvatarDatabaseBtn").addEventListener("click", () => runAvatarDatabaseSe
 $("clearAvatarDatabaseBtn").addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();
-  clearAvatarDatabaseSearch({ keepHistoryOpen: true });
+  clearAvatarDatabaseSearch({ keepHistoryOpen: !$("databaseSearchHistoryMenu").hidden });
 });
 $("avatarDatabaseProviderMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "avatarDatabaseProviderSelect", "avatarDatabaseProviderMenu", "avatarDatabaseProviderMenuBtn", () => {
   state.avatarDatabaseProvider = avatarDatabaseProvider();

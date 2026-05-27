@@ -5030,6 +5030,11 @@ internal sealed class VrChatClient
         if (string.IsNullOrWhiteSpace(worldId)) throw new InvalidOperationException("World not found.");
         var currentUser = await GetCurrentUserAsync();
         if (string.IsNullOrWhiteSpace(currentUser.Id)) throw new InvalidOperationException("VRChat user not found.");
+        var inviteCurrentInstanceFriends = input.InviteCurrentInstanceFriends;
+        var previousLocation = inviteCurrentInstanceFriends ? await GetCurrentLocationAsync() : null;
+        var friendsToInvite = inviteCurrentInstanceFriends
+            ? await FriendsInLocationAsync(previousLocation?.Location ?? "", previousLocation?.WorldId ?? "", previousLocation?.InstanceId ?? "")
+            : [];
         var mode = (input.Type ?? "private").Trim().ToLowerInvariant().Replace("_", "-").Replace(" ", "-");
         var region = CleanInstanceRegion(input.Region);
         var body = mode switch
@@ -5051,7 +5056,58 @@ internal sealed class VrChatClient
         var instanceId = ReadString(doc.RootElement, "instanceId") ?? ReadString(doc.RootElement, "id") ?? "";
         if (string.IsNullOrWhiteSpace(instanceId)) throw new InvalidOperationException("VRChat created the instance but did not return an instance ID.");
         await OpenWorldAsync(new WorldLaunchInput(worldId, instanceId, $"{worldId}:{instanceId}"));
-        return new { ok = true, worldId, instanceId, location = $"{worldId}:{instanceId}", type = mode, region, method = "create-and-self-invite" };
+        var inviteResults = inviteCurrentInstanceFriends
+            ? await InviteFriendsToInstanceAsync(friendsToInvite, worldId, instanceId)
+            : new FriendInstanceInviteResult(0, 0, 0, []);
+        return new { ok = true, worldId, instanceId, location = $"{worldId}:{instanceId}", type = mode, region, method = inviteCurrentInstanceFriends ? "create-self-invite-and-friend-invites" : "create-and-self-invite", friendInvites = inviteResults };
+    }
+    private async Task<List<VrChatFriendSummary>> FriendsInLocationAsync(string location, string worldId, string instanceId)
+    {
+        var targetWorldId = string.IsNullOrWhiteSpace(worldId) ? ParseWorldId(location) : worldId.Trim();
+        var targetInstanceId = string.IsNullOrWhiteSpace(instanceId) ? ParseInstanceId(location, targetWorldId) : instanceId.Trim();
+        if (string.IsNullOrWhiteSpace(targetWorldId) || string.IsNullOrWhiteSpace(targetInstanceId)) return [];
+        var friends = (await GetFriendsAsync(new PageInput(100, 0))).Friends;
+        return friends
+            .Where(friend => FriendIsInLocation(friend, targetWorldId, targetInstanceId))
+            .Where(friend => !string.IsNullOrWhiteSpace(friend.Id))
+            .GroupBy(friend => friend.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .OrderBy(friend => friend.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+    private static bool FriendIsInLocation(VrChatFriendSummary friend, string worldId, string instanceId)
+    {
+        var friendLocation = friend.Location?.Trim() ?? "";
+        var friendWorldId = string.IsNullOrWhiteSpace(friend.WorldId) ? ParseWorldId(friendLocation) : friend.WorldId.Trim();
+        var friendInstanceId = ParseInstanceId(friendLocation, friendWorldId);
+        return !string.IsNullOrWhiteSpace(friendWorldId)
+            && !string.IsNullOrWhiteSpace(friendInstanceId)
+            && friendWorldId.Equals(worldId, StringComparison.OrdinalIgnoreCase)
+            && friendInstanceId.Equals(instanceId, StringComparison.OrdinalIgnoreCase);
+    }
+    private async Task<FriendInstanceInviteResult> InviteFriendsToInstanceAsync(List<VrChatFriendSummary> friends, string worldId, string instanceId)
+    {
+        var sent = 0;
+        var failed = 0;
+        var failures = new List<string>();
+        var targetInstanceId = string.IsNullOrWhiteSpace(worldId) || instanceId.StartsWith("wrld_", StringComparison.OrdinalIgnoreCase)
+            ? instanceId
+            : $"{worldId}:{instanceId}";
+        foreach (var friend in friends)
+        {
+            try
+            {
+                await InviteUserAsync(new InviteUserInput(friend.Id, targetInstanceId, 0));
+                sent++;
+                await Task.Delay(250);
+            }
+            catch (Exception ex)
+            {
+                failed++;
+                failures.Add($"{(string.IsNullOrWhiteSpace(friend.DisplayName) ? friend.Id : friend.DisplayName)}: {ex.Message}");
+            }
+        }
+        return new FriendInstanceInviteResult(friends.Count, sent, failed, failures);
     }
     public async Task<VrChatSessionState> SetHomeWorldAsync(string worldId)
     {
@@ -8149,7 +8205,8 @@ internal sealed record WorldFavoriteInput(string Id = "", string Tag = "");
 internal sealed record PageInput(int Limit = 100, int Offset = 0);
 internal sealed record WorldSearchInput(string Query = "", int Limit = 50, int Offset = 0, string Mode = "", string Sort = "popularity", string Order = "descending", string ReleaseStatus = "");
 internal sealed record WorldLaunchInput(string WorldId = "", string InstanceId = "", string Location = "");
-internal sealed record WorldInstanceCreateInput(string WorldId = "", string Type = "private", string Region = "use");
+internal sealed record WorldInstanceCreateInput(string WorldId = "", string Type = "private", string Region = "use", bool InviteCurrentInstanceFriends = false);
+internal sealed record FriendInstanceInviteResult(int Matched, int Sent, int Failed, List<string> Failures);
 internal sealed record WorldVisitHistoryInput(string WorldId = "", string InstanceId = "", string Location = "");
 internal sealed record LatestWorldLocationResult(bool Found, string WorldName, string Location, string WorldId, string Timestamp, string Message);
 internal sealed record PlayerActivityLogInput(int Limit = 250);
