@@ -448,6 +448,7 @@
     <header><h3>Settings</h3><button type="button" class="icon-button" data-close="customizationDialog">x</button></header>
     <div class="settings-tabs" role="tablist">
       <button id="settingsCustomizationTab" type="button" class="active">Customization</button>
+      <button id="settingsOverlayTab" type="button">Overlay</button>
       <button id="settingsSyncTab" type="button">Sync</button>
       <button id="settingsBackupsTab" type="button">Backups</button>
       <button id="settingsHistoryTab" type="button">Metadata History</button>
@@ -464,6 +465,14 @@
       <label>Panel opacity</label>
       <div class="page-slider-row"><button id="panelOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="panelOpacityInput" type="range" min="0" max="100" value="35"><button id="panelOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button></div>
       <label id="panelOpacityValue" class="page-slider-value">Opacity <input id="panelOpacityNumber" type="number" min="0" max="100" step="1" value="35">%</label>
+    </section>
+    <section id="settingsOverlayPanel" class="settings-panel" hidden>
+      <div class="settings-section-label">Overlay</div>
+      <label class="settings-toggle-row"><span><strong>Enable overlay keybinds</strong><small>When disabled, overlay shortcuts will not open or hide the overlay.</small></span><input id="overlayEnabledToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span></label>
+      <div class="settings-panel-actions"><button id="resetOverlayLayoutBtn" type="button">Reset Overlay UI</button></div>
+      <div class="settings-list keybind-list">
+        <div class="settings-list-item keybind-row"><div><strong>Toggle overlay</strong><span>Shows enabled overlay panels. Pinned panels stay visible when the overlay is hidden.</span></div><kbd id="overlayToggleKeybindLabel">Ctrl+Shift+O</kbd></div>
+      </div>
     </section>
     <section id="settingsSyncPanel" class="settings-panel" hidden>
       <div class="settings-panel-actions"><button id="syncNowBtn" type="button">Sync Now</button><button id="refreshSyncCenterBtn" type="button">Refresh</button></div>
@@ -490,6 +499,7 @@
     </section>
     <menu><button id="checkUpdateBtn" type="button">Check Updates</button><button id="cancelSettingsBtn" type="button">Cancel</button><button id="applySettingsBtn" type="button" class="primary">Apply</button></menu>
   </form></dialog>
+  <section id="gameOverlayRoot" class="game-overlay-root overlay-hidden" aria-label="VRCNeph overlay" hidden></section>
   <dialog id="backupRestoreDialog"><form method="dialog" class="dialog-form">
     <header><h3>Restore Backup</h3><button type="button" class="icon-button" data-close="backupRestoreDialog">x</button></header>
     <p id="backupRestoreMessage" class="dialog-note"></p>

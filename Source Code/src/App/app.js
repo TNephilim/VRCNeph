@@ -1,4 +1,17 @@
-const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", schemaVersion: 8 };
+const DEFAULT_OVERLAY_KEYBIND = "Ctrl+Shift+O";
+const DEFAULT_OVERLAY_PANELS = {
+  me: { visible: true, pinned: true, x: 24, y: 24, width: 280, height: 142 },
+  world: { visible: true, pinned: false, x: 320, y: 24, width: 340, height: 164 },
+  friends: { visible: true, pinned: false, x: 24, y: 190, width: 310, height: 320 },
+  notifications: { visible: true, pinned: false, x: 356, y: 210, width: 340, height: 280 }
+};
+const OVERLAY_PANEL_META = {
+  me: { title: "Me" },
+  world: { title: "Current World" },
+  friends: { title: "Friends" },
+  notifications: { title: "Invites / Activity" }
+};
+const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", overlayEnabled: true, overlayKeybind: DEFAULT_OVERLAY_KEYBIND, overlayPanels: DEFAULT_OVERLAY_PANELS, schemaVersion: 9 };
 const LIVE_SYNC_TIMING = {
   favoriteSyncMs: 45 * 1000,
   safetySyncMs: 10 * 60 * 1000,
@@ -156,10 +169,29 @@ const state = {
   friendDetailLoadTimer: null,
   friendDetailCacheSaveTimer: null,
   avatarAuthorCache: new Map(),
-  settings: { ...DEFAULT_SETTINGS },
+  settings: cloneSettings(DEFAULT_SETTINGS),
+  overlayOpen: false,
+  overlayDrag: null,
   pending: new Map()
 };
 const $ = (id) => document.getElementById(id);
+function cloneSettings(settings) {
+  return JSON.parse(JSON.stringify(settings || DEFAULT_SETTINGS));
+}
+function normalizeOverlayPanels(panels) {
+  const source = panels && typeof panels === "object" ? panels : {};
+  return Object.fromEntries(Object.entries(DEFAULT_OVERLAY_PANELS).map(([id, defaults]) => {
+    const saved = source[id] && typeof source[id] === "object" ? source[id] : {};
+    return [id, {
+      visible: saved.visible !== false,
+      pinned: saved.pinned === true,
+      x: Number.isFinite(saved.x) ? Math.max(0, Number(saved.x)) : defaults.x,
+      y: Number.isFinite(saved.y) ? Math.max(0, Number(saved.y)) : defaults.y,
+      width: Number.isFinite(saved.width) ? Math.min(620, Math.max(220, Number(saved.width))) : defaults.width,
+      height: Number.isFinite(saved.height) ? Math.min(520, Math.max(120, Number(saved.height))) : defaults.height
+    }];
+  }));
+}
 const INLINE_MESSAGE_RESIZE_MIN = { width: 360, height: 360, margin: 12 };
 const BASE_DEVICE_PIXEL_RATIO = window.devicePixelRatio || 1;
 let updatePromptShown = false;
@@ -405,9 +437,12 @@ async function loadSettings() {
       backgroundOpacity: Number.isFinite(saved.backgroundOpacity) ? Math.min(100, Math.max(0, Number(saved.backgroundOpacity))) : DEFAULT_SETTINGS.backgroundOpacity,
       panelOpacity: Number.isFinite(saved.panelOpacity) ? Math.min(100, Math.max(0, Number(saved.panelOpacity))) : DEFAULT_SETTINGS.panelOpacity,
       backgroundEffect: String(saved.backgroundEffect || ""),
+      overlayEnabled: saved.overlayEnabled !== false,
+      overlayKeybind: String(saved.overlayKeybind || DEFAULT_OVERLAY_KEYBIND),
+      overlayPanels: normalizeOverlayPanels(saved.overlayPanels),
       schemaVersion: DEFAULT_SETTINGS.schemaVersion
     };
-  } catch { state.settings = { ...DEFAULT_SETTINGS }; }
+  } catch { state.settings = cloneSettings(DEFAULT_SETTINGS); }
   applySettings();
 }
 async function loadBackground() {
@@ -467,6 +502,7 @@ function handleAppEvent(name, data) {
   if (name === "vrchatPipeline") handleVrchatPipelineEvent(data);
   if (name === "vrchatPipelineStatus") handleVrchatPipelineStatus(data);
   if (name === "appCloseRequested") void handleAppCloseRequested(data);
+  if (name === "overlayToggleHotkey") toggleGameOverlay();
 }
 function invalidateBackgroundCache(groupId = "") {
   if (groupId) state.backgroundCache.delete(`group:${groupId}`);
@@ -490,7 +526,163 @@ function backgroundDialogPreviewEffect(value) {
 async function saveSettings() { try { state.settings = await api("settingsSave", state.settings); applySettings(); } catch (e) { toast(e.message); } }
 function queueSaveSettings() { clearTimeout(state.settingsSaveTimer); state.settingsSaveTimer = setTimeout(saveSettings, 220); }
 
-function render() { renderPageTabs(); renderGroups(); renderToolbar(); renderAvatars(); renderAvatarDatabaseResults(); renderAccount(); renderNotificationsPage(); renderMessagesPage(); renderInlineMessagePanel(); renderMessagePopup(); }
+function render() { renderPageTabs(); renderGroups(); renderToolbar(); renderAvatars(); renderAvatarDatabaseResults(); renderAccount(); renderNotificationsPage(); renderMessagesPage(); renderInlineMessagePanel(); renderMessagePopup(); renderGameOverlay(); }
+function overlayPanelSettings(id) {
+  state.settings.overlayPanels = normalizeOverlayPanels(state.settings.overlayPanels);
+  return state.settings.overlayPanels[id] || DEFAULT_OVERLAY_PANELS[id];
+}
+function updateOverlayPanelSettings(id, patch = {}) {
+  state.settings.overlayPanels = normalizeOverlayPanels(state.settings.overlayPanels);
+  state.settings.overlayPanels[id] = { ...state.settings.overlayPanels[id], ...patch };
+  queueSaveSettings();
+  renderGameOverlay();
+}
+function resetOverlayLayout() {
+  state.settings.overlayPanels = normalizeOverlayPanels(DEFAULT_OVERLAY_PANELS);
+  state.overlayOpen = true;
+  renderGameOverlay();
+  toast("Overlay UI reset. Click Apply to save it.");
+}
+function toggleGameOverlay() {
+  if (state.settings.overlayEnabled === false) return;
+  state.overlayOpen = !state.overlayOpen;
+  renderGameOverlay();
+}
+function overlayShortcutMatches(event, combo = state.settings.overlayKeybind || DEFAULT_OVERLAY_KEYBIND) {
+  const parts = String(combo || "").toLowerCase().split("+").map((item) => item.trim()).filter(Boolean);
+  if (!parts.length) return false;
+  const key = parts.find((part) => !["ctrl", "control", "shift", "alt", "meta", "win", "cmd"].includes(part));
+  const wantsCtrl = parts.includes("ctrl") || parts.includes("control");
+  const wantsMeta = parts.includes("meta") || parts.includes("win") || parts.includes("cmd");
+  return event.ctrlKey === wantsCtrl
+    && event.shiftKey === parts.includes("shift")
+    && event.altKey === parts.includes("alt")
+    && event.metaKey === wantsMeta
+    && String(event.key || "").toLowerCase() === key;
+}
+function overlayVisiblePanelIds() {
+  if (state.settings.overlayEnabled === false) return [];
+  return Object.keys(DEFAULT_OVERLAY_PANELS).filter((id) => {
+    const settings = overlayPanelSettings(id);
+    return settings.visible !== false && (state.overlayOpen || settings.pinned);
+  });
+}
+function renderGameOverlay() {
+  const root = $("gameOverlayRoot");
+  if (!root) return;
+  const panelIds = overlayVisiblePanelIds();
+  root.hidden = !panelIds.length;
+  root.classList.toggle("overlay-open", state.overlayOpen);
+  root.classList.toggle("overlay-hidden", !state.overlayOpen);
+  root.innerHTML = panelIds.map(overlayPanelHtml).join("");
+}
+function overlayPanelHtml(id) {
+  const settings = overlayPanelSettings(id);
+  const meta = OVERLAY_PANEL_META[id] || { title: id };
+  return `<article class="game-overlay-panel" data-overlay-panel="${escapeAttr(id)}" style="left:${settings.x}px;top:${settings.y}px;width:${settings.width}px;min-height:${settings.height}px">
+    <header class="game-overlay-panel-header" data-overlay-drag="${escapeAttr(id)}"><h3>${escapeHtml(meta.title)}</h3><div><button type="button" class="icon-button ${settings.pinned ? "active" : ""}" data-overlay-pin="${escapeAttr(id)}" title="${settings.pinned ? "Unpin panel" : "Pin panel"}">P</button><button type="button" class="icon-button" data-overlay-hide="${escapeAttr(id)}" title="Hide panel">x</button></div></header>
+    <div class="game-overlay-panel-body">${overlayPanelBodyHtml(id)}</div>
+  </article>`;
+}
+function overlayPanelBodyHtml(id) {
+  if (id === "me") return overlayMeHtml();
+  if (id === "world") return overlayWorldHtml();
+  if (id === "friends") return overlayFriendsHtml();
+  if (id === "notifications") return overlayNotificationsHtml();
+  return "";
+}
+function overlayMeHtml() {
+  const user = state.vrchat?.user || {};
+  const presence = currentUserPresence(user);
+  const image = currentUserProfileImage(user);
+  const name = user.displayName || "Not logged in";
+  const status = user.statusDescription || currentUserStatusLabel(user.status, presence) || "Status unknown";
+  return `<div class="overlay-profile-row"><span class="overlay-avatar">${image ? `<img src="${escapeAttr(image)}" alt="">` : ""}${currentUserStatusBadgeHtml(user.status, presence)}</span><div><strong>${escapeHtml(name)}</strong><span>${escapeHtml(status)}</span></div></div><div class="overlay-panel-actions"><button type="button" data-overlay-page="friends">Friends</button><button type="button" data-overlay-page="messages">Messages</button></div>`;
+}
+function overlayWorldHtml() {
+  const location = currentUserLocation(state.vrchat?.user || {});
+  const world = location?.world || (state.social?.selectedType === "world" ? state.social?.selectedItem : null);
+  const name = location?.worldName || world?.name || "No world detected";
+  const occupants = [world?.occupants, world?.capacity].filter((value) => value !== undefined && value !== null && value !== "").join("/");
+  const image = normalizeVrchatImageUrl(world?.imageUrl || world?.thumbnailImageUrl || "");
+  return `<div class="overlay-world-card">${image ? `<img src="${escapeAttr(image)}" alt="">` : `<span>No image</span>`}<div><strong>${escapeHtml(name)}</strong><span>${escapeHtml(location?.instanceId || location?.location || "Location unavailable")}</span>${occupants ? `<small>${escapeHtml(occupants)} players</small>` : ""}</div></div><div class="overlay-panel-actions"><button type="button" data-overlay-page="worlds">Worlds</button><button type="button" data-overlay-page="notifications">Activity</button></div>`;
+}
+function overlayFriendsHtml() {
+  const friends = (state.social?.friends || [])
+    .map(applyFriendPresenceAuthority)
+    .filter((friend) => friendPresence(friend) !== "offline")
+    .slice(0, 6);
+  if (!friends.length) return `<div class="settings-empty compact"><h4>No online friends</h4></div>`;
+  return `<div class="overlay-list">${friends.map((friend) => {
+    const presence = friendPresence(friend);
+    const image = friendProfileImage(friend) || friend.imageUrl || "";
+    const location = friend.statusDescription || friend.worldName || friend.worldId || presenceLabel(presence);
+    return `<button type="button" class="overlay-list-row" data-overlay-friend="${escapeAttr(friend.id)}"><span class="overlay-row-avatar">${image ? `<img src="${escapeAttr(image)}" alt="">` : ""}${userStatusDotHtml(friend.status, presence, friendStatusLimited(friend, presence))}</span><span><strong>${escapeHtml(friend.displayName || friend.id)}</strong><small>${escapeHtml(location)}</small></span></button>`;
+  }).join("")}</div>`;
+}
+function overlayNotificationsHtml() {
+  const items = (state.notifications?.items || []).slice(0, 5);
+  if (!items.length) return `<div class="settings-empty compact"><h4>No recent activity</h4></div>`;
+  return `<div class="overlay-list">${items.map((item) => `<button type="button" class="overlay-list-row" data-overlay-page="notifications"><span><strong>${escapeHtml(notificationTitle(item))}</strong><small>${escapeHtml(notificationDetail(item) || formatDateTime(item.createdAt))}</small></span></button>`).join("")}</div>`;
+}
+function handleOverlayClick(event) {
+  const pin = event.target.closest("[data-overlay-pin]");
+  if (pin) {
+    const id = pin.dataset.overlayPin;
+    updateOverlayPanelSettings(id, { pinned: !overlayPanelSettings(id).pinned });
+    return;
+  }
+  const hide = event.target.closest("[data-overlay-hide]");
+  if (hide) {
+    updateOverlayPanelSettings(hide.dataset.overlayHide, { visible: false });
+    return;
+  }
+  const page = event.target.closest("[data-overlay-page]");
+  if (page) {
+    showPage(page.dataset.overlayPage, { userInitiated: true });
+    return;
+  }
+  const friend = event.target.closest("[data-overlay-friend]");
+  if (friend) {
+    showPage("friends", { userInitiated: true });
+    selectSocialFriend(friend.dataset.overlayFriend);
+  }
+}
+function handleOverlayPointerDown(event) {
+  const handle = event.target.closest("[data-overlay-drag]");
+  if (!handle || event.target.closest("button")) return;
+  const panel = handle.closest("[data-overlay-panel]");
+  const id = panel?.dataset.overlayPanel || "";
+  if (!panel || !id) return;
+  event.preventDefault();
+  const settings = overlayPanelSettings(id);
+  state.overlayDrag = { id, startX: event.clientX, startY: event.clientY, x: settings.x, y: settings.y };
+  panel.classList.add("dragging");
+  panel.setPointerCapture?.(event.pointerId);
+}
+function handleOverlayPointerMove(event) {
+  const drag = state.overlayDrag;
+  if (!drag) return;
+  const panel = document.querySelector(`[data-overlay-panel="${CSS.escape(drag.id)}"]`);
+  if (!panel) return;
+  const nextX = Math.max(0, drag.x + event.clientX - drag.startX);
+  const nextY = Math.max(0, drag.y + event.clientY - drag.startY);
+  panel.style.left = `${nextX}px`;
+  panel.style.top = `${nextY}px`;
+}
+function handleOverlayPointerUp(event) {
+  const drag = state.overlayDrag;
+  if (!drag) return;
+  const panel = document.querySelector(`[data-overlay-panel="${CSS.escape(drag.id)}"]`);
+  if (panel) {
+    panel.classList.remove("dragging");
+    const nextX = Math.max(0, Math.round(Number.parseFloat(panel.style.left) || drag.x));
+    const nextY = Math.max(0, Math.round(Number.parseFloat(panel.style.top) || drag.y));
+    updateOverlayPanelSettings(drag.id, { x: nextX, y: nextY });
+    panel.releasePointerCapture?.(event.pointerId);
+  }
+  state.overlayDrag = null;
+}
 function renderFavoritesView() {
   renderPageTabs();
   renderGroups();
@@ -5254,8 +5446,10 @@ function syncPanelOpacityFromNumber() {
   applyPanelOpacity();
 }
 function openSettingsDialog() {
-  state.settingsDraft = { original: { ...state.settings }, applied: false };
+  state.settingsDraft = { original: cloneSettings(state.settings), applied: false };
   $("bgEffectSelect").value = state.settings.backgroundEffect;
+  $("overlayEnabledToggle").checked = state.settings.overlayEnabled !== false;
+  $("overlayToggleKeybindLabel").textContent = state.settings.overlayKeybind || DEFAULT_OVERLAY_KEYBIND;
   updateSortButton("bgEffectSelect", "bgEffectMenuBtn");
   $("customizationDialog").showModal();
   setSettingsTab("customization");
@@ -11188,7 +11382,7 @@ async function applySettingsDialog() {
 function cancelSettingsDialog() {
   if (state.settingsDraft?.original) {
     const backgroundEffect = state.settings.backgroundEffect;
-    state.settings = { ...state.settingsDraft.original };
+    state.settings = cloneSettings(state.settingsDraft.original);
     state.settings.backgroundEffect = backgroundEffect;
     applySettings();
     updateVrChatBackgroundSyncTimer();
@@ -11403,7 +11597,7 @@ async function handleAppCloseRequested(data = {}) {
   }
 }
 
-function applySettings() { applyGridSize(); applyColors(); applyBackgroundOpacity(); applyPanelOpacity(); applyActiveBackgroundEffect(); }
+function applySettings() { applyGridSize(); applyColors(); applyBackgroundOpacity(); applyPanelOpacity(); applyActiveBackgroundEffect(); renderGameOverlay(); }
 function applyGridSize() {
   const columns = Math.min(10, Math.max(3, Number(state.activePage === "database" ? state.settings.databaseGridSize : state.settings.gridSize) || DEFAULT_SETTINGS.gridSize));
   const activeGrid = state.activePage === "database" ? $("avatarDatabaseResults") : $("avatarGrid");
@@ -12252,8 +12446,14 @@ document.addEventListener("wheel", wheelScrollDuringDrag, { passive: false, capt
 document.addEventListener("wheel", trackZoomWheel, { passive: true, capture: true });
 document.addEventListener("keydown", (event) => {
   if (keyScrollDuringDrag(event)) return;
+  const active = document.activeElement;
+  const isTyping = active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName);
+  if (!isTyping && !document.querySelector("dialog[open]") && overlayShortcutMatches(event)) {
+    event.preventDefault();
+    toggleGameOverlay();
+    return;
+  }
   if (event.key === "Escape") {
-    const active = document.activeElement;
     if (active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName) && (active.value || "").trim()) return;
     if (isUserDetailPopupOpen()) {
       closeNotificationDetails();
@@ -12321,8 +12521,15 @@ $("databaseGridSizeInput").addEventListener("input", () => { state.settings.data
 window.addEventListener("resize", applyGridSize);
 window.addEventListener("resize", () => { if (isNotificationPopoverOpen()) positionNotificationPopover(); });
 window.addEventListener("resize", () => { if (_bgCanvas && _bgActive) { _bgCanvas.width = window.innerWidth; _bgCanvas.height = window.innerHeight; _bgState = {}; } });
+window.addEventListener("resize", renderGameOverlay);
+$("gameOverlayRoot").addEventListener("click", handleOverlayClick);
+$("gameOverlayRoot").addEventListener("pointerdown", handleOverlayPointerDown);
+document.addEventListener("pointermove", handleOverlayPointerMove);
+document.addEventListener("pointerup", handleOverlayPointerUp);
+document.addEventListener("pointercancel", handleOverlayPointerUp);
 $("customizationBtn").addEventListener("click", openSettingsDialog);
 $("settingsCustomizationTab").addEventListener("click", () => setSettingsTab("customization"));
+$("settingsOverlayTab").addEventListener("click", () => setSettingsTab("overlay"));
 $("settingsSyncTab").addEventListener("click", () => setSettingsTab("sync"));
 $("settingsDiagnosticsTab").addEventListener("click", () => setSettingsTab("diagnostics"));
 $("settingsHistoryTab").addEventListener("click", () => setSettingsTab("history"));
@@ -12331,9 +12538,10 @@ $("settingsBackupsTab").addEventListener("click", () => setSettingsTab("backups"
 $("customizationDialog").addEventListener("close", () => {
   if (state.settingsDraft && !state.settingsDraft.applied) {
     const backgroundEffect = state.settings.backgroundEffect;
-    state.settings = { ...state.settingsDraft.original };
+    state.settings = cloneSettings(state.settingsDraft.original);
     state.settings.backgroundEffect = backgroundEffect;
     applySettings();
+    renderGameOverlay();
     updateVrChatBackgroundSyncTimer();
   }
   clearTimeout(settingsLivePreviewTimer);
@@ -12349,6 +12557,8 @@ $("openGameBtn").addEventListener("click", async () => {
 });
 $("themeColorInput").addEventListener("input", () => { state.settings.themeColor = $("themeColorInput").value; if (state.settings.panelColorSynced) state.settings.panelColor = state.settings.themeColor; applyColors(); });
 $("panelColorInput").addEventListener("input", () => { if (state.settings.panelColorSynced) return; state.settings.panelColor = $("panelColorInput").value; applyColors(); });
+$("overlayEnabledToggle").addEventListener("change", () => { state.settings.overlayEnabled = $("overlayEnabledToggle").checked; if (!state.settings.overlayEnabled) state.overlayOpen = false; renderGameOverlay(); });
+$("resetOverlayLayoutBtn").addEventListener("click", resetOverlayLayout);
 $("panelColorOverlay").addEventListener("click", () => confirmAction({
   title: "Panel Color Locked",
   message: "Turn off Sync colors to unlock the panel color picker.",
