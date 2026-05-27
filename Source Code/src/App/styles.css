@@ -1040,7 +1040,7 @@ dialog::backdrop { background: rgba(0,0,0,.62); transition: background-color 900
 .presence-badge .presence-dot { width: 11px; height: 11px; min-width: 11px; }
 .presence-dot { --presence-color: color-mix(in srgb, var(--muted) 68%, var(--panel-2)); --presence-ring-size: 0px; --presence-ring-color: transparent; position: relative; display: inline-block; flex: 0 0 auto; box-sizing: border-box; width: 10px; height: 10px; min-width: 10px; border: var(--presence-ring-size) solid var(--presence-ring-color); border-radius: 999px; background: transparent; overflow: hidden; }
 .presence-dot::before { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--presence-color); }
-.presence-dot.limited::after { content: ""; position: absolute; inset: 3px; border-radius: inherit; background: var(--presence-core); }
+.presence-dot.limited::after { content: ""; position: absolute; inset: 2px; border-radius: inherit; background: color-mix(in srgb, #d8dde8 82%, var(--presence-core)); box-shadow: 0 0 0 1px rgba(10, 8, 16, .62), 0 0 5px rgba(255, 255, 255, .28); }
 .presence-dot.online { --presence-color: var(--presence-green); }
 .presence-dot.active { --presence-color: var(--presence-green); }
 .presence-dot.joinme { --presence-color: var(--presence-blue); }

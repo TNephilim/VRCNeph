@@ -7870,38 +7870,44 @@ function suppressUserDetailBackdropClick(event) {
   event.preventDefault();
   event.stopImmediatePropagation();
 }
-const virtualDesktopClickFallback = { pointerId: null, target: null, x: 0, y: 0, moved: false, timer: null, clickSeen: false };
+const virtualDesktopClickFallback = { inputId: null, target: null, x: 0, y: 0, moved: false, timer: null, clickSeen: false };
 function interactiveVirtualDesktopTarget(target) {
   const element = target?.closest?.("button, a[href], input, select, textarea, label, summary, [role='button'], [tabindex]:not([tabindex='-1'])");
   if (!element || element.closest?.("[disabled], [aria-disabled='true']")) return null;
   return element;
 }
+function interactiveVirtualDesktopTargetAt(x, y) {
+  return interactiveVirtualDesktopTarget(document.elementFromPoint(x, y));
+}
 function clearVirtualDesktopClickFallback() {
   clearTimeout(virtualDesktopClickFallback.timer);
-  virtualDesktopClickFallback.pointerId = null;
+  virtualDesktopClickFallback.inputId = null;
   virtualDesktopClickFallback.target = null;
   virtualDesktopClickFallback.moved = false;
   virtualDesktopClickFallback.clickSeen = false;
 }
-function handleVirtualDesktopPointerDown(event) {
+function beginVirtualDesktopClickFallback(event, inputId) {
   if (event.button !== undefined && event.button !== 0) return;
+  if (virtualDesktopClickFallback.inputId && virtualDesktopClickFallback.inputId !== inputId && inputId !== "mouse") return;
   if (state.dragSort || event.target.closest?.("[data-inline-message-resize]")) return;
   const target = interactiveVirtualDesktopTarget(event.target);
   if (!target) return;
   clearVirtualDesktopClickFallback();
-  virtualDesktopClickFallback.pointerId = event.pointerId;
+  virtualDesktopClickFallback.inputId = inputId;
   virtualDesktopClickFallback.target = target;
   virtualDesktopClickFallback.x = event.clientX;
   virtualDesktopClickFallback.y = event.clientY;
 }
-function handleVirtualDesktopPointerMove(event) {
-  if (virtualDesktopClickFallback.pointerId !== event.pointerId) return;
-  if (Math.hypot(event.clientX - virtualDesktopClickFallback.x, event.clientY - virtualDesktopClickFallback.y) > 8) virtualDesktopClickFallback.moved = true;
+function moveVirtualDesktopClickFallback(event, inputId) {
+  if (!virtualDesktopInputMatches(inputId)) return;
+  if (Math.hypot(event.clientX - virtualDesktopClickFallback.x, event.clientY - virtualDesktopClickFallback.y) > 12) virtualDesktopClickFallback.moved = true;
 }
-function handleVirtualDesktopPointerUp(event) {
-  if (virtualDesktopClickFallback.pointerId !== event.pointerId) return;
-  const target = virtualDesktopClickFallback.target;
-  const sameTarget = target && (target === event.target || target.contains(event.target));
+function endVirtualDesktopClickFallback(event, inputId) {
+  if (!virtualDesktopInputMatches(inputId)) return;
+  const startTarget = virtualDesktopClickFallback.target;
+  const releaseTarget = interactiveVirtualDesktopTarget(event.target) || interactiveVirtualDesktopTargetAt(event.clientX, event.clientY);
+  const target = releaseTarget || startTarget;
+  const sameTarget = startTarget && target && (target === startTarget || startTarget.contains(target) || target.contains(startTarget));
   if (!target || !sameTarget || virtualDesktopClickFallback.moved || target.disabled) {
     clearVirtualDesktopClickFallback();
     return;
@@ -7913,7 +7919,29 @@ function handleVirtualDesktopPointerUp(event) {
       target.click();
     }
     clearVirtualDesktopClickFallback();
-  }, 140);
+  }, 70);
+}
+function virtualDesktopInputMatches(inputId) {
+  const activeInputId = virtualDesktopClickFallback.inputId;
+  return activeInputId === inputId || (inputId === "mouse" && String(activeInputId || "").startsWith("pointer:"));
+}
+function handleVirtualDesktopPointerDown(event) {
+  beginVirtualDesktopClickFallback(event, `pointer:${event.pointerId}`);
+}
+function handleVirtualDesktopPointerMove(event) {
+  moveVirtualDesktopClickFallback(event, `pointer:${event.pointerId}`);
+}
+function handleVirtualDesktopPointerUp(event) {
+  endVirtualDesktopClickFallback(event, `pointer:${event.pointerId}`);
+}
+function handleVirtualDesktopMouseDown(event) {
+  beginVirtualDesktopClickFallback(event, "mouse");
+}
+function handleVirtualDesktopMouseMove(event) {
+  moveVirtualDesktopClickFallback(event, "mouse");
+}
+function handleVirtualDesktopMouseUp(event) {
+  endVirtualDesktopClickFallback(event, "mouse");
 }
 function markNativeClickSeen() {
   if (!virtualDesktopClickFallback.target) return;
@@ -12152,6 +12180,9 @@ document.addEventListener("pointerdown", handleVirtualDesktopPointerDown, { capt
 document.addEventListener("pointermove", handleVirtualDesktopPointerMove, { capture: true });
 document.addEventListener("pointerup", handleVirtualDesktopPointerUp, { capture: true });
 document.addEventListener("pointercancel", clearVirtualDesktopClickFallback, { capture: true });
+document.addEventListener("mousedown", handleVirtualDesktopMouseDown, { capture: true });
+document.addEventListener("mousemove", handleVirtualDesktopMouseMove, { capture: true });
+document.addEventListener("mouseup", handleVirtualDesktopMouseUp, { capture: true });
 document.addEventListener("click", markNativeClickSeen, { capture: true });
 document.addEventListener("dragover", autoScrollDrag);
 document.addEventListener("wheel", containUserDetailPopupWheel, { passive: false, capture: true });
