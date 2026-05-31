@@ -152,8 +152,6 @@ internal static class Program
     private static PhotinoWindow? AppWindow;
     private static volatile bool AppCloseConfirmed;
     private static volatile bool SyncedOrderCloseBlocked;
-    private static IntPtr KeyboardHook;
-    private static LowLevelKeyboardProc? KeyboardProc;
 
     [STAThread]
     private static void Main()
@@ -236,9 +234,7 @@ internal static class Program
             }
         });
 
-        InstallKeyboardHook();
         window.WaitForClose();
-        UninstallKeyboardHook();
         Pipeline.Stop();
     }
 
@@ -247,41 +243,6 @@ internal static class Program
         if (!OperatingSystem.IsWindows()) return;
         try { SetCurrentProcessExplicitAppUserModelID(AppUserModelId); }
         catch { }
-    }
-
-    private static void InstallKeyboardHook()
-    {
-        if (!OperatingSystem.IsWindows() || KeyboardHook != IntPtr.Zero) return;
-        KeyboardProc = KeyboardHookCallback;
-        KeyboardHook = SetWindowsHookEx(13, KeyboardProc, GetModuleHandle(null), 0);
-    }
-
-    private static void UninstallKeyboardHook()
-    {
-        if (KeyboardHook == IntPtr.Zero) return;
-        UnhookWindowsHookEx(KeyboardHook);
-        KeyboardHook = IntPtr.Zero;
-        KeyboardProc = null;
-    }
-
-    private static IntPtr KeyboardHookCallback(int code, IntPtr wParam, IntPtr lParam)
-    {
-        const int wmKeyDown = 0x0100;
-        const int wmSysKeyDown = 0x0104;
-        const int vkO = 0x4F;
-        if (code >= 0 && (wParam == wmKeyDown || wParam == wmSysKeyDown))
-        {
-            var data = Marshal.PtrToStructure<KbdLlHookStruct>(lParam);
-            var ctrl = (GetAsyncKeyState(0x11) & 0x8000) != 0;
-            var shift = (GetAsyncKeyState(0x10) & 0x8000) != 0;
-            var alt = (GetAsyncKeyState(0x12) & 0x8000) != 0;
-            if (data.VirtualKeyCode == vkO && ctrl && shift && !alt && Settings.Get().OverlayEnabled)
-            {
-                Task.Run(() => SendAppEvent("overlayToggleHotkey", new { keybind = "Ctrl+Shift+O" }));
-                return (IntPtr)1;
-            }
-        }
-        return CallNextHookEx(KeyboardHook, code, wParam, lParam);
     }
 
     private static void SendAppEvent(string name, object data)
@@ -297,27 +258,6 @@ internal static class Program
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern int SetCurrentProcessExplicitAppUserModelID(string appID);
-
-    private delegate IntPtr LowLevelKeyboardProc(int code, IntPtr wParam, IntPtr lParam);
-    [StructLayout(LayoutKind.Sequential)]
-    private struct KbdLlHookStruct
-    {
-        public int VirtualKeyCode;
-        public int ScanCode;
-        public int Flags;
-        public int Time;
-        public IntPtr ExtraInfo;
-    }
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr SetWindowsHookEx(int hookId, LowLevelKeyboardProc callback, IntPtr moduleHandle, uint threadId);
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool UnhookWindowsHookEx(IntPtr hook);
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
-    [DllImport("user32.dll")]
-    private static extern short GetAsyncKeyState(int virtualKey);
-    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern IntPtr GetModuleHandle(string? moduleName);
 
     private static void UpdateSyncedOrderProgress(SyncedAvatarOrderProgress progress)
     {
@@ -2859,7 +2799,7 @@ internal sealed class AvatarStore
 
 internal sealed class AppSettingsStore
 {
-    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", true, "Ctrl+Shift+O", null, 9);
+    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", 9);
     private readonly string _settingsPath = AppPaths.SettingsPath;
     public AppSettings Get()
     {
@@ -2883,33 +2823,7 @@ internal sealed class AppSettingsStore
         var panelOpacity = s.SchemaVersion < 6 && s.PanelOpacity == 0 ? DefaultSettings.PanelOpacity : Math.Clamp(s.PanelOpacity, 0, 100);
         var panelColor = string.IsNullOrWhiteSpace(s.PanelColor) || !System.Text.RegularExpressions.Regex.IsMatch(s.PanelColor, "^#[0-9a-fA-F]{6}$") ? color : s.PanelColor;
         var panelSynced = s.SchemaVersion < 6 || s.PanelColorSynced;
-        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", s.OverlayEnabled, string.IsNullOrWhiteSpace(s.OverlayKeybind) ? "Ctrl+Shift+O" : s.OverlayKeybind, NormalizeOverlayPanels(s.OverlayPanels), 9);
-    }
-    private static Dictionary<string, OverlayPanelSetting> NormalizeOverlayPanels(Dictionary<string, OverlayPanelSetting>? panels)
-    {
-        var defaults = new Dictionary<string, OverlayPanelSetting>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["me"] = new(true, true, 24, 24, 280, 142),
-            ["world"] = new(true, false, 320, 24, 340, 164),
-            ["friends"] = new(true, false, 24, 190, 310, 320),
-            ["notifications"] = new(true, false, 356, 210, 340, 280)
-        };
-        foreach (var key in defaults.Keys.ToList())
-        {
-            if (panels == null || !panels.TryGetValue(key, out var saved))
-            {
-                continue;
-            }
-            var fallback = defaults[key];
-            defaults[key] = new OverlayPanelSetting(
-                saved.Visible,
-                saved.Pinned,
-                Math.Clamp(saved.X, 0, 6000),
-                Math.Clamp(saved.Y, 0, 6000),
-                Math.Clamp(saved.Width <= 0 ? fallback.Width : saved.Width, 220, 620),
-                Math.Clamp(saved.Height <= 0 ? fallback.Height : saved.Height, 120, 520));
-        }
-        return defaults;
+        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", 9);
     }
 }
 
@@ -8280,8 +8194,7 @@ internal sealed record DiagnosticItem(string Name, string Status, string Detail,
 internal sealed record DiagnosticsResult(List<DiagnosticItem> Items);
 internal sealed record ExportResult(string Path);
 internal sealed record GroupClearResult(LibraryData Library, int Removed, string BackupPath);
-internal sealed record OverlayPanelSetting(bool Visible = true, bool Pinned = false, double X = 24, double Y = 24, double Width = 280, double Height = 160);
-internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayKeybind = "Ctrl+Shift+O", Dictionary<string, OverlayPanelSetting>? OverlayPanels = null, int SchemaVersion = 9);
+internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", int SchemaVersion = 9);
 internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx", string SearchMode = "phrase");
 internal sealed record AvatarListResult(List<AvatarInput> Avatars);
 internal sealed record AvatarImageResolveInput(string AvatarId = "", string ImageUrl = "", string Name = "", string UserId = "", string DisplayName = "");
