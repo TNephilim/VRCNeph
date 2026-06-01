@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VRCNeph Overlay</title>
+  <link rel="stylesheet" href="overlay.css">
+</head>
+<body>
+  <main class="overlay-shell">
+    <div id="dragHandle" class="drag-handle" title="Drag overlay">
+      <span></span><span></span><span></span>
+    </div>
+    <header class="overlay-tabs" aria-label="Overlay panels">
+      <button data-panel="avatars" class="active" type="button">Avatars</button>
+      <button data-panel="worlds" type="button">Worlds</button>
+      <button data-panel="friends" type="button">Friends</button>
+      <button data-panel="current" type="button">Current</button>
+      <button data-panel="recent" type="button">Recent</button>
+    </header>
+    <section id="panelHead" class="panel-head">
+      <button id="prevGroupBtn" class="nav-button" type="button" title="Previous group">&lt;</button>
+      <button id="groupSelectBtn" class="group-button" type="button">
+        <span id="panelTitle">Favorites</span>
+        <small id="panelCount">0 avatars</small>
+      </button>
+      <button id="nextGroupBtn" class="nav-button" type="button" title="Next group">&gt;</button>
+    </section>
+    <section id="groupDropdown" class="group-dropdown" hidden></section>
+    <section id="overlayActions" class="overlay-actions" hidden>
+      <input id="overlaySearchInput" type="search" placeholder="Search">
+      <button id="saveCurrentAvatarOverlayBtn" type="button">Save Current Avatar</button>
+      <button id="saveCurrentWorldOverlayBtn" type="button" hidden>Save Current World</button>
+    </section>
+    <section id="content" class="overlay-list" aria-live="polite"></section>
+    <div id="resizeHandle" class="resize-handle" title="Resize overlay"></div>
+  </main>
+
+  <dialog id="confirmDialog" class="overlay-dialog">
+    <form method="dialog">
+      <h2 id="confirmTitle">Confirm</h2>
+      <p id="confirmMessage"></p>
+      <menu>
+        <button id="confirmCancelBtn" type="button">Cancel</button>
+        <button id="confirmOkBtn" class="danger" type="button">Confirm</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="saveCurrentDialog" class="overlay-dialog">
+    <form method="dialog">
+      <h2>Save Current Avatar</h2>
+      <p id="saveCurrentMessage">Choose a group for your current avatar.</p>
+      <label>Favorite group<select id="saveCurrentGroupInput"></select></label>
+      <menu>
+        <button id="saveCurrentCancelBtn" type="button">Cancel</button>
+        <button id="saveCurrentConfirmBtn" class="primary" type="button">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="choiceDialog" class="overlay-dialog">
+    <form method="dialog">
+      <h2 id="choiceTitle">Choose</h2>
+      <p id="choiceMessage"></p>
+      <label><span id="choiceLabel">Option</span><select id="choiceInput"></select></label>
+      <menu>
+        <button id="choiceCancelBtn" type="button">Cancel</button>
+        <button id="choiceOkBtn" class="primary" type="button">OK</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="textDialog" class="overlay-dialog">
+    <form method="dialog">
+      <h2 id="textTitle">Message</h2>
+      <p id="textMessage"></p>
+      <textarea id="textInput" rows="4" maxlength="220"></textarea>
+      <menu>
+        <button id="textCancelBtn" type="button">Cancel</button>
+        <button id="textOkBtn" class="primary" type="button">Send</button>
+      </menu>
+    </form>
+  </dialog>
+  <script src="overlay.js"></script>
+</body>
+</html>

@@ -34,7 +34,8 @@ internal static class AppPaths
     public static readonly string AvatarsJsonPath = Path.Combine(RootDirectory, "avatars.json");
     public static readonly string CategoriesJsonPath = Path.Combine(RootDirectory, "categories.json");
     public static readonly string MessageHistoryPath = Path.Combine(RootDirectory, "messages.json");
-    public static readonly string SettingsPath = Path.Combine(GroupsDirectory, "settings.json");
+    public static readonly string SettingsPath = Path.Combine(RootDirectory, "settings.json");
+    public static readonly string LegacySettingsPath = Path.Combine(GroupsDirectory, "settings.json");
     public static readonly string SessionPath = Path.Combine(GroupsDirectory, "vrchat-session.json");
 
     private static bool _initialized;
@@ -64,6 +65,7 @@ internal static class AppPaths
         Directory.CreateDirectory(DatabaseDirectory);
         Directory.CreateDirectory(LogsDirectory);
         MigrateOldBackups();
+        MigrateLegacySettings();
 
         EnsureJsonFile(AvatarsJsonPath, "[]");
         EnsureJsonFile(CategoriesJsonPath, "[]");
@@ -82,6 +84,13 @@ internal static class AppPaths
         if (File.Exists(path)) return;
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, contents);
+    }
+
+    private static void MigrateLegacySettings()
+    {
+        if (File.Exists(SettingsPath) || !File.Exists(LegacySettingsPath)) return;
+        Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
+        File.Copy(LegacySettingsPath, SettingsPath, false);
     }
 
     private static void MigrateOldBackups()
@@ -137,6 +146,7 @@ internal static class Program
     private const string AppUserModelId = "VRCNeph.Desktop";
     private const string UpdateRepositoryOwner = "TNephilim";
     private const string UpdateRepositoryName = "VRCNeph";
+    private const string OverlayDisplayHotkey = "F8";
     private static readonly AvatarStore Store = new();
     private static readonly AppSettingsStore Settings = new();
     private static readonly MessageHistoryStore MessageHistory = new();
@@ -150,12 +160,25 @@ internal static class Program
     private static SyncedAvatarOrderProgress SyncedOrderProgress = new("", "idle", "", 0, 0);
     private static VrChatPipelineClient? Pipeline;
     private static PhotinoWindow? AppWindow;
+    private static string OverlayAppPath = "";
+    private static readonly object OverlayGate = new();
+    private static Process? OverlayProcess;
+    private static OverlayHotkeyPoller? OverlayHotkey;
+    private static nint OverlayWindowHandle;
+    private static DateTimeOffset LastOverlayHotkeyToggle = DateTimeOffset.MinValue;
     private static volatile bool AppCloseConfirmed;
     private static volatile bool SyncedOrderCloseBlocked;
 
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        if (args.Any(arg => arg.Equals("--overlay", StringComparison.OrdinalIgnoreCase)))
+        {
+            TrySetOverlayAppUserModelId();
+            RunOverlayProcess();
+            return;
+        }
+
         TrySetAppUserModelId();
         if (!VrChat.HasSavedSession)
         {
@@ -167,6 +190,7 @@ internal static class Program
         {
             appPath = ExtractAppFiles();
         }
+        OverlayAppPath = Path.Combine(Path.GetDirectoryName(appPath)!, "overlay.html");
 
         PhotinoWindow? window = null;
         window = new PhotinoWindow
@@ -234,14 +258,123 @@ internal static class Program
             }
         });
 
-        window.WaitForClose();
-        Pipeline.Stop();
+        ConfigureOverlayHotkey();
+
+        try
+        {
+            window.WaitForClose();
+        }
+        finally
+        {
+            OverlayHotkey?.Dispose();
+            CloseOverlay();
+            Pipeline.Stop();
+        }
+        Environment.Exit(0);
+    }
+
+    private static void RunOverlayProcess()
+    {
+        try
+        {
+            Logs.Info("App", "Overlay helper starting.");
+            var overlaySettings = Settings.Get();
+            var overlayPath = Path.Combine(AppContext.BaseDirectory, "src", "App", "overlay.html");
+            if (!File.Exists(overlayPath))
+            {
+                var appPath = ExtractAppFiles();
+                overlayPath = Path.Combine(Path.GetDirectoryName(appPath)!, "overlay.html");
+            }
+
+            var overlay = new PhotinoWindow
+            {
+                Title = "VRCNeph Overlay",
+                UseOsDefaultSize = false,
+                UseOsDefaultLocation = false,
+                Size = new Size(overlaySettings.OverlayWidth, overlaySettings.OverlayHeight),
+                Location = new Point(overlaySettings.OverlayX, overlaySettings.OverlayY),
+                Resizable = true,
+                Chromeless = true,
+                Transparent = true,
+                Topmost = true,
+                ContextMenuEnabled = false
+            }
+            .RegisterWindowCreatedHandler((sender, _) =>
+            {
+                if (sender is PhotinoWindow photino)
+                {
+                    OverlayWindowHandle = photino.WindowHandle;
+                    ApplyOverlayWindowStyle(photino);
+                }
+                Logs.Info("App", "Overlay helper window created.");
+            })
+            .RegisterWebMessageReceivedHandler((sender, message) =>
+            {
+                if (sender is not PhotinoWindow photino) return;
+                _ = Task.Run(async () =>
+                {
+                    var response = await HandleMessageAsync(message);
+                    photino.SendWebMessage(JsonSerializer.Serialize(response, ProgramJson.Options));
+                });
+            })
+            .RegisterWindowClosingHandler((_, _) => false)
+            .Load(overlayPath);
+
+            overlay.WaitForClose();
+            Logs.Info("App", "Overlay helper exiting.");
+            Environment.Exit(0);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("App", "Overlay helper crashed.", ex.ToString());
+            Environment.Exit(1);
+        }
+    }
+
+    private static void ConfigureOverlayHotkey()
+    {
+        OverlayHotkey?.Dispose();
+        OverlayHotkey = null;
+        var settings = Settings.Get();
+        OverlayHotkey = new OverlayHotkeyPoller(settings.OverlayHotkey, () =>
+        {
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    if (Settings.Get().OverlayEnabled)
+                    {
+                        Logs.Info("App", "Overlay hotkey detected.");
+                        ToggleOverlay();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logs.Error("App", "Overlay hotkey failed.", ex.ToString());
+                }
+            });
+        });
+        OverlayHotkey.Start();
+    }
+
+    private static object SaveSettings(AppSettings settings)
+    {
+        var saved = Settings.Save(settings);
+        if (OverlayHotkey is not null) ConfigureOverlayHotkey();
+        return saved;
     }
 
     private static void TrySetAppUserModelId()
     {
         if (!OperatingSystem.IsWindows()) return;
         try { SetCurrentProcessExplicitAppUserModelID(AppUserModelId); }
+        catch { }
+    }
+
+    private static void TrySetOverlayAppUserModelId()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try { SetCurrentProcessExplicitAppUserModelID($"{AppUserModelId}.Overlay"); }
         catch { }
     }
 
@@ -258,6 +391,41 @@ internal static class Program
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern int SetCurrentProcessExplicitAppUserModelID(string appID);
+
+    private const int GwlExStyle = -20;
+    private const int WsExToolWindow = 0x00000080;
+    private const int WsExNoActivate = 0x08000000;
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
+    private const uint SwpNoActivate = 0x0010;
+    private const uint SwpFrameChanged = 0x0020;
+    private const uint SwpShowWindow = 0x0040;
+    private const int SwShow = 5;
+    private static readonly nint HwndTopmost = new(-1);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    private static extern nint GetWindowLongPtr(nint hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+    private static extern nint SetWindowLongPtr(nint hWnd, int nIndex, nint dwNewLong);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ShowWindowAsync(nint hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetWindowRect(nint hWnd, out WindowRect rect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
 
     private static void UpdateSyncedOrderProgress(SyncedAvatarOrderProgress progress)
     {
@@ -344,6 +512,13 @@ internal static class Program
                 "exportJson" => ExportJson(GetPayload<ExportJsonInput>(request)),
                 "openFolder" => OpenFolder(GetPayload<IdInput>(request).Path),
                 "openGame" => OpenGame(),
+                "overlayShow" => ShowOverlay(),
+                "overlayHide" => HideOverlay(),
+                "overlayToggle" => ToggleOverlay(),
+                "overlaySnapshot" => await BuildOverlaySnapshotAsync(),
+                "overlayMoveWindow" => MoveOverlayWindow(GetPayload<OverlayMoveInput>(request)),
+                "overlayResizeWindow" => ResizeOverlayWindow(GetPayload<OverlayResizeInput>(request)),
+                "overlayEquipAvatar" => await SelectAndLogAvatarAsync(GetPayload<IdInput>(request).Id),
                 "pickGroupIcon" => PickGroupIcon(),
                 "fetchAvatar" => await VrChat.FetchAvatarAsync(GetPayload<IdInput>(request).Id),
                 "vrchatSession" => await VrChat.GetSessionAsync(),
@@ -401,7 +576,7 @@ internal static class Program
                 "vrchatFavoriteAdd" => await VrChat.AddFavoriteAvatarAsync(GetPayload<VrChatFavoriteChangeInput>(request)),
                 "vrchatFavoriteRemove" => await VrChat.RemoveFavoriteAvatarAsync(GetPayload<VrChatFavoriteChangeInput>(request)),
                 "settingsGet" => Settings.Get(),
-                "settingsSave" => Settings.Save(GetPayload<AppSettings>(request)),
+                "settingsSave" => SaveSettings(GetPayload<AppSettings>(request)),
                 "backgroundGet" => Background.GetBackground(GetPayload<BackgroundInput>(request).GroupId, Store.GroupName(GetPayload<BackgroundInput>(request).GroupId)),
                 "backgroundFolder" => BackgroundFolder(GetPayload<BackgroundInput>(request)),
                 "backgroundImport" => ImportBackgrounds(GetPayload<BackgroundInput>(request)),
@@ -554,6 +729,475 @@ internal static class Program
     {
         Process.Start(new ProcessStartInfo("steam://run/438100//--no-vr") { UseShellExecute = true });
         return new { ok = true };
+    }
+
+    private static object ShowOverlay()
+    {
+        lock (OverlayGate)
+        {
+            if (OverlayProcess is not null && !OverlayProcess.HasExited)
+            {
+                return OverlayStatus(true);
+            }
+
+            var exe = Process.GetCurrentProcess().MainModule?.FileName;
+            if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe))
+            {
+                exe = Path.Combine(AppContext.BaseDirectory, "VRCNeph.exe");
+            }
+            if (!File.Exists(exe)) throw new InvalidOperationException("Could not find VRCNeph.exe to start the overlay.");
+
+            OverlayProcess = Process.Start(new ProcessStartInfo(exe)
+            {
+                Arguments = "--overlay",
+                UseShellExecute = false,
+                CreateNoWindow = false,
+                WorkingDirectory = Path.GetDirectoryName(exe) ?? AppContext.BaseDirectory,
+                WindowStyle = ProcessWindowStyle.Normal
+            });
+
+            Logs.Info("App", OverlayProcess is null ? "Overlay failed to start." : $"Overlay started as process {OverlayProcess.Id}.");
+            return OverlayStatus(OverlayProcess is not null && !OverlayProcess.HasExited);
+        }
+    }
+
+    private static object HideOverlay()
+    {
+        CloseOverlay();
+        return OverlayStatus(false);
+    }
+
+    private static object ToggleOverlay()
+    {
+        var now = DateTimeOffset.UtcNow;
+        lock (OverlayGate)
+        {
+            if (now - LastOverlayHotkeyToggle < TimeSpan.FromMilliseconds(800))
+            {
+                return OverlayStatus(OverlayProcess is not null && !OverlayProcess.HasExited);
+            }
+            LastOverlayHotkeyToggle = now;
+
+            if (OverlayProcess is not null && !OverlayProcess.HasExited)
+            {
+                CloseOverlay();
+                return OverlayStatus(false);
+            }
+        }
+        return ShowOverlay();
+    }
+
+    private static void CloseOverlay()
+    {
+        Process? process;
+        lock (OverlayGate)
+        {
+            process = OverlayProcess;
+            OverlayProcess = null;
+        }
+
+        if (process is null) return;
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.CloseMainWindow();
+                if (!process.WaitForExit(1200)) process.Kill(entireProcessTree: true);
+            }
+        }
+        catch { }
+        finally { process.Dispose(); }
+    }
+
+    private static object OverlayStatus(bool open) => new
+    {
+        open,
+        hotkey = Settings.Get().OverlayHotkey,
+        panels = new[] { "avatars", "worlds", "friends", "current", "recent" }
+    };
+
+    private static async Task<object> BuildOverlaySnapshotAsync()
+    {
+        var lib = Store.GetLibrary();
+        var avatarFavoriteGroupLimit = await TryOverlayValueAsync(async () => await VrChat.GetAvatarFavoriteGroupLimitAsync(), 1);
+        var groups = lib.Groups
+            .OrderBy(group => group.Order)
+            .Select(group =>
+            {
+                var count = lib.Avatars.Count(avatar => avatar.GroupId == group.Id);
+                var avatarIds = lib.Avatars
+                    .Where(avatar => avatar.GroupId == group.Id && !string.IsNullOrWhiteSpace(avatar.AvatarId))
+                    .Select(avatar => avatar.AvatarId)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var avatars = lib.Avatars
+                    .Where(avatar => avatar.GroupId == group.Id)
+                    .OrderBy(avatar => avatar.Order)
+                    .ThenBy(avatar => avatar.Name)
+                    .Take(80)
+                    .Select(OverlayAvatar)
+                    .ToList();
+
+                return new
+                {
+                    group.Id,
+                    group.Name,
+                    group.Description,
+                    group.Icon,
+                    count,
+                    avatarIds,
+                    synced = IsOverlaySyncedAvatarGroup(group.Id),
+                    managed = IsOverlayManagedAvatarGroup(group.Id),
+                    canAccess = CanAccessOverlayAvatarGroup(group.Id, avatarFavoriteGroupLimit),
+                    avatars
+                };
+            })
+            .Where(group => !ShouldHideOverlayAvatarGroup(group.Id, group.count, group.canAccess))
+            .ToList();
+
+        var current = await BuildOverlayCurrentAsync();
+        var worldGroups = await TryOverlayFetchAsync(async () =>
+        {
+            var worldsResult = await VrChat.GetFavoriteWorldsAsync(new PageInput(80, 0));
+            var groupsResult = await TryFavoriteWorldGroupsAsync();
+            return BuildOverlayWorldGroups(worldsResult.Worlds, groupsResult.Groups, groupsResult.FavoriteGroupLimit);
+        });
+        var friendGroups = await TryOverlayFetchAsync(async () =>
+        {
+            var friendsResult = await VrChat.GetFriendsAsync(new PageInput(80, 0));
+            var favoriteResult = await TryFavoriteFriendsAsync();
+            return BuildOverlayFriendGroups(friendsResult.Friends, favoriteResult.Friends);
+        });
+        return new
+        {
+            generatedAt = DateTimeOffset.Now,
+            settings = Settings.Get(),
+            avatarGroups = groups,
+            worldGroups,
+            worlds = worldGroups.SelectMany(GroupItems).Take(80).ToList(),
+            friendGroups,
+            friends = friendGroups.SelectMany(GroupItems).Take(80).ToList(),
+            current,
+            session = current.Location,
+            recent = BuildRecentOverlayItems(lib)
+        };
+    }
+
+    private static object OverlayAvatar(AvatarFavorite avatar)
+    {
+        return new
+        {
+            id = avatar.AvatarId,
+            localId = avatar.Id,
+            avatar.Name,
+            avatar.AuthorName,
+            imageUrl = string.IsNullOrWhiteSpace(avatar.ThumbnailImageUrl) ? avatar.ImageUrl : avatar.ThumbnailImageUrl,
+            fullImageUrl = avatar.ImageUrl,
+            avatar.ReleaseStatus,
+            avatar.Platforms,
+            avatar.Source,
+            avatar.UpdatedAt
+        };
+    }
+
+    private static bool CanAccessOverlayAvatarGroup(string groupId, int favoriteGroupLimit)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(groupId, @"^vrc_avatars(?<index>\d+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!match.Success || !int.TryParse(match.Groups["index"].Value, out var index)) return true;
+        return index <= Math.Max(1, favoriteGroupLimit);
+    }
+
+    private static bool IsOverlaySyncedAvatarGroup(string groupId) =>
+        groupId.StartsWith("vrc_", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsOverlayManagedAvatarGroup(string groupId) =>
+        groupId.Equals("recent_avatars", StringComparison.OrdinalIgnoreCase) ||
+        groupId.Equals("deleted_avatars", StringComparison.OrdinalIgnoreCase) ||
+        groupId.Equals("uploaded_avatars", StringComparison.OrdinalIgnoreCase) ||
+        groupId.Equals("updated_avatars", StringComparison.OrdinalIgnoreCase);
+
+    private static bool ShouldHideOverlayAvatarGroup(string groupId, int count, bool canAccess)
+    {
+        var isVrcPlusGroup = System.Text.RegularExpressions.Regex.IsMatch(groupId, @"^vrc_avatars([2-9]|\d{2,})$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return isVrcPlusGroup && !canAccess && count <= 0;
+    }
+
+    private static object OverlayWorld(VrChatWorldSummary world)
+    {
+        return new
+        {
+            world.Id,
+            world.Name,
+            world.AuthorName,
+            world.Description,
+            world.ImageUrl,
+            world.Occupants,
+            world.Capacity,
+            world.Favorites,
+            world.ReleaseStatus,
+            world.FavoriteTags,
+            world.Visits
+        };
+    }
+
+    private static object OverlayAvatar(AvatarInput avatar)
+    {
+        return new
+        {
+            id = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId,
+            localId = "",
+            avatar.Name,
+            avatar.AuthorName,
+            imageUrl = string.IsNullOrWhiteSpace(avatar.ThumbnailImageUrl) ? avatar.ImageUrl : avatar.ThumbnailImageUrl,
+            fullImageUrl = avatar.ImageUrl,
+            avatar.ReleaseStatus,
+            avatar.Platforms,
+            avatar.Source
+        };
+    }
+
+    private sealed record OverlayLocation(bool Found, string Room, string Location, string WorldId, string InstanceId, string Timestamp, string Message);
+    private sealed record OverlayCurrent(object? Avatar, object? World, OverlayLocation Location);
+
+    private static async Task<OverlayCurrent> BuildOverlayCurrentAsync()
+    {
+        var location = await TryOverlayValueAsync(async () => await VrChat.GetCurrentLocationAsync(), new VrChatCurrentLocationResult("", "", "", null))
+            ?? new VrChatCurrentLocationResult("", "", "", null);
+        var avatar = await TryOverlayValueAsync(async () => await VrChat.CurrentAvatarAsync(), null as AvatarInput);
+        var latest = SafeLatestWorldLocation();
+        return new OverlayCurrent(
+            avatar is null ? null : OverlayAvatar(avatar),
+            location.World is null ? null : OverlayWorld(location.World),
+            new OverlayLocation(
+                !string.IsNullOrWhiteSpace(location.WorldId) || latest.Found,
+                location.World?.Name ?? latest.Room,
+                string.IsNullOrWhiteSpace(location.Location) ? latest.Location : location.Location,
+                string.IsNullOrWhiteSpace(location.WorldId) ? latest.WorldId : location.WorldId,
+                location.InstanceId,
+                latest.Timestamp,
+                latest.Message));
+    }
+
+    private static object OverlayFriend(VrChatFriendSummary friend)
+    {
+        var imageUrl = !string.IsNullOrWhiteSpace(friend.ProfilePicOverrideThumbnail) ? friend.ProfilePicOverrideThumbnail
+            : !string.IsNullOrWhiteSpace(friend.ProfilePicOverride) ? friend.ProfilePicOverride
+            : !string.IsNullOrWhiteSpace(friend.UserIcon) ? friend.UserIcon
+            : !string.IsNullOrWhiteSpace(friend.ProfileImageUrl) ? friend.ProfileImageUrl
+            : friend.ImageUrl;
+        return new
+        {
+            friend.Id,
+            friend.DisplayName,
+            friend.Status,
+            friend.StatusDescription,
+            friend.Location,
+            friend.WorldId,
+            imageUrl,
+            friend.IsOnline,
+            friend.Presence,
+            friend.State,
+            friend.Tags,
+            friend.LastPlatform,
+            friend.CurrentAvatarName,
+            friend.CurrentAvatarThumbnailImageUrl,
+            friend.FavoriteTags
+        };
+    }
+
+    private static List<object> BuildOverlayWorldGroups(List<VrChatWorldSummary> worlds, List<VrChatFavoriteGroupSummary> favoriteGroups, int favoriteGroupLimit)
+    {
+        var groups = new List<object>
+        {
+            new { id = "all", name = "All Favorite Worlds", count = worlds.Count, worlds = worlds.Take(80).Select(OverlayWorld).ToList() }
+        };
+        var orderedTags = Enumerable.Range(1, Math.Max(4, favoriteGroupLimit)).Select(index => $"worlds{index}").ToList();
+        orderedTags.AddRange(favoriteGroups.Select(group => group.Name).Where(x => !string.IsNullOrWhiteSpace(x) && !orderedTags.Contains(x, StringComparer.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase));
+        orderedTags.AddRange(worlds.SelectMany(world => SplitTags(world.FavoriteTags)).Where(tag => !orderedTags.Contains(tag, StringComparer.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase));
+        foreach (var tag in orderedTags)
+        {
+            var items = worlds.Where(world => SplitTags(world.FavoriteTags).Contains(tag, StringComparer.OrdinalIgnoreCase)).ToList();
+            var label = favoriteGroups.FirstOrDefault(group => group.Name.Equals(tag, StringComparison.OrdinalIgnoreCase))?.DisplayName;
+            groups.Add(new { id = tag, name = string.IsNullOrWhiteSpace(label) ? FavoriteGroupLabel(tag, "Favorite Worlds") : label, count = items.Count, canAccess = CanAccessOverlayWorldGroup(tag, favoriteGroupLimit), worlds = items.Take(80).Select(OverlayWorld).ToList() });
+        }
+        return groups;
+    }
+
+    private static bool CanAccessOverlayWorldGroup(string tag, int favoriteGroupLimit)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(tag, @"^worlds(?<index>\d+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!match.Success || !int.TryParse(match.Groups["index"].Value, out var index)) return true;
+        return index <= Math.Max(4, favoriteGroupLimit);
+    }
+
+    private static List<object> BuildOverlayFriendGroups(List<VrChatFriendSummary> friends, List<VrChatFriendSummary> favoriteFriends)
+    {
+        var byId = new Dictionary<string, VrChatFriendSummary>(StringComparer.OrdinalIgnoreCase);
+        foreach (var friend in favoriteFriends.Concat(friends))
+        {
+            if (string.IsNullOrWhiteSpace(friend.Id)) continue;
+            if (byId.TryGetValue(friend.Id, out var existing))
+            {
+                byId[friend.Id] = friend with { FavoriteTags = string.IsNullOrWhiteSpace(friend.FavoriteTags) ? existing.FavoriteTags : friend.FavoriteTags };
+            }
+            else byId[friend.Id] = friend;
+        }
+        var all = byId.Values.ToList();
+        var groups = new List<object>
+        {
+            new { id = "all", name = "All Friends", count = all.Count, friends = all.Take(100).Select(OverlayFriend).ToList() }
+        };
+        var orderedTags = favoriteFriends.SelectMany(friend => SplitTags(friend.FavoriteTags)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (var tag in orderedTags)
+        {
+            var items = all.Where(friend => SplitTags(friend.FavoriteTags).Contains(tag, StringComparer.OrdinalIgnoreCase)).ToList();
+            if (items.Count == 0) continue;
+            groups.Add(new { id = tag, name = FavoriteGroupLabel(tag, "Favorite Friends"), count = items.Count, friends = items.Take(100).Select(OverlayFriend).ToList() });
+        }
+        return groups;
+    }
+
+    private static List<object> GroupItems(object group)
+    {
+        var type = group.GetType();
+        return type.GetProperty("worlds")?.GetValue(group) as List<object>
+            ?? type.GetProperty("friends")?.GetValue(group) as List<object>
+            ?? [];
+    }
+
+    private static List<string> SplitTags(string tags) =>
+        string.IsNullOrWhiteSpace(tags) ? [] : tags.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList();
+
+    private static string FavoriteGroupLabel(string tag, string fallback)
+    {
+        var text = string.IsNullOrWhiteSpace(tag) ? fallback : tag.Trim();
+        text = Regex.Replace(text, "^worlds?(\\d+)$", "Worlds $1", RegexOptions.IgnoreCase);
+        text = Regex.Replace(text, "^friends?\\d*$", fallback, RegexOptions.IgnoreCase);
+        text = Regex.Replace(text, "^favorite_?", "", RegexOptions.IgnoreCase).Replace("_", " ");
+        text = Regex.Replace(text.Trim(), "\\b\\w", match => match.Value.ToUpperInvariant());
+        return string.IsNullOrWhiteSpace(text) ? fallback : text;
+    }
+
+    private static async Task<List<object>> TryOverlayFetchAsync(Func<Task<List<object>>> fetch)
+    {
+        try { return await fetch(); }
+        catch (Exception ex)
+        {
+            Logs.Warn("App", "Overlay live panel fetch failed.", ex.Message);
+            return [];
+        }
+    }
+
+    private static async Task<T?> TryOverlayValueAsync<T>(Func<Task<T>> fetch, T? fallback = default)
+    {
+        try { return await fetch(); }
+        catch (Exception ex)
+        {
+            Logs.Warn("App", "Overlay live value fetch failed.", ex.Message);
+            return fallback;
+        }
+    }
+
+    private static async Task<VrChatFavoriteGroupsResult> TryFavoriteWorldGroupsAsync()
+    {
+        try { return await VrChat.GetFavoriteWorldGroupsAsync(new PageInput(100, 0)); }
+        catch { return new VrChatFavoriteGroupsResult([], false); }
+    }
+
+    private static async Task<VrChatFriendListResult> TryFavoriteFriendsAsync()
+    {
+        try { return await VrChat.GetFavoriteFriendsAsync(new PageInput(100, 0)); }
+        catch { return new VrChatFriendListResult([], false); }
+    }
+
+    private static object MoveOverlayWindow(OverlayMoveInput input)
+    {
+        if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return new { ok = false };
+        if (!GetWindowRect(OverlayWindowHandle, out var rect)) return new { ok = false };
+        var x = rect.Left + Math.Clamp(input.Dx, -2000, 2000);
+        var y = rect.Top + Math.Clamp(input.Dy, -2000, 2000);
+        SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, 0, 0, SwpNoSize | SwpNoActivate | SwpShowWindow);
+        SaveOverlayBounds(x, y, rect.Right - rect.Left, rect.Bottom - rect.Top);
+        return new { ok = true, x, y };
+    }
+
+    private static object ResizeOverlayWindow(OverlayResizeInput input)
+    {
+        if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return new { ok = false };
+        if (!GetWindowRect(OverlayWindowHandle, out var rect)) return new { ok = false };
+        var width = Math.Clamp(input.Width, 360, 900);
+        var height = Math.Clamp(input.Height, 420, 1000);
+        SetWindowPos(OverlayWindowHandle, HwndTopmost, rect.Left, rect.Top, width, height, SwpNoActivate | SwpShowWindow);
+        SaveOverlayBounds(rect.Left, rect.Top, width, height);
+        return new { ok = true, width, height };
+    }
+
+    private static void SaveOverlayBounds(int x, int y, int width, int height)
+    {
+        try
+        {
+            var settings = Settings.Get();
+            Settings.Save(settings with
+            {
+                OverlayX = Math.Clamp(x, -10000, 10000),
+                OverlayY = Math.Clamp(y, -10000, 10000),
+                OverlayWidth = Math.Clamp(width, 360, 900),
+                OverlayHeight = Math.Clamp(height, 420, 1000)
+            });
+        }
+        catch
+        {
+        }
+    }
+
+    private static OverlayLocation SafeLatestWorldLocation()
+    {
+        try
+        {
+            var latest = VrChatLogWatcher.LatestWorldLocation();
+            return new OverlayLocation(latest.Found, latest.WorldName, latest.Location, latest.WorldId, "", latest.Timestamp, latest.Message);
+        }
+        catch
+        {
+            return new OverlayLocation(false, "", "", "", "", "", "No session data available.");
+        }
+    }
+
+    private static List<object> BuildRecentOverlayItems(LibraryData lib)
+    {
+        var recentGroup = lib.Groups.FirstOrDefault(group => group.Id.Equals("recent", StringComparison.OrdinalIgnoreCase)
+            || group.Name.Contains("recent", StringComparison.OrdinalIgnoreCase));
+        if (recentGroup is null) return [];
+        return lib.Avatars
+            .Where(avatar => avatar.GroupId == recentGroup.Id)
+            .OrderBy(avatar => avatar.Order)
+            .Take(20)
+            .Select(avatar => (object)new
+            {
+                type = "avatar",
+                id = avatar.AvatarId,
+                title = avatar.NameOrId(),
+                subtitle = string.IsNullOrWhiteSpace(avatar.AuthorName) ? "Recent avatar" : avatar.AuthorName,
+                imageUrl = string.IsNullOrWhiteSpace(avatar.ThumbnailImageUrl) ? avatar.ImageUrl : avatar.ThumbnailImageUrl
+            })
+            .ToList();
+    }
+
+    private static void ApplyOverlayWindowStyle(PhotinoWindow window)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            var handle = window.WindowHandle;
+            if (handle == IntPtr.Zero) return;
+            var exStyle = GetWindowLongPtr(handle, GwlExStyle);
+            SetWindowLongPtr(handle, GwlExStyle, (nint)((long)exStyle | WsExToolWindow | WsExNoActivate));
+            ShowWindowAsync(handle, SwShow);
+            SetWindowPos(handle, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate | SwpShowWindow | SwpFrameChanged);
+        }
+        catch
+        {
+        }
     }
 
     private static object BackgroundFolder(BackgroundInput input)
@@ -823,6 +1467,8 @@ internal sealed class AvatarStore
     private const string SystemBackupFolderName = "System Groups";
     private const int DefaultSyncedGroupCount = 1;
     private const int SyncedGroupAvatarLimit = 50;
+    private const string UnfavoriteAvatarGroupId = "unfavorite_avatars";
+    private const string UnfavoriteAvatarGroupName = "Unfavorited";
     private const string RecentAvatarGroupId = "recent_avatars";
     private const string RecentAvatarGroupName = "Recent Avatars";
     private const string DeletedAvatarGroupId = "deleted_avatars";
@@ -1109,6 +1755,11 @@ internal sealed class AvatarStore
         lock (_gate)
         {
             var lib = Load();
+            var avatar = lib.Avatars.FirstOrDefault(x => x.Id == id);
+            if (avatar is not null && ShouldArchiveUnfavoritedAvatar(avatar.GroupId))
+            {
+                ArchiveUnfavoritedAvatar(lib, avatar, DateTimeOffset.UtcNow);
+            }
             lib.Avatars.RemoveAll(x => x.Id == id);
             Save(lib);
             return lib;
@@ -2512,6 +3163,7 @@ internal sealed class AvatarStore
         {
             lib.Groups.Add(CreateDefaultFavoritesGroup(now, NextGroupOrder(lib)));
         }
+        EnsureUnfavoriteAvatarGroup(lib, now);
         EnsureRecentAvatarGroup(lib, now);
         EnsureDeletedAvatarGroup(lib, now);
         EnsureDefaultReorderLocks(lib);
@@ -2549,6 +3201,73 @@ internal sealed class AvatarStore
     };
     private static string DefaultSyncedGroupId(int index) => $"vrc_avatars{index}";
     private static string DefaultSyncedGroupName(int index) => index <= 1 ? "Favorite Avatars" : $"VRC+ Avatars {index - 1}";
+    private static AvatarGroup EnsureUnfavoriteAvatarGroup(LibraryData lib, DateTimeOffset now)
+    {
+        var group = lib.Groups.FirstOrDefault(x => x.Id.Equals(UnfavoriteAvatarGroupId, StringComparison.OrdinalIgnoreCase));
+        if (group is null)
+        {
+            group = new AvatarGroup
+            {
+                Id = UnfavoriteAvatarGroupId,
+                Name = UnfavoriteAvatarGroupName,
+                Description = "Avatars removed from local or synced favorites, kept so accidental unfavorites can be recovered.",
+                Order = NextGroupOrder(lib),
+                ReorderLocked = true,
+                CreatedAt = now
+            };
+            lib.Groups.Add(group);
+        }
+
+        group.Name = UnfavoriteAvatarGroupName;
+        group.Description = "Avatars removed from local or synced favorites, kept so accidental unfavorites can be recovered.";
+        group.ReorderLocked ??= true;
+        group.UpdatedAt = now;
+        return group;
+    }
+    private static bool ShouldArchiveUnfavoritedAvatar(string groupId) =>
+        !string.IsNullOrWhiteSpace(groupId) &&
+        !groupId.Equals(UnfavoriteAvatarGroupId, StringComparison.OrdinalIgnoreCase) &&
+        !IsPinnedSystemGroupId(groupId);
+    private static void ArchiveUnfavoritedAvatar(LibraryData lib, AvatarFavorite avatar, DateTimeOffset now)
+    {
+        if (string.IsNullOrWhiteSpace(avatar.AvatarId)) return;
+        var group = EnsureUnfavoriteAvatarGroup(lib, now);
+        var existing = lib.Avatars.FirstOrDefault(x =>
+            x.GroupId.Equals(group.Id, StringComparison.OrdinalIgnoreCase) &&
+            x.AvatarId.Equals(avatar.AvatarId, StringComparison.OrdinalIgnoreCase));
+
+        if (existing is null)
+        {
+            existing = CloneAvatar(avatar, group.Id, now, 0);
+            existing.Id = $"{group.Id}_{avatar.AvatarId}";
+            lib.Avatars.Add(existing);
+        }
+
+        FillAvatar(existing, new AvatarInput
+        {
+            Id = existing.Id,
+            GroupId = group.Id,
+            AvatarId = avatar.AvatarId,
+            Name = avatar.Name,
+            AuthorName = avatar.AuthorName,
+            AuthorId = avatar.AuthorId,
+            ThumbnailImageUrl = avatar.ThumbnailImageUrl,
+            ImageUrl = avatar.ImageUrl,
+            ReleaseStatus = avatar.ReleaseStatus,
+            Version = avatar.Version,
+            Platforms = avatar.Platforms,
+            Tags = avatar.Tags,
+            SourceUrl = avatar.SourceUrl,
+            Description = avatar.Description,
+            Notes = string.IsNullOrWhiteSpace(avatar.Notes) ? "Archived when unfavorited." : avatar.Notes,
+            Source = "unfavorited",
+            RawJson = avatar.RawJson,
+            RemoteCreatedAt = avatar.RemoteCreatedAt,
+            RemoteUpdatedAt = avatar.RemoteUpdatedAt,
+            RemoteFavoriteId = avatar.RemoteFavoriteId
+        }, now);
+        PlaceAvatarAtTop(lib, existing, group.Id);
+    }
     private static AvatarGroup CreateDefaultFavoritesGroup(DateTimeOffset now, int order) => new()
     {
         Id = NewId("grp"),
@@ -2799,7 +3518,7 @@ internal sealed class AvatarStore
 
 internal sealed class AppSettingsStore
 {
-    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", 9);
+    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", true, "F8", "avatars", 86, 100, 8, 24, 360, 558, 11);
     private readonly string _settingsPath = AppPaths.SettingsPath;
     public AppSettings Get()
     {
@@ -2823,7 +3542,19 @@ internal sealed class AppSettingsStore
         var panelOpacity = s.SchemaVersion < 6 && s.PanelOpacity == 0 ? DefaultSettings.PanelOpacity : Math.Clamp(s.PanelOpacity, 0, 100);
         var panelColor = string.IsNullOrWhiteSpace(s.PanelColor) || !System.Text.RegularExpressions.Regex.IsMatch(s.PanelColor, "^#[0-9a-fA-F]{6}$") ? color : s.PanelColor;
         var panelSynced = s.SchemaVersion < 6 || s.PanelColorSynced;
-        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", 9);
+        var overlayPanel = string.IsNullOrWhiteSpace(s.OverlayDefaultPanel) ? DefaultSettings.OverlayDefaultPanel : s.OverlayDefaultPanel.Trim().ToLowerInvariant();
+        if (overlayPanel == "session") overlayPanel = "current";
+        if (!new[] { "avatars", "worlds", "friends", "current", "recent" }.Contains(overlayPanel)) overlayPanel = DefaultSettings.OverlayDefaultPanel;
+        var overlayOpacity = s.SchemaVersion < 10 && s.OverlayOpacity == 0 ? DefaultSettings.OverlayOpacity : Math.Clamp(s.OverlayOpacity, 45, 100);
+        var overlayScale = s.SchemaVersion < 10 && s.OverlayScale == 0 ? DefaultSettings.OverlayScale : Math.Clamp(s.OverlayScale, 80, 135);
+        var hotkey = string.IsNullOrWhiteSpace(s.OverlayHotkey) ? DefaultSettings.OverlayHotkey : s.OverlayHotkey.Trim();
+        if (s.SchemaVersion < 11 && hotkey.Equals("Ctrl+Shift+O", StringComparison.OrdinalIgnoreCase)) hotkey = DefaultSettings.OverlayHotkey;
+        hotkey = OverlayHotkeyPoller.NormalizeDisplayHotkey(hotkey, DefaultSettings.OverlayHotkey);
+        var overlayX = s.SchemaVersion < 11 && s.OverlayX == 0 ? DefaultSettings.OverlayX : Math.Clamp(s.OverlayX, -10000, 10000);
+        var overlayY = s.SchemaVersion < 11 && s.OverlayY == 0 ? DefaultSettings.OverlayY : Math.Clamp(s.OverlayY, -10000, 10000);
+        var overlayWidth = s.SchemaVersion < 11 && s.OverlayWidth == 0 ? DefaultSettings.OverlayWidth : Math.Clamp(s.OverlayWidth, 360, 900);
+        var overlayHeight = s.SchemaVersion < 11 && s.OverlayHeight == 0 ? DefaultSettings.OverlayHeight : Math.Clamp(s.OverlayHeight, 420, 1000);
+        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", s.OverlayEnabled, hotkey, overlayPanel, overlayOpacity, overlayScale, overlayX, overlayY, overlayWidth, overlayHeight, 11);
     }
 }
 
@@ -4233,6 +4964,11 @@ internal sealed class VrChatClient
         try { var user = await GetCurrentUserAsync(); return new(true, false, [], user); }
         catch { return new(false, false, [], null); }
     }
+    public async Task<int> GetAvatarFavoriteGroupLimitAsync()
+    {
+        var result = await GetFavoriteAvatarGroupsAsync();
+        return result.FavoriteGroupLimit;
+    }
     public async Task<VrChatSessionState> LoginAsync(LoginInput input)
     {
         var token = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{input.Username}:{input.Password}"));
@@ -4392,7 +5128,15 @@ internal sealed class VrChatClient
             worldId = colon > 0 ? location[..colon] : location;
             if (string.IsNullOrWhiteSpace(instanceId) && colon > 0) instanceId = location[(colon + 1)..];
         }
-        if (string.IsNullOrWhiteSpace(worldId) && (string.IsNullOrWhiteSpace(location) || location.Equals("offline", StringComparison.OrdinalIgnoreCase) || location.Equals("private", StringComparison.OrdinalIgnoreCase)))
+        var apiLocationIsHidden = string.IsNullOrWhiteSpace(location)
+            || location.Equals("offline", StringComparison.OrdinalIgnoreCase)
+            || location.Equals("private", StringComparison.OrdinalIgnoreCase);
+        var apiLocationMissingInstance = string.IsNullOrWhiteSpace(instanceId)
+            && !string.IsNullOrWhiteSpace(location)
+            && !location.Equals("offline", StringComparison.OrdinalIgnoreCase)
+            && !location.Equals("private", StringComparison.OrdinalIgnoreCase)
+            && !location.Contains(':');
+        if (apiLocationIsHidden || apiLocationMissingInstance)
         {
             var latest = VrChatLogWatcher.LatestWorldLocation();
             if (latest.Found && !string.IsNullOrWhiteSpace(latest.WorldId))
@@ -5906,7 +6650,7 @@ internal sealed class VrChatClient
         if (value.ValueKind == JsonValueKind.Number || value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False) return value.ToString();
         if (value.ValueKind == JsonValueKind.Array) return string.Join(" ", value.EnumerateArray().Select(ReadNotificationValue).Where(x => !string.IsNullOrWhiteSpace(x))).Trim();
         if (value.ValueKind != JsonValueKind.Object) return "";
-        foreach (var name in new[] { "message", "text", "body", "content", "details", "inviteMessage", "requestMessage", "responseMessage" })
+        foreach (var name in new[] { "message", "text", "body", "content", "details", "inviteMessage", "requestMessage", "responseMessage", "emoji", "emojiName", "emoji_name", "emojiDisplayName", "emoji_display_name", "emojiId", "emoji_id", "emojiKey", "emoji_key", "emojiShortcode", "emoji_shortcode", "sticker", "stickerName", "sticker_name", "shortcode" })
         {
             if (!value.TryGetProperty(name, out var child)) continue;
             var text = ReadNotificationValue(child);
@@ -8139,6 +8883,191 @@ internal sealed class AvatarDatabaseClient
     }
 }
 
+internal sealed class OverlayHotkeyPoller : IDisposable
+{
+    private const int HotkeyId = 0x4F31;
+    private const string DefaultHotkey = "F8";
+    private const uint ModAlt = 0x0001;
+    private const uint ModControl = 0x0002;
+    private const uint ModShift = 0x0004;
+    private const uint ModWin = 0x0008;
+    private const int WmClose = 0x0010;
+    private const int WmHotkey = 0x0312;
+    private readonly Action _callback;
+    private readonly HotkeyDefinition _hotkey;
+    private readonly ManualResetEventSlim _ready = new(false);
+    private Thread? _thread;
+    private HotkeyWindow? _window;
+    private int _disposed;
+
+    public OverlayHotkeyPoller(string hotkey, Action callback)
+    {
+        _callback = callback;
+        _hotkey = ParseHotkey(hotkey) ?? ParseHotkey(DefaultHotkey)!;
+    }
+
+    public static string NormalizeDisplayHotkey(string hotkey, string fallback = DefaultHotkey) =>
+        (ParseHotkey(hotkey) ?? ParseHotkey(fallback) ?? ParseHotkey(DefaultHotkey)!).Display;
+
+    public void Start()
+    {
+        _thread = new Thread(RunMessageLoop) { IsBackground = true, Name = "VRCNeph Overlay Hotkey" };
+        _thread.SetApartmentState(ApartmentState.STA);
+        _thread.Start();
+        _ready.Wait(TimeSpan.FromSeconds(2));
+    }
+
+    private void RunMessageLoop()
+    {
+        try
+        {
+            _window = new HotkeyWindow(_hotkey, _callback);
+            _ready.Set();
+            Application.Run();
+        }
+        finally
+        {
+            _window?.Dispose();
+            _window = null;
+            _ready.Set();
+        }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _window?.Close();
+        if (_thread is not null && _thread.IsAlive) _thread.Join(TimeSpan.FromMilliseconds(300));
+        _ready.Dispose();
+    }
+
+    private sealed class HotkeyWindow : NativeWindow, IDisposable
+    {
+        private readonly HotkeyDefinition _hotkey;
+        private readonly Action _callback;
+        private bool _registered;
+
+        public HotkeyWindow(HotkeyDefinition hotkey, Action callback)
+        {
+            _hotkey = hotkey;
+            _callback = callback;
+            CreateHandle(new CreateParams());
+            _registered = RegisterHotKey(Handle, HotkeyId, _hotkey.Modifiers, _hotkey.VirtualKey);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WmHotkey && m.WParam.ToInt32() == HotkeyId)
+            {
+                _callback();
+                return;
+            }
+            if (m.Msg == WmClose)
+            {
+                Dispose();
+                Application.ExitThread();
+                return;
+            }
+            base.WndProc(ref m);
+        }
+
+        public void Close()
+        {
+            if (Handle != IntPtr.Zero)
+            {
+                PostMessage(Handle, WmClose, IntPtr.Zero, IntPtr.Zero);
+                return;
+            }
+            Application.ExitThread();
+        }
+
+        public void Dispose()
+        {
+            if (_registered && Handle != IntPtr.Zero)
+            {
+                UnregisterHotKey(Handle, HotkeyId);
+                _registered = false;
+            }
+            if (Handle != IntPtr.Zero) DestroyHandle();
+        }
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, int vk);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    private sealed record HotkeyDefinition(uint Modifiers, int VirtualKey, string Display);
+
+    private static HotkeyDefinition? ParseHotkey(string hotkey)
+    {
+        var parts = StringSplitHotkey(hotkey);
+        if (parts.Count == 0) return null;
+        uint modifiers = 0;
+        var key = "";
+        foreach (var part in parts)
+        {
+            var value = part.Trim();
+            if (value.Equals("Ctrl", StringComparison.OrdinalIgnoreCase) || value.Equals("Control", StringComparison.OrdinalIgnoreCase)) modifiers |= ModControl;
+            else if (value.Equals("Alt", StringComparison.OrdinalIgnoreCase)) modifiers |= ModAlt;
+            else if (value.Equals("Shift", StringComparison.OrdinalIgnoreCase)) modifiers |= ModShift;
+            else if (value.Equals("Win", StringComparison.OrdinalIgnoreCase) || value.Equals("Windows", StringComparison.OrdinalIgnoreCase)) modifiers |= ModWin;
+            else key = value;
+        }
+        if (string.IsNullOrWhiteSpace(key)) return null;
+        var virtualKey = VirtualKeyFor(key);
+        if (virtualKey == 0) return null;
+        var labels = new List<string>();
+        if ((modifiers & ModControl) != 0) labels.Add("Ctrl");
+        if ((modifiers & ModAlt) != 0) labels.Add("Alt");
+        if ((modifiers & ModShift) != 0) labels.Add("Shift");
+        if ((modifiers & ModWin) != 0) labels.Add("Win");
+        labels.Add(DisplayKey(key, virtualKey));
+        return new HotkeyDefinition(modifiers, virtualKey, string.Join("+", labels));
+    }
+
+    private static List<string> StringSplitHotkey(string hotkey) =>
+        String.IsNullOrWhiteSpace(hotkey) ? [] : hotkey.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList();
+
+    private static int VirtualKeyFor(string key)
+    {
+        var normalized = key.Trim().ToUpperInvariant();
+        if (normalized.Length == 1)
+        {
+            var c = normalized[0];
+            if (c is >= 'A' and <= 'Z') return c;
+            if (c is >= '0' and <= '9') return c;
+        }
+        if (normalized.StartsWith("F", StringComparison.Ordinal) && int.TryParse(normalized[1..], out var f) && f is >= 1 and <= 24) return 0x70 + f - 1;
+        return normalized switch
+        {
+            "SPACE" => 0x20,
+            "TAB" => 0x09,
+            "ESC" or "ESCAPE" => 0x1B,
+            "INSERT" or "INS" => 0x2D,
+            "DELETE" or "DEL" => 0x2E,
+            "HOME" => 0x24,
+            "END" => 0x23,
+            "PAGEUP" or "PGUP" => 0x21,
+            "PAGEDOWN" or "PGDN" => 0x22,
+            _ => 0
+        };
+    }
+
+    private static string DisplayKey(string key, int virtualKey)
+    {
+        if (virtualKey is >= 0x70 and <= 0x87) return $"F{virtualKey - 0x70 + 1}";
+        var normalized = key.Trim();
+        return normalized.Equals("Control", StringComparison.OrdinalIgnoreCase) ? "Ctrl"
+            : normalized.Equals("Escape", StringComparison.OrdinalIgnoreCase) ? "Esc"
+            : normalized.ToUpperInvariant();
+    }
+}
+
 internal static class ProgramJson
 {
     public static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
@@ -8164,6 +9093,8 @@ internal static class AvatarInputExtensions { public static string NameOrId(this
 internal sealed class IdInput { public string Id { get; set; } = ""; public string Path { get; set; } = ""; }
 internal sealed class IdsInput { public List<long> Ids { get; set; } = []; }
 internal sealed class BackupRestoreInput { public string Path { get; set; } = ""; public string Mode { get; set; } = ""; }
+internal sealed record OverlayMoveInput(int Dx = 0, int Dy = 0);
+internal sealed record OverlayResizeInput(int Width = 500, int Height = 720);
 internal sealed class ExportJsonInput { public string FileName { get; set; } = ""; public JsonElement Payload { get; set; } }
 internal sealed class MoveAvatarInput { public string AvatarId { get; set; } = ""; public string GroupId { get; set; } = ""; }
 internal sealed class ReorderInput { public string Id { get; set; } = ""; public string GroupId { get; set; } = ""; public int Position { get; set; } = 1; }
@@ -8194,7 +9125,7 @@ internal sealed record DiagnosticItem(string Name, string Status, string Detail,
 internal sealed record DiagnosticsResult(List<DiagnosticItem> Items);
 internal sealed record ExportResult(string Path);
 internal sealed record GroupClearResult(LibraryData Library, int Removed, string BackupPath);
-internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", int SchemaVersion = 9);
+internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayHotkey = "F8", string OverlayDefaultPanel = "avatars", int OverlayOpacity = 86, int OverlayScale = 100, int OverlayX = 8, int OverlayY = 24, int OverlayWidth = 360, int OverlayHeight = 558, int SchemaVersion = 11);
 internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx", string SearchMode = "phrase");
 internal sealed record AvatarListResult(List<AvatarInput> Avatars);
 internal sealed record AvatarImageResolveInput(string AvatarId = "", string ImageUrl = "", string Name = "", string UserId = "", string DisplayName = "");

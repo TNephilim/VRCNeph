@@ -1,4 +1,5 @@
-const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", schemaVersion: 9 };
+const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", overlayEnabled: true, overlayHotkey: "F8", overlayDefaultPanel: "avatars", overlayOpacity: 86, overlayScale: 100, overlayX: 8, overlayY: 24, overlayWidth: 360, overlayHeight: 558, schemaVersion: 11 };
+const OVERLAY_TAB_TIP_SEEN_KEY = "vrcneph.overlay.tabTipSeen.v1";
 const LIVE_SYNC_TIMING = {
   favoriteSyncMs: 45 * 1000,
   safetySyncMs: 10 * 60 * 1000,
@@ -408,6 +409,15 @@ async function loadSettings() {
       backgroundOpacity: Number.isFinite(saved.backgroundOpacity) ? Math.min(100, Math.max(0, Number(saved.backgroundOpacity))) : DEFAULT_SETTINGS.backgroundOpacity,
       panelOpacity: Number.isFinite(saved.panelOpacity) ? Math.min(100, Math.max(0, Number(saved.panelOpacity))) : DEFAULT_SETTINGS.panelOpacity,
       backgroundEffect: String(saved.backgroundEffect || ""),
+      overlayEnabled: saved.overlayEnabled !== false,
+      overlayHotkey: String(saved.overlayHotkey || DEFAULT_SETTINGS.overlayHotkey),
+      overlayDefaultPanel: ["avatars", "worlds", "friends", "session", "current", "recent"].includes(String(saved.overlayDefaultPanel || "")) ? (saved.overlayDefaultPanel === "session" ? "current" : saved.overlayDefaultPanel) : DEFAULT_SETTINGS.overlayDefaultPanel,
+      overlayOpacity: Number.isFinite(saved.overlayOpacity) ? Math.min(100, Math.max(45, Number(saved.overlayOpacity))) : DEFAULT_SETTINGS.overlayOpacity,
+      overlayScale: Number.isFinite(saved.overlayScale) ? Math.min(135, Math.max(80, Number(saved.overlayScale))) : DEFAULT_SETTINGS.overlayScale,
+      overlayX: Number.isFinite(saved.overlayX) ? Number(saved.overlayX) : DEFAULT_SETTINGS.overlayX,
+      overlayY: Number.isFinite(saved.overlayY) ? Number(saved.overlayY) : DEFAULT_SETTINGS.overlayY,
+      overlayWidth: Number.isFinite(saved.overlayWidth) ? Math.min(900, Math.max(360, Number(saved.overlayWidth))) : DEFAULT_SETTINGS.overlayWidth,
+      overlayHeight: Number.isFinite(saved.overlayHeight) ? Math.min(1000, Math.max(420, Number(saved.overlayHeight))) : DEFAULT_SETTINGS.overlayHeight,
       schemaVersion: DEFAULT_SETTINGS.schemaVersion
     };
   } catch { state.settings = cloneSettings(DEFAULT_SETTINGS); }
@@ -559,6 +569,7 @@ function activeGroup() { return state.library.groups.find((g) => g.id === state.
 function groupAvatars(groupId) { return state.library.avatars.filter((a) => a.groupId === groupId); }
 function isSyncedGroup(groupId) { return String(groupId || "").toLowerCase().startsWith("vrc_"); }
 function isDeletedGroup(groupId) { return String(groupId || "").toLowerCase() === "deleted_avatars"; }
+function isUnfavoriteGroup(groupId) { return String(groupId || "").toLowerCase() === "unfavorite_avatars"; }
 function isRecentGroup(groupId) { return String(groupId || "").toLowerCase() === "recent_avatars"; }
 function isUploadedGroup(groupId) { return String(groupId || "").toLowerCase() === "uploaded_avatars"; }
 function isUpdatedGroup(groupId) { return String(groupId || "").toLowerCase() === "updated_avatars"; }
@@ -668,6 +679,7 @@ function groupIconHtml(group) {
   if (isUpdatedGroup(groupId)) return updatedIconHtml("Updated avatars");
   if (isUploadedGroup(groupId)) return uploadedIconHtml("Uploaded avatars");
   if (isSyncedGroup(groupId)) return syncIconHtml("Synced from VRChat");
+  if (isUnfavoriteGroup(groupId)) return unfavoriteIconHtml("Unfavorited avatars");
   if (isRecentGroup(groupId)) return recentIconHtml("Recent avatars");
   if (isDeletedGroup(groupId)) return trashIconHtml("Deleted avatars");
   return "";
@@ -5256,10 +5268,82 @@ function syncPanelOpacityFromNumber() {
   state.settings.panelOpacity = Number($("panelOpacityNumber").value);
   applyPanelOpacity();
 }
+function applyOverlaySettingsControls() {
+  $("overlayEnabledToggle").checked = state.settings.overlayEnabled !== false;
+  $("overlayDefaultPanelSelect").value = state.settings.overlayDefaultPanel || DEFAULT_SETTINGS.overlayDefaultPanel;
+  $("overlayHotkeyInput").value = state.settings.overlayHotkey || DEFAULT_SETTINGS.overlayHotkey;
+  applyOverlayOpacityControls();
+  applyOverlayScaleControls();
+}
+function applyOverlayOpacityControls() {
+  const value = Math.min(100, Math.max(45, Number(state.settings.overlayOpacity) || DEFAULT_SETTINGS.overlayOpacity));
+  state.settings.overlayOpacity = value;
+  $("overlayOpacityInput").value = String(value);
+  $("overlayOpacityNumber").value = String(value);
+}
+function applyOverlayScaleControls() {
+  const value = Math.min(135, Math.max(80, Number(state.settings.overlayScale) || DEFAULT_SETTINGS.overlayScale));
+  state.settings.overlayScale = value;
+  $("overlayScaleInput").value = String(value);
+  $("overlayScaleNumber").value = String(value);
+}
+function stepOverlayOpacity(delta) {
+  state.settings.overlayOpacity = Math.min(100, Math.max(45, Number(state.settings.overlayOpacity) + delta));
+  applyOverlayOpacityControls();
+}
+function syncOverlayOpacityFromNumber() {
+  state.settings.overlayOpacity = Number($("overlayOpacityNumber").value);
+  applyOverlayOpacityControls();
+}
+function stepOverlayScale(delta) {
+  state.settings.overlayScale = Math.min(135, Math.max(80, Number(state.settings.overlayScale) + delta));
+  applyOverlayScaleControls();
+}
+function syncOverlayScaleFromNumber() {
+  state.settings.overlayScale = Number($("overlayScaleNumber").value);
+  applyOverlayScaleControls();
+}
+function resetOverlayLayoutSettings() {
+  state.settings.overlayX = DEFAULT_SETTINGS.overlayX;
+  state.settings.overlayY = DEFAULT_SETTINGS.overlayY;
+  state.settings.overlayWidth = DEFAULT_SETTINGS.overlayWidth;
+  state.settings.overlayHeight = DEFAULT_SETTINGS.overlayHeight;
+  try { localStorage.removeItem(OVERLAY_TAB_TIP_SEEN_KEY); } catch { }
+  toast("Overlay position, size, and first-open tip reset. Apply settings, then reopen the overlay.");
+}
+function overlayHotkeyFromEvent(event) {
+  const key = event.key || "";
+  if (["Control", "Shift", "Alt", "Meta"].includes(key)) return "";
+  const parts = [];
+  if (event.ctrlKey) parts.push("Ctrl");
+  if (event.altKey) parts.push("Alt");
+  if (event.shiftKey) parts.push("Shift");
+  if (event.metaKey) parts.push("Win");
+  let main = key.length === 1 ? key.toUpperCase() : key;
+  if (main === " ") main = "Space";
+  if (main === "Escape") main = "Esc";
+  if (/^F\d{1,2}$/i.test(main)) main = main.toUpperCase();
+  if (!main) return "";
+  parts.push(main);
+  return parts.join("+");
+}
+async function openOverlayFromSettings() {
+  try {
+    const status = await api("overlayShow");
+    toast("Overlay opened.");
+  } catch (e) { toast(e.message); }
+}
+async function closeOverlayFromSettings() {
+  try {
+    await api("overlayHide");
+    toast("Overlay closed.");
+  } catch (e) { toast(e.message); }
+}
 function openSettingsDialog() {
   state.settingsDraft = { original: cloneSettings(state.settings), applied: false };
   $("bgEffectSelect").value = state.settings.backgroundEffect;
   updateSortButton("bgEffectSelect", "bgEffectMenuBtn");
+  applyOverlaySettingsControls();
   $("customizationDialog").showModal();
   setSettingsTab("customization");
 }
@@ -5289,7 +5373,7 @@ function bindSettingsLivePreviewControl(id) {
   control.addEventListener("change", () => endSettingsLivePreview());
 }
 function setSettingsTab(tab) {
-  const tabs = ["customization", "sync", "diagnostics", "history", "logs", "backups"];
+  const tabs = ["customization", "overlay", "sync", "diagnostics", "history", "logs", "backups"];
   for (const name of tabs) {
     $(`settings${name[0].toUpperCase()}${name.slice(1)}Tab`).classList.toggle("active", name === tab);
     $(`settings${name[0].toUpperCase()}${name.slice(1)}Panel`).hidden = name !== tab;
@@ -6385,6 +6469,7 @@ function friendEventDetail(type, friend) {
 }
 function normalizeNotification(item = {}) {
   const id = item.id || item.notificationId || item.messageId || `${item.type || "notification"}-${item.createdAt || item.created_at || Date.now()}-${item.senderUserId || item.senderUsername || ""}`;
+  const rawJson = item.rawJson || JSON.stringify(item, null, 2);
   return {
     id,
     type: item.type || item.notificationType || "",
@@ -6393,10 +6478,11 @@ function normalizeNotification(item = {}) {
     senderUsername: item.senderUsername || item.senderName || item.sender?.displayName || item.displayName || "",
     senderImageUrl: normalizeVrchatImageUrl(item.senderImageUrl || item.imageUrl || item.sender?.profilePicOverrideThumbnail || item.sender?.profilePicOverride || item.sender?.userIcon || item.sender?.profileImageUrl || item.sender?.currentAvatarThumbnailImageUrl || item.sender?.currentAvatarImageUrl || ""),
     message: notificationMessageText(item),
+    boopEmoji: notificationBoopEmoji(item, rawJson),
     createdAt: item.createdAt || item.created_at || item.created_at_ms || new Date().toISOString(),
     seen: Boolean(item.seen || item.isSeen),
     direction: item.direction || "",
-    rawJson: item.rawJson || JSON.stringify(item, null, 2)
+    rawJson
   };
 }
 function isSelfInviteNotification(item = {}) {
@@ -6426,6 +6512,66 @@ function notificationValueText(value) {
       const text = notificationValueText(value[key]);
       if (text) return text;
     }
+  }
+  return "";
+}
+function notificationBoopEmoji(item = {}, rawJson = item.rawJson || "") {
+  const roots = [
+    item,
+    item.data,
+    item.content,
+    item.details,
+    item.message,
+    parseJsonSafe(rawJson),
+    parseJsonSafe(item.data),
+    parseJsonSafe(item.content),
+    parseJsonSafe(item.details),
+    parseJsonSafe(item.message)
+  ].filter(Boolean);
+  for (const root of roots) {
+    const value = findBoopEmojiValue(root);
+    if (value) return value;
+  }
+  return "";
+}
+function findBoopEmojiValue(value, path = "", depth = 0) {
+  if (value == null || depth > 6) return "";
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return "";
+    if (text.startsWith("{") || text.startsWith("[")) return findBoopEmojiValue(parseJsonSafe(text), path, depth + 1);
+    const key = path.toLowerCase();
+    return key.includes("emoji") || key.includes("sticker") || key.includes("boop") ? text : "";
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    const key = path.toLowerCase();
+    return key.includes("emoji") || key.includes("sticker") ? String(value) : "";
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = findBoopEmojiValue(entry, path, depth + 1);
+      if (found) return found;
+    }
+    return "";
+  }
+  if (typeof value !== "object") return "";
+  const preferredKeys = [
+    "emoji", "emojiName", "emoji_name", "emojiDisplayName", "emoji_display_name",
+    "emojiId", "emoji_id", "emojiKey", "emoji_key", "emojiShortcode", "emoji_shortcode",
+    "sticker", "stickerName", "sticker_name", "shortcode", "displayName", "name", "id"
+  ];
+  for (const key of preferredKeys) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const keyPath = path ? `${path}.${key}` : key;
+    const keyLower = keyPath.toLowerCase();
+    if (!keyLower.includes("emoji") && !keyLower.includes("sticker") && !keyLower.includes("boop")) continue;
+    const found = findBoopEmojiValue(value[key], keyPath, depth + 1);
+    if (found) return found;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    const keyPath = path ? `${path}.${key}` : key;
+    const found = findBoopEmojiValue(child, keyPath, depth + 1);
+    if (found) return found;
   }
   return "";
 }
@@ -6899,12 +7045,18 @@ function filteredNotifications() {
 }
 function notificationBucket(item) {
   const type = String(item.type || "").toLowerCase();
+  const text = `${item.title || ""} ${item.message || ""}`.toLowerCase();
+  if (type.includes("boop") || text.includes("boop")) return "boop";
   if (type.includes("invite")) return type.includes("request") ? "request" : "invite";
   if (type.includes("friend")) return "friend";
   if (type.includes("group")) return "group";
   return "system";
 }
 function notificationTitle(item) {
+  if (notificationBucket(item) === "boop") {
+    const emoji = item.boopEmoji || notificationBoopEmoji(item);
+    return emoji ? `Boop: ${emoji}` : "Boop";
+  }
   const type = String(item.type || "Notification").replace(/[_-]+/g, " ");
   return item.title || type.replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -6912,6 +7064,11 @@ function notificationDetail(item) {
   if (notificationBucket(item) === "invite") {
     const summary = inviteLocationSummary(notificationInviteInfo(item));
     if (summary) return [item.senderUsername, summary].filter(Boolean).join(": ");
+  }
+  if (notificationBucket(item) === "boop") {
+    const emoji = item.boopEmoji || notificationBoopEmoji(item);
+    const detail = emoji ? `booped you with ${emoji}` : "booped you";
+    return [item.senderUsername, detail].filter(Boolean).join(" ");
   }
   return [item.senderUsername, item.message].filter(Boolean).join(": ");
 }
@@ -8739,6 +8896,9 @@ function syncIconHtml(title = "Synced") {
 function trashIconHtml(title = "Deleted") {
   return `<span class="trash-icon" title="${escapeAttr(title)}" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M6 6l1 15h10l1-15"></path><path d="M10 10v7"></path><path d="M14 10v7"></path></svg></span>`;
 }
+function unfavoriteIconHtml(title = "Unfavorited") {
+  return `<span class="unfavorite-icon" title="${escapeAttr(title)}" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20.8 4.6a5.4 5.4 0 0 0-7.7 0L12 5.8l-1.1-1.2a5.4 5.4 0 0 0-7.7 7.7L12 21l2.4-2.4"></path><path d="M16 16l5 5"></path><path d="M21 16l-5 5"></path></svg></span>`;
+}
 function recentIconHtml(title = "Recent") {
   return `<span class="recent-icon" title="${escapeAttr(title)}" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v5h5"></path><path d="M12 7v5l3 2"></path></svg></span>`;
 }
@@ -8813,11 +8973,46 @@ function currentLocationLabel(location) {
   if (!location) return "";
   return location.world?.name || location.worldName || location.worldId || location.location || "";
 }
+function locationInstanceDetails(location = {}) {
+  const rawLocation = String(location.location || "").trim();
+  const instanceId = String(location.instanceId || (rawLocation.includes(":") ? rawLocation.slice(rawLocation.indexOf(":") + 1) : "")).trim();
+  const instanceNumber = inviteInstanceNumber(instanceId);
+  const privacy = rawLocation.toLowerCase() === "private" ? "Private" : invitePrivacyFromInstance(instanceId) || (instanceId ? "Public" : "");
+  const region = inviteRegionFromInstance(instanceId);
+  return { rawLocation, instanceId, instanceNumber, privacy, region };
+}
 function profileLocationHtml(location) {
   const label = currentLocationLabel(location);
   if (!label) return `<div class="profile-location-card"><span>Current Location</span><strong>Unknown</strong></div>`;
-  const detail = location.world?.authorName || location.instanceId || location.location || "";
-  return `<button type="button" class="profile-location-card" ${location.world?.id ? `data-world-id="${escapeAttr(location.world.id)}"` : ""}><span>Current Location</span><strong>${escapeHtml(label)}</strong>${detail ? `<small>${escapeHtml(detail)}</small>` : ""}</button>`;
+  const world = location.world || findKnownActivityWorld(location.worldId, label) || {};
+  const details = locationInstanceDetails(location);
+  const image = normalizeVrchatImageUrl(world.imageUrl || location.imageUrl || "");
+  const author = world.authorName || location.authorName || "";
+  const occupants = Number(world.occupants || 0);
+  const capacity = Number(world.capacity || 0);
+  const population = occupants > 0 || capacity > 0 ? `${occupants}/${capacity || "?"} users` : "";
+  const occupancy = [
+    Number(world.publicOccupants || 0) > 0 ? `${world.publicOccupants} public` : "",
+    Number(world.privateOccupants || 0) > 0 ? `${world.privateOccupants} private` : ""
+  ].filter(Boolean).join(" / ");
+  const chips = [
+    details.privacy,
+    details.instanceNumber ? `#${details.instanceNumber}` : "",
+    details.region ? details.region.toUpperCase() : "",
+    population
+  ].filter(Boolean).map((chip) => `<em>${escapeHtml(chip)}</em>`).join("");
+  const meta = [author ? `by ${author}` : "", occupancy].filter(Boolean).join(" - ");
+  const raw = details.rawLocation && details.rawLocation !== label ? details.rawLocation : "";
+  return `<button type="button" class="profile-location-card rich" ${world.id ? `data-world-id="${escapeAttr(world.id)}"` : ""}>
+    ${image ? `<img src="${escapeAttr(image)}" alt="">` : `<div class="profile-location-thumb-placeholder" aria-hidden="true"></div>`}
+    <div>
+      <span>Current Location</span>
+      <strong>${escapeHtml(label)}</strong>
+      ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
+      ${chips ? `<div class="profile-location-chips">${chips}</div>` : ""}
+      ${raw ? `<small class="profile-location-raw">${escapeHtml(raw)}</small>` : ""}
+    </div>
+  </button>`;
 }
 function userLocationCardData(user, presence = "") {
   const normalizedPresence = String(presence || "").toLowerCase();
@@ -11406,7 +11601,7 @@ async function handleAppCloseRequested(data = {}) {
   }
 }
 
-function applySettings() { applyGridSize(); applyColors(); applyBackgroundOpacity(); applyPanelOpacity(); applyActiveBackgroundEffect(); }
+function applySettings() { applyGridSize(); applyColors(); applyBackgroundOpacity(); applyPanelOpacity(); applyOverlaySettingsControls(); applyActiveBackgroundEffect(); }
 function applyGridSize() {
   const columns = Math.min(10, Math.max(3, Number(state.activePage === "database" ? state.settings.databaseGridSize : state.settings.gridSize) || DEFAULT_SETTINGS.gridSize));
   const activeGrid = state.activePage === "database" ? $("avatarDatabaseResults") : $("avatarGrid");
@@ -12327,6 +12522,7 @@ window.addEventListener("resize", () => { if (isNotificationPopoverOpen()) posit
 window.addEventListener("resize", () => { if (_bgCanvas && _bgActive) { _bgCanvas.width = window.innerWidth; _bgCanvas.height = window.innerHeight; _bgState = {}; } });
 $("customizationBtn").addEventListener("click", openSettingsDialog);
 $("settingsCustomizationTab").addEventListener("click", () => setSettingsTab("customization"));
+$("settingsOverlayTab").addEventListener("click", () => setSettingsTab("overlay"));
 $("settingsSyncTab").addEventListener("click", () => setSettingsTab("sync"));
 $("settingsDiagnosticsTab").addEventListener("click", () => setSettingsTab("diagnostics"));
 $("settingsHistoryTab").addEventListener("click", () => setSettingsTab("history"));
@@ -12338,7 +12534,7 @@ $("customizationDialog").addEventListener("close", () => {
     state.settings = cloneSettings(state.settingsDraft.original);
     state.settings.backgroundEffect = backgroundEffect;
     applySettings();
-   
+
     updateVrChatBackgroundSyncTimer();
   }
   clearTimeout(settingsLivePreviewTimer);
@@ -12370,6 +12566,32 @@ $("panelOpacityInput").addEventListener("input", () => { state.settings.panelOpa
 $("panelOpacityNumber").addEventListener("input", syncPanelOpacityFromNumber);
 $("panelOpacityPrevBtn").addEventListener("click", () => stepPanelOpacity(-1));
 $("panelOpacityNextBtn").addEventListener("click", () => stepPanelOpacity(1));
+$("openOverlayBtn").addEventListener("click", openOverlayFromSettings);
+$("closeOverlayBtn").addEventListener("click", closeOverlayFromSettings);
+$("overlayEnabledToggle").addEventListener("change", () => { state.settings.overlayEnabled = $("overlayEnabledToggle").checked; });
+$("overlayDefaultPanelSelect").addEventListener("change", () => { state.settings.overlayDefaultPanel = $("overlayDefaultPanelSelect").value; });
+$("overlayHotkeyInput").addEventListener("focus", () => { $("overlayHotkeyInput").value = "Press keys..."; });
+$("overlayHotkeyInput").addEventListener("blur", () => { $("overlayHotkeyInput").value = state.settings.overlayHotkey || DEFAULT_SETTINGS.overlayHotkey; });
+$("overlayHotkeyInput").addEventListener("keydown", (event) => {
+  event.preventDefault();
+  const hotkey = overlayHotkeyFromEvent(event);
+  if (!hotkey) return;
+  state.settings.overlayHotkey = hotkey;
+  $("overlayHotkeyInput").value = hotkey;
+});
+$("resetOverlayHotkeyBtn").addEventListener("click", () => {
+  state.settings.overlayHotkey = DEFAULT_SETTINGS.overlayHotkey;
+  applyOverlaySettingsControls();
+});
+$("overlayOpacityInput").addEventListener("input", () => { state.settings.overlayOpacity = Number($("overlayOpacityInput").value); applyOverlayOpacityControls(); });
+$("overlayOpacityNumber").addEventListener("input", syncOverlayOpacityFromNumber);
+$("overlayOpacityPrevBtn").addEventListener("click", () => stepOverlayOpacity(-1));
+$("overlayOpacityNextBtn").addEventListener("click", () => stepOverlayOpacity(1));
+$("overlayScaleInput").addEventListener("input", () => { state.settings.overlayScale = Number($("overlayScaleInput").value); applyOverlayScaleControls(); });
+$("overlayScaleNumber").addEventListener("input", syncOverlayScaleFromNumber);
+$("overlayScalePrevBtn").addEventListener("click", () => stepOverlayScale(-1));
+$("overlayScaleNextBtn").addEventListener("click", () => stepOverlayScale(1));
+$("resetOverlayLayoutBtn").addEventListener("click", resetOverlayLayoutSettings);
 [
   "themeColorInput",
   "panelColorInput",
@@ -12380,7 +12602,15 @@ $("panelOpacityNextBtn").addEventListener("click", () => stepPanelOpacity(1));
   "panelOpacityInput",
   "panelOpacityNumber",
   "panelOpacityPrevBtn",
-  "panelOpacityNextBtn"
+  "panelOpacityNextBtn",
+  "overlayOpacityInput",
+  "overlayOpacityNumber",
+  "overlayOpacityPrevBtn",
+  "overlayOpacityNextBtn",
+  "overlayScaleInput",
+  "overlayScaleNumber",
+  "overlayScalePrevBtn",
+  "overlayScaleNextBtn"
 ].forEach(bindSettingsLivePreviewControl);
 $("checkUpdateBtn").addEventListener("click", () => checkForUpdates());
 $("resetThemeBtn").addEventListener("click", () => { state.settings.themeColor = DEFAULT_SETTINGS.themeColor; state.settings.panelColor = DEFAULT_SETTINGS.panelColor; state.settings.panelColorSynced = DEFAULT_SETTINGS.panelColorSynced; state.settings.backgroundOpacity = DEFAULT_SETTINGS.backgroundOpacity; state.settings.panelOpacity = DEFAULT_SETTINGS.panelOpacity; applySettings(); });

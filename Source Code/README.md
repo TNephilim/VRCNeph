@@ -11,6 +11,7 @@ VRCNeph is a desktop app for managing VRChat avatar favorites outside the in-gam
 - Stores notes and metadata for each avatar.
 - Searches avatars by name, ID, author, description, tags, and notes.
 - Searches local and remote avatar databases from one tab.
+- Provides an in-game overlay for avatars, worlds, friends, current info, and recent items.
 - Imports and exports your local library as JSON.
 - Checks GitHub releases for app updates.
 
@@ -31,6 +32,10 @@ The app is built as a standalone Windows executable. Keep it wherever you want t
 3. Create groups to organize favorites.
 4. Use the database tab to search cached avatar sources.
 5. Export your library when you want a backup or a copy for another machine.
+
+## In-Game Overlay
+
+Press `F8` while VRCNeph is running to open or close the overlay. The overlay can be moved and resized over VRChat, follows your app theme, and has settings for opacity, default panel, and keybind.
 
 ## VRChat Login And Sync
 

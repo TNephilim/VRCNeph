@@ -84,6 +84,7 @@
                   <option value="all">All</option>
                   <option value="invite">Invites</option>
                   <option value="request">Requests</option>
+                  <option value="boop">Boops</option>
                   <option value="friend">Friends</option>
                   <option value="group">Groups</option>
                 </select>
@@ -448,6 +449,7 @@
     <header><h3>Settings</h3><button type="button" class="icon-button" data-close="customizationDialog">x</button></header>
     <div class="settings-tabs" role="tablist">
       <button id="settingsCustomizationTab" type="button" class="active">Customization</button>
+      <button id="settingsOverlayTab" type="button">Overlay</button>
       <button id="settingsSyncTab" type="button">Sync</button>
       <button id="settingsBackupsTab" type="button">Backups</button>
       <button id="settingsHistoryTab" type="button">Metadata History</button>
@@ -464,6 +466,36 @@
       <label>Panel opacity</label>
       <div class="page-slider-row"><button id="panelOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="panelOpacityInput" type="range" min="0" max="100" value="35"><button id="panelOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button></div>
       <label id="panelOpacityValue" class="page-slider-value">Opacity <input id="panelOpacityNumber" type="number" min="0" max="100" step="1" value="35">%</label>
+    </section>
+    <section id="settingsOverlayPanel" class="settings-panel overlay-settings-panel" hidden>
+      <div class="settings-panel-actions"><button id="openOverlayBtn" type="button" class="primary">Open Overlay</button><button id="closeOverlayBtn" type="button">Close Overlay</button></div>
+      <div class="overlay-settings-grid">
+        <article class="overlay-settings-card">
+          <strong>Mouse control</strong>
+          <kbd>Hold Tab</kbd>
+          <span>In VRChat desktop mode, hold Tab to free your mouse so you can click, drag, resize, and use overlay controls without opening the VRChat menu.</span>
+        </article>
+      </div>
+      <label class="sync-toggle-label overlay-toggle-label">Enable overlay hotkey<input id="overlayEnabledToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span></label>
+      <label>Overlay keybind</label>
+      <div class="overlay-hotkey-row"><input id="overlayHotkeyInput" type="text" value="F8" readonly><button id="resetOverlayHotkeyBtn" type="button">Reset</button></div>
+      <label>Default panel
+        <select id="overlayDefaultPanelSelect">
+          <option value="avatars">Avatars</option>
+          <option value="worlds">Worlds</option>
+          <option value="friends">Friends</option>
+          <option value="current">Current</option>
+          <option value="recent">Recent</option>
+        </select>
+      </label>
+      <label>Panel opacity</label>
+      <div class="page-slider-row"><button id="overlayOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="overlayOpacityInput" type="range" min="45" max="100" value="86"><button id="overlayOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button></div>
+      <label id="overlayOpacityValue" class="page-slider-value">Panel opacity <input id="overlayOpacityNumber" type="number" min="45" max="100" step="1" value="86">%</label>
+      <label>Overlay scale</label>
+      <div class="page-slider-row"><button id="overlayScalePrevBtn" type="button" class="icon-button" title="Smaller">&lt;</button><input id="overlayScaleInput" type="range" min="80" max="135" value="100"><button id="overlayScaleNextBtn" type="button" class="icon-button" title="Larger">&gt;</button></div>
+      <label id="overlayScaleValue" class="page-slider-value">Scale <input id="overlayScaleNumber" type="number" min="80" max="135" step="1" value="100">%</label>
+      <button id="resetOverlayLayoutBtn" type="button">Reset Overlay Position and Size</button>
+      <div class="settings-empty compact"><h4>Panel behavior</h4><p>Single-panel tab mode ships first. Pinned multi-panel layouts can be added on top of the same overlay shell without rebuilding the UI.</p></div>
     </section>
     <section id="settingsSyncPanel" class="settings-panel" hidden>
       <div class="settings-panel-actions"><button id="syncNowBtn" type="button">Sync Now</button><button id="refreshSyncCenterBtn" type="button">Refresh</button></div>
