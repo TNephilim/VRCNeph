@@ -1,4 +1,4 @@
-const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", overlayEnabled: true, overlayHotkey: "F8", overlayDefaultPanel: "avatars", overlayOpacity: 86, overlayScale: 100, overlayX: 8, overlayY: 24, overlayWidth: 360, overlayHeight: 558, schemaVersion: 11 };
+const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", overlayEnabled: true, overlayHotkey: "F8", overlayDefaultPanel: "avatars", overlayOpacity: 85, overlayScale: 100, overlayX: 8, overlayY: 16, overlayWidth: 360, overlayHeight: 519, schemaVersion: 12 };
 const OVERLAY_TAB_TIP_SEEN_KEY = "vrcneph.overlay.tabTipSeen.v1";
 const LIVE_SYNC_TIMING = {
   favoriteSyncMs: 45 * 1000,
@@ -411,7 +411,7 @@ async function loadSettings() {
       backgroundEffect: String(saved.backgroundEffect || ""),
       overlayEnabled: saved.overlayEnabled !== false,
       overlayHotkey: String(saved.overlayHotkey || DEFAULT_SETTINGS.overlayHotkey),
-      overlayDefaultPanel: ["avatars", "worlds", "friends", "session", "current", "recent"].includes(String(saved.overlayDefaultPanel || "")) ? (saved.overlayDefaultPanel === "session" ? "current" : saved.overlayDefaultPanel) : DEFAULT_SETTINGS.overlayDefaultPanel,
+      overlayDefaultPanel: ["avatars", "worlds", "friends", "session", "current", "database", "recent"].includes(String(saved.overlayDefaultPanel || "")) ? (saved.overlayDefaultPanel === "session" || saved.overlayDefaultPanel === "current" ? "database" : saved.overlayDefaultPanel) : DEFAULT_SETTINGS.overlayDefaultPanel,
       overlayOpacity: Number.isFinite(saved.overlayOpacity) ? Math.min(100, Math.max(45, Number(saved.overlayOpacity))) : DEFAULT_SETTINGS.overlayOpacity,
       overlayScale: Number.isFinite(saved.overlayScale) ? Math.min(135, Math.max(80, Number(saved.overlayScale))) : DEFAULT_SETTINGS.overlayScale,
       overlayX: Number.isFinite(saved.overlayX) ? Number(saved.overlayX) : DEFAULT_SETTINGS.overlayX,
@@ -480,6 +480,15 @@ function handleAppEvent(name, data) {
   if (name === "vrchatPipeline") handleVrchatPipelineEvent(data);
   if (name === "vrchatPipelineStatus") handleVrchatPipelineStatus(data);
   if (name === "appCloseRequested") void handleAppCloseRequested(data);
+  if (name === "libraryChanged") handleLibraryChanged(data);
+}
+function handleLibraryChanged(data) {
+  if (!data || !Array.isArray(data.groups) || !Array.isArray(data.avatars)) return;
+  state.library = data;
+  if (state.activeGroupId && !state.library.groups.some((group) => group.id === state.activeGroupId)) {
+    state.activeGroupId = state.library.groups[0]?.id ?? null;
+  }
+  render();
 }
 function invalidateBackgroundCache(groupId = "") {
   if (groupId) state.backgroundCache.delete(`group:${groupId}`);
@@ -600,18 +609,18 @@ function canAccessSyncedWorldGroup(key = "") {
 function shouldHideSyncedWorldGroup(group) {
   return group?.type === "synced" && !canAccessSyncedWorldGroup(group.key) && !(group.worlds || []).length;
 }
-function isPinnedSystemGroup(groupId) { return isRecentGroup(groupId) || isDeletedGroup(groupId) || isUploadedGroup(groupId) || isUpdatedGroup(groupId); }
+function isPinnedSystemGroup(groupId) { return isUnfavoriteGroup(groupId) || isRecentGroup(groupId) || isDeletedGroup(groupId) || isUploadedGroup(groupId) || isUpdatedGroup(groupId); }
 function isDefaultReorderLockedGroup(groupId) { return isSyncedGroup(groupId) || isPinnedSystemGroup(groupId); }
 function canManuallyAddToGroup(groupId) { return !isPinnedSystemGroup(groupId) && (!isSyncedGroup(groupId) || canAccessSyncedGroup(groupId)); }
 function canCopyGroupIntoGroup(groupId) { return !isSyncedGroup(groupId) && !isPinnedSystemGroup(groupId); }
 function isReadOnlySyncedGroup(groupId = "") { return isSyncedGroup(groupId) && !canAccessSyncedGroup(groupId); }
 function sourceGroupCopyOnlyMessage(groupId = "") {
   if (isReadOnlySyncedGroup(groupId)) return "You need VRC+ to move avatars out of this synced group. Copy them to a local group instead.";
-  return "Recent and Deleted avatars can only be copied to another group.";
+  return "Unfavorited, Recent, and Deleted avatars can only be copied to another group.";
 }
 function readOnlyFavoriteGroupMessage(groupId = "") {
   if (isSyncedGroup(groupId) && !canAccessSyncedGroup(groupId)) return "You need VRC+ to edit this synced favorite group.";
-  return "Recent, Deleted, Uploaded, and Updated groups are managed automatically.";
+  return "Unfavorited, Recent, Deleted, Uploaded, and Updated groups are managed automatically.";
 }
 function currentAvatarFavoriteTargetStatus(groupId = state.activeGroupId, avatarId = "") {
   const group = state.library.groups.find((item) => item.id === groupId);
@@ -1142,18 +1151,18 @@ function renderToolbar() {
   $("replaceSyncedGroupBtn").hidden = !syncedEditVisible;
   $("applySyncedAvatarOrderBtn").disabled = state.syncedAvatarEdit.applying;
   $("replaceSyncedGroupBtn").disabled = state.syncedAvatarEdit.applying;
-  $("sortMenuBtn").disabled = syncedEditActive;
+  $("sortMenuBtn").disabled = syncedEditActive || systemGroup;
   $("editGroupBtn").hidden = systemGroup || managedReadOnlyGroup || syncedReadOnlyGroup;
   $("copyGroupBtn").hidden = systemGroup || managedReadOnlyGroup;
   $("deleteGroupBtn").hidden = systemGroup || synced || managedReadOnlyGroup;
   $("addAvatarBtn").hidden = systemGroup || managedReadOnlyGroup || syncedReadOnlyGroup;
-  $("equipRandomFavoriteBtn").hidden = isRecentGroup(group?.id) || isDeletedGroup(group?.id);
-  $("favRouletteBtn").hidden = isRecentGroup(group?.id) || isDeletedGroup(group?.id);
+  $("equipRandomFavoriteBtn").hidden = isUnfavoriteGroup(group?.id) || isRecentGroup(group?.id) || isDeletedGroup(group?.id);
+  $("favRouletteBtn").hidden = isUnfavoriteGroup(group?.id) || isRecentGroup(group?.id) || isDeletedGroup(group?.id);
   $("editGroupBtn").disabled = false;
   $("copyGroupBtn").disabled = false;
   $("deleteGroupBtn").disabled = synced || state.library.groups.length <= 1;
   $("unfavoriteAllBtn").hidden = !group || managedReadOnlyGroup;
-  $("unfavoriteAllBtn").textContent = isRecentGroup(group?.id) ? "Clear Recents" : isDeletedGroup(group?.id) ? "Clear Deleted" : "Unfavorite All";
+  $("unfavoriteAllBtn").textContent = isUnfavoriteGroup(group?.id) ? "Clear Unfavorites" : isRecentGroup(group?.id) ? "Clear Recents" : isDeletedGroup(group?.id) ? "Clear Deleted" : "Unfavorite All";
   $("unfavoriteAllBtn").disabled = state.vrchatSyncBusy || state.syncedAvatarEdit.applying || !groupAvatars(group?.id).length || (synced && !state.vrchat?.isLoggedIn);
   $("checkDeletedFavoritesBtn").hidden = !isDeletedGroup(group?.id);
   $("checkDeletedFavoritesBtn").textContent = state.vrchatSyncBusy && isDeletedGroup(group?.id) ? "Checking..." : "Check for Deleted/Private";
@@ -1195,6 +1204,7 @@ function toolbarGroupDescription(group) {
   if (synced) return { main: `VRChat ${synced[1]} - ${count} avatar${count === 1 ? "" : "s"}`, sync: `Last synced ${synced[3]}` };
   const uploaded = /^Uploaded avatars from your VRChat account\.\s*(\d+) avatars\.\s*Last synced\s+(.+)$/i.exec(description);
   if (uploaded) return { main: `Uploaded - ${count} avatar${count === 1 ? "" : "s"}`, sync: `Last synced ${uploaded[2]}` };
+  if (isUnfavoriteGroup(group?.id)) return `Unfavorited - ${count} archived avatar${count === 1 ? "" : "s"}`;
   if (isRecentGroup(group?.id)) return `Recent - ${count} avatar${count === 1 ? "" : "s"} detected`;
   if (isDeletedGroup(group?.id)) return `Deleted/private - ${count} archived avatar${count === 1 ? "" : "s"}`;
   if (isUpdatedGroup(group?.id)) return `Updated metadata - ${count} avatar${count === 1 ? "" : "s"} this sync`;
@@ -2695,7 +2705,7 @@ function hasRandomFavoriteAvatar() {
   return Boolean(state.library.avatars.some((avatar) => {
     const avatarId = avatarRandomId(avatar);
     const groupId = String(avatar.groupId || "").toLowerCase();
-    return Boolean(avatarId && !excluded.has(avatarId) && !["recent_avatars", "deleted_avatars", "updated_avatars", "uploaded_avatars"].includes(groupId));
+    return Boolean(avatarId && !excluded.has(avatarId) && !["unfavorite_avatars", "recent_avatars", "deleted_avatars", "updated_avatars", "uploaded_avatars"].includes(groupId));
   }));
 }
 async function equipRandomFavoriteAvatar({ quiet = false } = {}) {
@@ -5225,11 +5235,14 @@ async function unfavoriteAllInActiveGroup() {
   if (!count) { toast("No avatars in this group."); return; }
   if (isSyncedGroup(group.id) && !state.vrchat?.isLoggedIn) { toast("Log in to VRChat first."); return; }
   const synced = isSyncedGroup(group.id);
+  const unfavorited = isUnfavoriteGroup(group.id);
   const recent = isRecentGroup(group.id);
   const deleted = isDeletedGroup(group.id);
-  const label = recent ? "Clear Recents" : deleted ? "Clear Deleted" : "Unfavorite All";
+  const label = unfavorited ? "Clear Unfavorites" : recent ? "Clear Recents" : deleted ? "Clear Deleted" : "Unfavorite All";
   const message = synced
     ? `Remove all ${count} avatars from "${group.name}" in your VRChat favorites? A local backup will be created first.`
+    : unfavorited
+      ? `Clear all ${count} avatars from Unfavorited locally? A backup will be created first.`
     : recent
       ? `Clear all ${count} avatars from Recent Avatars locally? A backup will be created first.`
     : deleted
@@ -11066,8 +11079,11 @@ async function refreshFavoriteWorlds({ silent = false } = {}) {
 }
 function currentInstanceIdForInvite() {
   const location = state.social.location?.location || "";
-  const colon = location.indexOf(":");
-  return colon >= 0 ? location.slice(colon + 1) : "";
+  const worldId = state.social.location?.worldId || "";
+  const instanceId = state.social.location?.instanceId || "";
+  if (location && String(location).startsWith("wrld_")) return location;
+  if (worldId && instanceId) return `${worldId}:${instanceId}`;
+  return instanceId || location || "";
 }
 function chooseInviteMessageSlot({ title, message, confirmLabel, messageType = "message" }) {
   return new Promise((resolve) => {
@@ -11521,20 +11537,22 @@ async function deleteSelectedAvatars(ids) {
 }
 async function equipAvatar(id, avatarMeta = null) {
   try {
-    state.lastLoggedCurrentAvatarId = id;
     const avatar = avatarMeta || state.library.avatars.find((x) => (x.avatarId || x.id) === id);
-    state.currentAvatarSummary = { id, name: avatar?.name || id, imageUrl: avatar?.imageUrl || '', thumbnailImageUrl: avatar?.thumbnailImageUrl || avatar?.imageUrl || '' };
-    if (state.vrchat?.user) {
-      state.vrchat.user.currentAvatarId = id;
-      state.vrchat.user.currentAvatarImageUrl = avatar?.imageUrl || state.vrchat.user.currentAvatarImageUrl || "";
-      state.vrchat.user.currentAvatarThumbnailImageUrl = avatar?.thumbnailImageUrl || avatar?.imageUrl || state.vrchat.user.currentAvatarThumbnailImageUrl || "";
-    }
-    renderAccount();
     enqueueVrChatAction({
       kind: "equip-avatar",
       label: `Equip ${avatar?.name || id}`,
       payload: { avatarId: id },
-      run: () => api("vrchatSelectAvatar", { id })
+      run: () => api("vrchatSelectAvatar", { id }),
+      onSuccess: () => {
+        state.lastLoggedCurrentAvatarId = id;
+        state.currentAvatarSummary = { id, name: avatar?.name || id, imageUrl: avatar?.imageUrl || '', thumbnailImageUrl: avatar?.thumbnailImageUrl || avatar?.imageUrl || '' };
+        if (state.vrchat?.user) {
+          state.vrchat.user.currentAvatarId = id;
+          state.vrchat.user.currentAvatarImageUrl = avatar?.imageUrl || state.vrchat.user.currentAvatarImageUrl || "";
+          state.vrchat.user.currentAvatarThumbnailImageUrl = avatar?.thumbnailImageUrl || avatar?.imageUrl || state.vrchat.user.currentAvatarThumbnailImageUrl || "";
+        }
+        renderAccount();
+      }
     });
     toast("Avatar equip queued.");
   } catch (e) { toast(e.message); }

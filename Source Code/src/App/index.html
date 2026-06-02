@@ -468,7 +468,7 @@
       <label id="panelOpacityValue" class="page-slider-value">Opacity <input id="panelOpacityNumber" type="number" min="0" max="100" step="1" value="35">%</label>
     </section>
     <section id="settingsOverlayPanel" class="settings-panel overlay-settings-panel" hidden>
-      <div class="settings-panel-actions"><button id="openOverlayBtn" type="button" class="primary">Open Overlay</button><button id="closeOverlayBtn" type="button">Close Overlay</button></div>
+      <div class="settings-panel-actions"><button id="openOverlayBtn" type="button" class="primary">Open Overlay</button><button id="closeOverlayBtn" type="button">Close Overlay</button><button id="resetOverlayLayoutBtn" type="button">Reset Layout</button></div>
       <div class="overlay-settings-grid">
         <article class="overlay-settings-card">
           <strong>Mouse control</strong>
@@ -484,7 +484,7 @@
           <option value="avatars">Avatars</option>
           <option value="worlds">Worlds</option>
           <option value="friends">Friends</option>
-          <option value="current">Current</option>
+          <option value="database">Database</option>
           <option value="recent">Recent</option>
         </select>
       </label>
@@ -494,8 +494,6 @@
       <label>Overlay scale</label>
       <div class="page-slider-row"><button id="overlayScalePrevBtn" type="button" class="icon-button" title="Smaller">&lt;</button><input id="overlayScaleInput" type="range" min="80" max="135" value="100"><button id="overlayScaleNextBtn" type="button" class="icon-button" title="Larger">&gt;</button></div>
       <label id="overlayScaleValue" class="page-slider-value">Scale <input id="overlayScaleNumber" type="number" min="80" max="135" step="1" value="100">%</label>
-      <button id="resetOverlayLayoutBtn" type="button">Reset Overlay Position and Size</button>
-      <div class="settings-empty compact"><h4>Panel behavior</h4><p>Single-panel tab mode ships first. Pinned multi-panel layouts can be added on top of the same overlay shell without rebuilding the UI.</p></div>
     </section>
     <section id="settingsSyncPanel" class="settings-panel" hidden>
       <div class="settings-panel-actions"><button id="syncNowBtn" type="button">Sync Now</button><button id="refreshSyncCenterBtn" type="button">Refresh</button></div>

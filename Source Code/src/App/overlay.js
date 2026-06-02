@@ -1,9 +1,53 @@
 const OVERLAY_CACHE_KEY = "vrcneph.overlay.snapshot.v1";
 const OVERLAY_SETTINGS_CACHE_KEY = "vrcneph.overlay.settings.v1";
 const OVERLAY_TAB_TIP_SEEN_KEY = "vrcneph.overlay.tabTipSeen.v1";
+const OVERLAY_DETACHED_PANELS_KEY = "vrcneph.overlay.detachedPanels.v1";
+const OVERLAY_DETAIL_POSITIONS_KEY = "vrcneph.overlay.detailPositions.v1";
 const LOCAL_WORLD_GROUPS_KEY = "vrcneph.worldGroups";
 const DEFAULT_WORLD_GROUP_KEY = "local_world_favorites";
 const SYNCED_GROUP_AVATAR_LIMIT = 50;
+const PANEL_LABELS = { avatars: "Avatars", worlds: "Worlds", friends: "Friends", database: "Database", recent: "Recent" };
+const DATABASE_PROVIDERS = [
+  { value: "all", label: "All Databases" },
+  { value: "avtrzip", label: "AVTRZIP" },
+  { value: "pas", label: "Prismic PAS" },
+  { value: "vrcx", label: "VRCX DB" }
+];
+const DATABASE_SEARCH_MODES = [
+  { value: "phrase", label: "Match Phrase" },
+  { value: "exact", label: "Exact Phrase" },
+  { value: "startsWith", label: "Starts With" },
+  { value: "endsWith", label: "Ends With" },
+  { value: "allWords", label: "All Words" }
+];
+const DATABASE_SORT_OPTIONS = [
+  { value: "relevance", label: "Relevance" },
+  { value: "updatedDesc", label: "Recently updated" },
+  { value: "createdDesc", label: "Recently added" },
+  { value: "nameAsc", label: "Name A-Z" },
+  { value: "authorAsc", label: "Author A-Z" }
+];
+const PANEL_SORT_OPTIONS = {
+  avatars: [
+    { value: "updatedDesc", label: "Recently updated" },
+    { value: "manual", label: "Custom order" },
+    { value: "createdDesc", label: "Recently added" },
+    { value: "nameAsc", label: "Name A-Z" },
+    { value: "authorAsc", label: "Author A-Z" }
+  ],
+  worlds: [
+    { value: "updatedDesc", label: "Recently updated" },
+    { value: "nameAsc", label: "Name A-Z" },
+    { value: "authorAsc", label: "Author A-Z" },
+    { value: "occupantsDesc", label: "Most active" },
+    { value: "favoritesDesc", label: "Most favorites" }
+  ],
+  friends: [
+    { value: "presence", label: "Status" },
+    { value: "nameAsc", label: "Name A-Z" },
+    { value: "platformAsc", label: "Platform" }
+  ]
+};
 
 function loadOverlayJson(key, fallback = null) {
   try { return JSON.parse(localStorage.getItem(key) || "") || fallback; } catch { return fallback; }
@@ -36,7 +80,18 @@ const state = {
   selectedAvatarId: "",
   selectedWorldId: "",
   selectedFriendId: "",
-  filters: { avatars: "", worlds: "", friends: "", recent: "" },
+  recentMode: "avatars",
+  filters: { avatars: "", worlds: "", friends: "", database: "", recent: "" },
+  sort: { avatars: "updatedDesc", worlds: "updatedDesc", friends: "presence" },
+  database: { query: "", key: "", results: [], loading: false, error: "", timer: 0, provider: "all", searchMode: "phrase", sort: "relevance", scope: "avatar", searchDescriptionTags: true, platforms: { pc: false, android: false, ios: false } },
+  detachedPanels: loadOverlayJson(OVERLAY_DETACHED_PANELS_KEY, {}),
+  detailPositions: loadOverlayJson(OVERLAY_DETAIL_POSITIONS_KEY, {}),
+  detailPanels: {
+    avatar: { open: false, item: null, loading: false, error: "", token: 0 },
+    world: { open: false, item: null, loading: false, error: "", token: 0 },
+    user: { open: false, item: null, loading: false, error: "", token: 0 }
+  },
+  roulette: { avatars: 0, database: 0, intervals: { avatars: 60000, database: 60000 }, running: { avatars: false, database: false } },
   groupDropdownOpen: false,
   data: {
     settings: loadOverlayJson(OVERLAY_SETTINGS_CACHE_KEY, {}),
@@ -47,6 +102,7 @@ const state = {
     friends: [],
     current: null,
     recent: [],
+    recentWorlds: [],
     session: null
   },
   pending: new Map()
@@ -60,8 +116,7 @@ function handleNativeMessage(message) {
   const response = JSON.parse(message);
   if (response.event) {
     if (response.event === "overlayRefresh") {
-      state.data = response.data || state.data;
-      render();
+      applyOverlaySnapshot(response.data);
     }
     return;
   }
@@ -73,6 +128,13 @@ function handleNativeMessage(message) {
 }
 if (window.external && typeof window.external.receiveMessage === "function") window.external.receiveMessage(handleNativeMessage);
 else if (window.external) window.external.receiveMessage = handleNativeMessage;
+
+function applyOverlaySnapshot(snapshot) {
+  state.data = snapshot || state.data;
+  saveOverlayJson(OVERLAY_CACHE_KEY, state.data);
+  if (state.data?.settings) saveOverlayJson(OVERLAY_SETTINGS_CACHE_KEY, state.data.settings);
+  render();
+}
 
 function api(command, payload = {}, timeoutMs = 120000) {
   if (!window.external || typeof window.external.sendMessage !== "function") return Promise.reject(new Error("Overlay bridge is not available."));
@@ -134,6 +196,27 @@ function activeGroup(panel = state.panel) {
   return groups[state.groupIndex[panel]];
 }
 
+function stepGroupIndex(panel, delta) {
+  const groups = activeGroups(panel);
+  if (!groups.length) return;
+  const current = Math.max(0, Math.min(Number(state.groupIndex[panel] || 0), groups.length - 1));
+  state.groupIndex[panel] = (current + Number(delta || 0) + groups.length) % groups.length;
+}
+
+function groupDisplayLimit(group) {
+  return Number(group?.count ?? group?.avatars?.length ?? group?.worlds?.length ?? group?.friends?.length ?? 0);
+}
+
+function groupShowsLimit(group) {
+  return Number(group?.limit || 0) > 0 && (group?.synced === true || !Array.isArray(group?.avatars));
+}
+
+function groupCountLabel(group, visibleCount, itemLabel) {
+  const count = Number(visibleCount || 0);
+  if (groupShowsLimit(group)) return `${count}/${Number(group.limit)} ${itemLabel}`;
+  return `${count} ${itemLabel}`;
+}
+
 function setPanel(panel) {
   state.panel = panel;
   state.groupDropdownOpen = false;
@@ -142,7 +225,225 @@ function setPanel(panel) {
 }
 
 function normalizedPanel(panel = "") {
-  return panel === "session" ? "current" : panel;
+  return panel === "session" || panel === "current" ? "database" : panel;
+}
+
+function databaseProviderLabel(value = state.database.provider) {
+  return DATABASE_PROVIDERS.find((item) => item.value === value)?.label || "All Databases";
+}
+
+function databaseSearchModeLabel(value = state.database.searchMode) {
+  return DATABASE_SEARCH_MODES.find((item) => item.value === value)?.label || "Match Phrase";
+}
+
+function databaseSortLabel(value = state.database.sort) {
+  return DATABASE_SORT_OPTIONS.find((item) => item.value === value)?.label || "Relevance";
+}
+
+function databaseSearchKey(query = state.filters.database) {
+  const platforms = state.database.platforms || {};
+  return [
+    String(query || "").trim(),
+    state.database.provider || "all",
+    state.database.searchMode || "phrase",
+    state.database.scope || "avatar",
+    state.database.searchDescriptionTags ? "details" : "names",
+    platforms.pc ? "pc" : "",
+    platforms.android ? "android" : "",
+    platforms.ios ? "ios" : ""
+  ].join("\n");
+}
+
+function resetDatabaseSearch() {
+  clearTimeout(state.database.timer);
+  state.database.query = "";
+  state.database.key = "";
+  state.database.results = [];
+  state.database.loading = false;
+  state.database.error = "";
+}
+
+function menuOptionsHtml(options, selectedValue, dataName) {
+  return options.map((option) => `<button type="button" data-${dataName}="${escapeHtml(option.value)}" aria-checked="${option.value === selectedValue ? "true" : "false"}">${escapeHtml(option.label)}</button>`).join("");
+}
+
+function panelSortLabel(panel = state.panel) {
+  return (PANEL_SORT_OPTIONS[panel] || []).find((item) => item.value === state.sort[panel])?.label || "Sort";
+}
+
+function panelControlsHtml(panel = state.panel, expanded = false) {
+  if (panel === "database") return databaseControlsHtml(expanded);
+  const options = PANEL_SORT_OPTIONS[panel];
+  if (!options) return "";
+  const actions = panel === "avatars"
+    ? `<button type="button" data-random-avatar>Random</button><button type="button" data-avatar-roulette>${state.roulette.running.avatars ? "Running" : "Roulette"}</button>`
+    : panel === "worlds"
+      ? `<button type="button" data-random-world>Random</button>`
+      : "";
+  return `<div class="overlay-database-controls panel-sort-controls ${actions ? `panel-sort-controls-${panel}` : ""}">
+    <div class="overlay-select-control">
+      <button type="button" data-database-menu-toggle="panel-sort">${escapeHtml(panelSortLabel(panel))}</button>
+      <div class="overlay-select-menu" data-database-menu="panel-sort" hidden>${menuOptionsHtml(options, state.sort[panel], "panel-sort")}</div>
+    </div>
+    ${actions}
+  </div>`;
+}
+
+function databaseFilterLabel() {
+  const count = Number(state.database.scope === "author")
+    + Number(!state.database.searchDescriptionTags)
+    + Object.values(state.database.platforms || {}).filter(Boolean).length;
+  return count ? `Filters ${count}` : "Filters";
+}
+
+function databaseControlsHtml(expanded = false) {
+  return `<div class="overlay-database-controls ${expanded ? "expanded" : ""}">
+    ${expanded ? `<div class="overlay-select-control">
+      <button type="button" data-database-menu-toggle="provider">${escapeHtml(databaseProviderLabel())}</button>
+      <div class="overlay-select-menu" data-database-menu="provider" hidden>${menuOptionsHtml(DATABASE_PROVIDERS, state.database.provider || "all", "database-provider")}</div>
+    </div>` : ""}
+    <div class="overlay-select-control">
+      <button type="button" data-database-menu-toggle="mode">${escapeHtml(databaseSearchModeLabel())}</button>
+      <div class="overlay-select-menu" data-database-menu="mode" hidden>${menuOptionsHtml(DATABASE_SEARCH_MODES, state.database.searchMode || "phrase", "database-mode")}</div>
+    </div>
+    <div class="overlay-select-control">
+      <button type="button" data-database-menu-toggle="sort">${escapeHtml(databaseSortLabel())}</button>
+      <div class="overlay-select-menu" data-database-menu="sort" hidden>${menuOptionsHtml(DATABASE_SORT_OPTIONS, state.database.sort || "relevance", "database-sort")}</div>
+    </div>
+    <div class="overlay-select-control">
+      <button type="button" data-database-menu-toggle="filters">${escapeHtml(databaseFilterLabel())}</button>
+      <div class="overlay-select-menu overlay-filter-menu" data-database-menu="filters" hidden>
+        <button type="button" class="${state.database.scope !== "author" ? "active" : ""}" data-database-scope="avatar">Search avatars</button>
+        <button type="button" class="${state.database.scope === "author" ? "active" : ""}" data-database-scope="author">Search authors</button>
+        <label><input type="checkbox" data-database-details-toggle ${state.database.searchDescriptionTags ? "checked" : ""}>Description & tags</label>
+        <label><input type="checkbox" data-database-platform="pc" ${state.database.platforms?.pc ? "checked" : ""}>PC</label>
+        <label><input type="checkbox" data-database-platform="android" ${state.database.platforms?.android ? "checked" : ""}>Android</label>
+        <label><input type="checkbox" data-database-platform="ios" ${state.database.platforms?.ios ? "checked" : ""}>iOS</label>
+      </div>
+    </div>
+    ${expanded ? `<div class="overlay-segmented-control" role="group" aria-label="Search scope">
+      <button type="button" class="${state.database.scope !== "author" ? "active" : ""}" data-database-scope="avatar">Avatars</button>
+      <button type="button" class="${state.database.scope === "author" ? "active" : ""}" data-database-scope="author">Authors</button>
+    </div>
+    <label class="overlay-toggle"><input type="checkbox" data-database-details-toggle ${state.database.searchDescriptionTags ? "checked" : ""}>Details</label>` : ""}
+    <div class="overlay-quick-actions">
+      <button type="button" data-random-database-page>Random Page</button>
+      <button type="button" data-random-database-avatar>Random Avatar</button>
+      <button type="button" data-database-roulette>${state.roulette.running.database ? "Running" : "Roulette"}</button>
+    </div>
+  </div>`;
+}
+
+function dateSortValue(item, ...keys) {
+  for (const key of keys) {
+    const value = Date.parse(item?.[key] || "");
+    if (Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+
+function sortedDatabaseResults(results = state.database.results) {
+  const items = [...(results || [])];
+  const sort = state.database.sort || "relevance";
+  if (sort === "updatedDesc") return items.sort((a, b) => dateSortValue(b, "remoteUpdatedAt", "updatedAt") - dateSortValue(a, "remoteUpdatedAt", "updatedAt"));
+  if (sort === "createdDesc") return items.sort((a, b) => dateSortValue(b, "remoteCreatedAt", "createdAt") - dateSortValue(a, "remoteCreatedAt", "createdAt"));
+  if (sort === "nameAsc") return items.sort((a, b) => String(a?.name || a?.avatarName || a?.avatarId || "").localeCompare(String(b?.name || b?.avatarName || b?.avatarId || "")));
+  if (sort === "authorAsc") return items.sort((a, b) => String(a?.authorName || "").localeCompare(String(b?.authorName || "")) || String(a?.name || a?.avatarId || "").localeCompare(String(b?.name || b?.avatarId || "")));
+  return items;
+}
+
+function sortedPanelItems(panel, items = []) {
+  const sorted = [...(items || [])];
+  const sort = state.sort[panel] || "";
+  if (panel === "avatars") {
+    if (sort === "manual") return sorted;
+    if (sort === "nameAsc") return sorted.sort((a, b) => String(a?.name || a?.id || "").localeCompare(String(b?.name || b?.id || ""), undefined, { sensitivity: "base" }));
+    if (sort === "authorAsc") return sorted.sort((a, b) => String(a?.authorName || "").localeCompare(String(b?.authorName || ""), undefined, { sensitivity: "base" }) || String(a?.name || a?.id || "").localeCompare(String(b?.name || b?.id || ""), undefined, { sensitivity: "base" }));
+    if (sort === "createdDesc") return sorted.sort((a, b) => dateSortValue(b, "createdAt", "updatedAt") - dateSortValue(a, "createdAt", "updatedAt"));
+    return sorted.sort((a, b) => dateSortValue(b, "updatedAt", "createdAt") - dateSortValue(a, "updatedAt", "createdAt"));
+  }
+  if (panel === "worlds") {
+    if (sort === "nameAsc") return sorted.sort((a, b) => String(a?.name || a?.id || "").localeCompare(String(b?.name || b?.id || ""), undefined, { sensitivity: "base" }));
+    if (sort === "authorAsc") return sorted.sort((a, b) => String(a?.authorName || "").localeCompare(String(b?.authorName || ""), undefined, { sensitivity: "base" }) || String(a?.name || a?.id || "").localeCompare(String(b?.name || b?.id || ""), undefined, { sensitivity: "base" }));
+    if (sort === "occupantsDesc") return sorted.sort((a, b) => Number(b?.occupants || 0) - Number(a?.occupants || 0) || String(a?.name || "").localeCompare(String(b?.name || "")));
+    if (sort === "favoritesDesc") return sorted.sort((a, b) => Number(b?.favorites || 0) - Number(a?.favorites || 0) || String(a?.name || "").localeCompare(String(b?.name || "")));
+    return sorted.sort((a, b) => dateSortValue(b, "updatedAt", "createdAt") - dateSortValue(a, "updatedAt", "createdAt"));
+  }
+  if (panel === "friends") {
+    if (sort === "nameAsc") return sorted.sort((a, b) => String(a?.displayName || a?.id || "").localeCompare(String(b?.displayName || b?.id || ""), undefined, { sensitivity: "base" }));
+    if (sort === "platformAsc") return sorted.sort((a, b) => String(a?.lastPlatform || "").localeCompare(String(b?.lastPlatform || ""), undefined, { sensitivity: "base" }) || String(a?.displayName || a?.id || "").localeCompare(String(b?.displayName || b?.id || ""), undefined, { sensitivity: "base" }));
+    return sortFriends(sorted);
+  }
+  return sorted;
+}
+
+function hideDatabaseMenus(root = document) {
+  root.querySelectorAll("[data-database-menu]").forEach((menu) => { menu.hidden = true; });
+}
+
+function toggleDatabaseMenu(button) {
+  const wrap = button.closest(".overlay-database-controls");
+  if (!wrap) return;
+  const menu = wrap.querySelector(`[data-database-menu="${button.dataset.databaseMenuToggle}"]`);
+  if (!menu) return;
+  const shouldOpen = menu.hidden;
+  hideDatabaseMenus(wrap);
+  menu.hidden = !shouldOpen;
+}
+
+function saveDetachedPanels() {
+  saveOverlayJson(OVERLAY_DETACHED_PANELS_KEY, state.detachedPanels);
+}
+
+function isDetached(panel = state.panel) {
+  return Boolean(state.detachedPanels?.[panel]);
+}
+
+function defaultDetachedPanel(panel) {
+  const index = Object.keys(state.detachedPanels || {}).length;
+  return panel === "database"
+    ? { x: 18 + (index * 18), y: 72 + (index * 18), width: 520, height: 620 }
+    : { x: 28 + (index * 18), y: 86 + (index * 18), width: 340, height: 460 };
+}
+
+function detachPanel(panel = state.panel) {
+  if (!PANEL_LABELS[panel]) return;
+  state.detachedPanels[panel] = state.detachedPanels[panel] || defaultDetachedPanel(panel);
+  saveDetachedPanels();
+  render();
+}
+
+function dockPanel(panel = state.panel) {
+  delete state.detachedPanels[panel];
+  saveDetachedPanels();
+  render();
+}
+
+function saveDetailPositions() {
+  saveOverlayJson(OVERLAY_DETAIL_POSITIONS_KEY, state.detailPositions);
+}
+
+function detailPosition(kind) {
+  const defaults = {
+    avatar: { x: 18, y: 70 },
+    world: { x: 44, y: 92 },
+    user: { x: 70, y: 114 }
+  };
+  return state.detailPositions[kind] || defaults[kind] || { x: 24, y: 80 };
+}
+
+function closeDetailPanel(kind) {
+  if (!state.detailPanels[kind]) return;
+  state.detailPanels[kind].open = false;
+  state.detailPanels[kind].loading = false;
+  state.detailPanels[kind].error = "";
+  render();
+}
+
+function detailPanelMatches(kind, id = "") {
+  const panel = state.detailPanels[kind];
+  const item = panel?.item || {};
+  return Boolean(panel?.open && id && String(item.id || item.avatarId || "").toLowerCase() === String(id).toLowerCase());
 }
 
 function setBusy(button, busyText = "...") {
@@ -186,8 +487,20 @@ function avatarSaveTargetStatus(group, avatarId = "") {
   if (isManagedAvatarGroup(group.id)) return { ok: false, reason: "Managed automatically." };
   if (group.canAccess === false) return { ok: false, reason: "VRC+ required." };
   if (avatarGroupHasAvatar(group, avatarId)) return { ok: false, reason: "Already in this group." };
-  if (isSyncedGroupId(group.id) && Number(group.count ?? group.avatars?.length ?? 0) >= SYNCED_GROUP_AVATAR_LIMIT) return { ok: false, reason: `Synced groups can only contain ${SYNCED_GROUP_AVATAR_LIMIT} avatars.` };
+  const limit = Number(group.limit || 0) || SYNCED_GROUP_AVATAR_LIMIT;
+  if (isSyncedGroupId(group.id) && Number(group.count ?? group.avatars?.length ?? 0) >= limit) return { ok: false, reason: `Synced groups can only contain ${limit} avatars.` };
   return { ok: true, reason: "" };
+}
+
+function favoriteAvatarEntry(avatarId = "") {
+  const id = String(avatarId || "").toLowerCase();
+  if (!id) return null;
+  for (const group of state.data.avatarGroups || []) {
+    if (!group?.id || isManagedAvatarGroup(group.id)) continue;
+    const avatar = (group.avatars || []).find((item) => avatarIdEquals(item.id || item.avatarId, id));
+    if (avatar) return { group, avatar };
+  }
+  return null;
 }
 
 function itemMatchesFilter(item, keys, panel = state.panel) {
@@ -214,7 +527,246 @@ function rowDetail(rowsHtml, actionsHtml = "") {
 }
 
 function currentInstanceId() {
-  return state.data.current?.location?.instanceId || "";
+  const location = state.data.current?.location || {};
+  if (location.location && String(location.location).startsWith("wrld_")) return location.location;
+  if (location.worldId && location.instanceId) return `${location.worldId}:${location.instanceId}`;
+  return location.instanceId || "";
+}
+
+function randomFrom(items = []) {
+  const list = (items || []).filter(Boolean);
+  if (!list.length) return null;
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+function avatarRandomId(avatar) {
+  return String(avatar?.avatarId || avatar?.id || "").trim().toLowerCase();
+}
+
+function excludedRandomAvatarIds() {
+  const excluded = new Set();
+  for (const group of state.data.avatarGroups || []) {
+    const groupId = String(group?.id || "").toLowerCase();
+    if (groupId !== "recent_avatars" && groupId !== "deleted_avatars") continue;
+    for (const avatar of group.avatars || []) {
+      const id = avatarRandomId(avatar);
+      if (id) excluded.add(id);
+    }
+  }
+  return excluded;
+}
+
+function dedupeRandomAvatars(avatars = []) {
+  const seen = new Set();
+  return (avatars || []).filter((avatar) => {
+    const id = avatarRandomId(avatar);
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+function randomFavoriteAvatar() {
+  const excluded = excludedRandomAvatarIds();
+  const blockedGroups = new Set(["recent_avatars", "deleted_avatars", "updated_avatars", "uploaded_avatars"]);
+  return randomFrom(dedupeRandomAvatars((state.data.avatarGroups || []).flatMap((group) => {
+    const groupId = String(group?.id || "").toLowerCase();
+    if (blockedGroups.has(groupId)) return [];
+    return (group.avatars || []).filter((avatar) => !excluded.has(avatarRandomId(avatar)));
+  })));
+}
+
+function filterRandomDatabaseAvatars(results = []) {
+  const excluded = excludedRandomAvatarIds();
+  return dedupeRandomAvatars(results || []).filter((avatar) => !excluded.has(avatarRandomId(avatar)));
+}
+
+async function equipAvatarIdFromOverlay(id, button = null, restoreLabel = "Equip") {
+  if (!id) return false;
+  const restore = button ? setBusy(button, "...") : null;
+  try {
+    await api("overlayEquipAvatar", { id }, 120000);
+    if (restore) {
+      restore("Sent");
+      setTimeout(() => { if (button.isConnected) button.textContent = restoreLabel; }, 900);
+    }
+    return true;
+  } catch (error) {
+    if (button) {
+      button.title = error.message;
+      restore?.(restoreLabel);
+      await confirmOverlay({ title: restoreLabel, message: error.message, confirmLabel: "OK", danger: false });
+    } else {
+      await confirmOverlay({ title: "Equip Avatar", message: error.message, confirmLabel: "OK", danger: false });
+    }
+    return false;
+  }
+}
+
+async function randomAvatarFromOverlay(button) {
+  const avatar = randomFavoriteAvatar();
+  const id = avatar?.avatarId || avatar?.id || "";
+  if (!id) {
+    await confirmOverlay({ title: "Random Avatar", message: "No favorite avatar is available to equip.", confirmLabel: "OK", danger: false });
+    return false;
+  }
+  return equipAvatarIdFromOverlay(id, button, "Random");
+}
+
+async function randomDatabasePageFromOverlay(button) {
+  const restore = setBusy(button, "...");
+  try {
+    let avatars = [];
+    for (let attempt = 0; avatars.length < 50 && attempt < 5; attempt++) {
+      const result = await api("avatarDatabaseRandom", { provider: state.database.provider || "all", query: "", limit: 50, page: 1 }, 120000);
+      const page = Array.isArray(result?.results) ? result.results : Array.isArray(result?.avatars) ? result.avatars : [];
+      avatars = filterRandomDatabaseAvatars([...avatars, ...page]).slice(0, 50);
+    }
+    if (!avatars.length) throw new Error(`No random ${databaseProviderLabel().toLowerCase()} avatars found outside Recent or Deleted.`);
+    state.filters.database = "";
+    state.database.key = `random\n${Date.now()}`;
+    state.database.query = "";
+    state.database.results = avatars;
+    state.database.loading = false;
+    state.database.error = "";
+    restore("Loaded");
+    render();
+    setTimeout(() => { if (button.isConnected) button.textContent = "Random Page"; }, 900);
+    return true;
+  } catch (error) {
+    button.title = error.message;
+    restore("Random Page");
+    return false;
+  }
+}
+
+async function randomDatabaseAvatarFromOverlay(button = null, restoreLabel = "Roulette") {
+  const restore = button ? setBusy(button, "...") : null;
+  try {
+    let avatars = [];
+    for (let attempt = 0; !avatars.length && attempt < 5; attempt++) {
+      const result = await api("avatarDatabaseRandom", { provider: state.database.provider || "all", query: "", limit: 50, page: 1 }, 120000);
+      const page = Array.isArray(result?.results) ? result.results : Array.isArray(result?.avatars) ? result.avatars : [];
+      avatars = filterRandomDatabaseAvatars(page);
+    }
+    const avatar = randomFrom(avatars);
+    const id = avatar?.avatarId || avatar?.id || "";
+    if (!id) throw new Error("No random database avatar was returned.");
+    await api("overlayEquipAvatar", { id }, 120000);
+    if (restore) {
+      restore("Sent");
+      setTimeout(() => { if (button.isConnected) button.textContent = restoreLabel; }, 900);
+    }
+    return true;
+  } catch (error) {
+    if (button) {
+      button.title = error.message;
+      restore?.(restoreLabel);
+      await confirmOverlay({ title: restoreLabel, message: error.message, confirmLabel: "OK", danger: false });
+    } else {
+      await confirmOverlay({ title: "Database Roulette", message: error.message, confirmLabel: "OK", danger: false });
+    }
+    return false;
+  }
+}
+
+function stopRoulette(kind) {
+  clearTimeout(state.roulette[kind]);
+  state.roulette[kind] = 0;
+  state.roulette.running[kind] = false;
+  render();
+}
+
+function rouletteIntervalMs() {
+  const minutes = Math.max(0, Math.floor(Number($("rouletteMinutesInput").value)) || 0);
+  const seconds = Math.max(0, Math.min(59, Math.floor(Number($("rouletteSecondsInput").value)) || 0));
+  $("rouletteMinutesInput").value = String(minutes);
+  $("rouletteSecondsInput").value = String(seconds);
+  return Math.max(5000, (minutes * 60000) + (seconds * 1000) || 60000);
+}
+
+async function openRouletteDialog(kind) {
+  const isDatabase = kind === "database";
+  $("rouletteTitle").textContent = isDatabase ? "Database Roulette" : "Avatar Roulette";
+  $("rouletteMessage").textContent = isDatabase ? "Equip random database avatars on a timer." : "Equip random favorite avatars on a timer.";
+  const interval = state.roulette.intervals[kind] || 60000;
+  $("rouletteMinutesInput").value = String(Math.floor(interval / 60000));
+  $("rouletteSecondsInput").value = String(Math.floor((interval % 60000) / 1000));
+  $("rouletteStopBtn").disabled = !state.roulette.running[kind];
+  $("rouletteStartBtn").textContent = state.roulette.running[kind] ? "Restart" : "Start";
+  const dialog = $("rouletteDialog");
+  return new Promise((resolve) => {
+    const cleanup = (value) => {
+      $("rouletteStartBtn").removeEventListener("click", onStart);
+      $("rouletteStopBtn").removeEventListener("click", onStop);
+      $("rouletteCancelBtn").removeEventListener("click", onCancel);
+      dialog.removeEventListener("cancel", onCancel);
+      dialog.removeEventListener("close", onCancel);
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    const onStart = () => cleanup("start");
+    const onStop = () => cleanup("stop");
+    const onCancel = () => cleanup("");
+    $("rouletteStartBtn").addEventListener("click", onStart, { once: true });
+    $("rouletteStopBtn").addEventListener("click", onStop, { once: true });
+    $("rouletteCancelBtn").addEventListener("click", onCancel, { once: true });
+    dialog.addEventListener("cancel", onCancel, { once: true });
+    dialog.addEventListener("close", onCancel, { once: true });
+    dialog.showModal();
+  });
+}
+
+async function rouletteTick(kind) {
+  if (!state.roulette.running[kind]) return;
+  const ok = kind === "database" ? await randomDatabaseAvatarFromOverlay(null) : await randomAvatarFromOverlay(null);
+  if (!ok || !state.roulette.running[kind]) {
+    stopRoulette(kind);
+    return;
+  }
+  state.roulette[kind] = setTimeout(() => { void rouletteTick(kind); }, state.roulette.intervals[kind]);
+  render();
+}
+
+async function toggleAvatarRoulette(button) {
+  const choice = await openRouletteDialog("avatars");
+  if (choice === "stop") return stopRoulette("avatars");
+  if (choice !== "start") return;
+  stopRoulette("avatars");
+  state.roulette.intervals.avatars = rouletteIntervalMs();
+  state.roulette.running.avatars = true;
+  const ok = await randomAvatarFromOverlay(button);
+  if (!ok) return stopRoulette("avatars");
+  state.roulette.avatars = setTimeout(() => { void rouletteTick("avatars"); }, state.roulette.intervals.avatars);
+  render();
+}
+
+async function toggleDatabaseRoulette(button) {
+  const choice = await openRouletteDialog("database");
+  if (choice === "stop") return stopRoulette("database");
+  if (choice !== "start") return;
+  stopRoulette("database");
+  state.roulette.intervals.database = rouletteIntervalMs();
+  state.roulette.running.database = true;
+  const ok = await randomDatabaseAvatarFromOverlay(button, "Roulette");
+  if (!ok) return stopRoulette("database");
+  state.roulette.database = setTimeout(() => { void rouletteTick("database"); }, state.roulette.intervals.database);
+  render();
+}
+
+async function randomWorldFromOverlay(button) {
+  const restore = setBusy(button, "...");
+  try {
+    const result = await api("vrchatWorldSearch", { sort: "random", order: "descending", limit: 50, offset: 0 }, 45000);
+    const world = randomFrom(Array.isArray(result?.worlds) ? result.worlds : []);
+    if (!world?.id && !world?.worldId) throw new Error("No random world was returned.");
+    restore("Found");
+    await openWorldDetail(world);
+    setTimeout(() => { if (button.isConnected) button.textContent = "Random"; }, 900);
+  } catch (error) {
+    button.title = error.message;
+    restore("Random");
+  }
 }
 
 function chip(value, extra = "") {
@@ -239,26 +791,28 @@ function imageHtml(item, label) {
 
 function avatarRow(avatar, index) {
   const title = avatar.name || avatar.id || "Unknown avatar";
-  const selected = state.selectedAvatarId ? avatar.id === state.selectedAvatarId : index === 0;
+  const selected = detailPanelMatches("avatar", avatar.id);
   const status = avatar.releaseStatus || "Public";
-  const detail = selected ? rowDetail(
-    `${detailRow("Avatar ID", avatar.id)}${detailRow("Author", avatar.authorName)}${detailRow("Status", status)}${detailRow("Platforms", avatar.platforms)}`,
-    `<button type="button" data-copy-text="${escapeHtml(avatar.id || "")}">Copy ID</button>
-     <button type="button" data-equip-avatar="${escapeHtml(avatar.id || "")}">Equip</button>
-     <button class="danger" type="button" data-unfavorite-avatar="${escapeHtml(avatar.id || "")}" data-local-avatar="${escapeHtml(avatar.localId || "")}">Unfavorite</button>`
-  ) : "";
-  return `<article class="overlay-row ${selected ? "selected expanded" : ""}" data-avatar-id="${escapeHtml(avatar.id || "")}" data-avatar-local-id="${escapeHtml(avatar.localId || "")}">
+  const ownGroupId = avatar.groupId || (state.panel === "avatars" ? activeGroup("avatars")?.id : "") || "";
+  const favoriteEntry = ownGroupId && !isManagedAvatarGroup(ownGroupId)
+    ? { group: (state.data.avatarGroups || []).find((group) => group.id === ownGroupId) || { id: ownGroupId }, avatar }
+    : favoriteAvatarEntry(avatar.id);
+  const favoriteLocalId = favoriteEntry?.avatar?.localId || favoriteEntry?.avatar?.id || "";
+  const favoriteGroupId = favoriteEntry?.group?.id || "";
+  const favoriteAction = favoriteEntry
+    ? `<button class="row-action danger" type="button" data-unfavorite-avatar="${escapeHtml(avatar.id || "")}" data-local-avatar="${escapeHtml(favoriteLocalId)}" data-avatar-group="${escapeHtml(favoriteGroupId)}">Unfav</button>`
+    : `<button class="row-action" type="button" data-save-avatar="${escapeHtml(avatar.id || "")}">Fav</button>`;
+  return `<article class="overlay-row ${selected ? "selected" : ""}" data-avatar-id="${escapeHtml(avatar.id || "")}" data-avatar-local-id="${escapeHtml(avatar.localId || "")}">
     ${imageHtml(avatar, title)}
     <div class="row-main">
       <div class="row-title">${escapeHtml(title)}</div>
       <div class="row-subtitle">${escapeHtml(avatar.authorName || "Unknown author")}</div>
-      <div class="chips">${platformChips(avatar.platforms)}${chip(status, status)}${chip("Ready", "ready")}</div>
+      <div class="chips">${platformChips(avatar.platforms)}${chip(status, status)}</div>
     </div>
     <div class="row-actions">
       <button class="row-action" type="button" data-equip-avatar="${escapeHtml(avatar.id || "")}">Equip</button>
-      <button class="row-action danger" type="button" data-unfavorite-avatar="${escapeHtml(avatar.id || "")}" data-local-avatar="${escapeHtml(avatar.localId || "")}">Unfav</button>
+      ${favoriteAction}
     </div>
-    ${detail}
   </article>`;
 }
 
@@ -266,22 +820,36 @@ function worldRow(world) {
   const title = world.name || world.id || "Unknown world";
   const occupancy = Number(world.capacity) > 0 ? `${Number(world.occupants) || 0}/${Number(world.capacity)}` : `${Number(world.occupants) || 0} online`;
   const tags = String(world.favoriteTags || "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, 1);
-  const selected = state.selectedWorldId === world.id;
-  const detail = selected ? rowDetail(
-    `${detailRow("World ID", world.id)}${detailRow("Author", world.authorName)}${detailRow("Description", world.description)}${detailRow("Visits", world.visits)}${detailRow("Favorites", world.favorites)}`,
-    `<button type="button" data-open-world="${escapeHtml(world.id || "")}">Open</button>
-     <button type="button" data-save-world="${escapeHtml(world.id || "")}">Save</button>
-     <button type="button" data-copy-text="${escapeHtml(world.id || "")}">Copy ID</button>`
-  ) : "";
-  return `<article class="overlay-row ${selected ? "selected expanded" : ""}" data-world-id="${escapeHtml(world.id || "")}">
+  const selected = detailPanelMatches("world", world.id);
+  return `<article class="overlay-row ${selected ? "selected" : ""}" data-world-id="${escapeHtml(world.id || "")}">
     ${imageHtml(world, title)}
     <div class="row-main">
       <div class="row-title">${escapeHtml(title)}</div>
       <div class="row-subtitle">${escapeHtml(world.authorName ? `by ${world.authorName}` : "Favorite world")}</div>
       <div class="chips">${chip(occupancy, "location")}${chip(world.releaseStatus || "public", world.releaseStatus || "public")}${tags.map((tag) => chip(tag.replace(/^worlds/i, ""), "ready")).join("")}</div>
     </div>
-    <button class="row-action" type="button" data-open-world="${escapeHtml(world.id || "")}">Open</button>
-    ${detail}
+    <div class="row-actions">
+      <button class="row-action" type="button" data-open-world="${escapeHtml(world.id || "")}">Join</button>
+      <button class="row-action" type="button" data-save-world="${escapeHtml(world.id || "")}">Save</button>
+    </div>
+  </article>`;
+}
+
+function recentWorldRow(world) {
+  const title = world.name || world.room || world.id || "Recent world";
+  const location = world.location || world.instanceId || "";
+  const selected = detailPanelMatches("world", world.id);
+  return `<article class="overlay-row ${selected ? "selected" : ""}" data-world-id="${escapeHtml(world.id || "")}">
+    ${imageHtml(world, title)}
+    <div class="row-main">
+      <div class="row-title">${escapeHtml(title)}</div>
+      <div class="row-subtitle">${escapeHtml(location || "Recent world")}</div>
+      <div class="chips">${chip("Recent", "ready")}${world.timestamp ? chip(world.timestamp, "location") : ""}</div>
+    </div>
+    <div class="row-actions">
+      <button class="row-action" type="button" data-open-world="${escapeHtml(world.id || "")}">Join</button>
+      <button class="row-action" type="button" data-save-world="${escapeHtml(world.id || "")}">Save</button>
+    </div>
   </article>`;
 }
 
@@ -291,7 +859,7 @@ function currentCard(kind, item, fallbackTitle, fallbackSubtitle, chipsHtml = ""
   const id = item?.id || "";
   const actions = kind === "avatar"
     ? `<div class="detail-actions"><button type="button" data-save-current-avatar>Save</button>${id ? `<button type="button" data-equip-avatar="${escapeHtml(id)}">Equip</button><button type="button" data-copy-text="${escapeHtml(id)}">Copy ID</button>` : ""}</div>`
-    : `<div class="detail-actions"><button type="button" data-save-current-world>Save</button>${id ? `<button type="button" data-open-world="${escapeHtml(id)}">Open</button><button type="button" data-copy-text="${escapeHtml(id)}">Copy ID</button>` : ""}</div>`;
+    : `<div class="detail-actions"><button type="button" data-save-current-world>Save</button>${id ? `<button type="button" data-copy-text="${escapeHtml(id)}">Copy ID</button>` : ""}</div>`;
   return `<article class="current-card ${escapeHtml(kind)}">
     ${imageHtml(item || {}, title)}
     <div class="current-card-body">
@@ -433,22 +1001,18 @@ function friendRow(friend) {
   const platform = friend.lastPlatform || "";
   const statusClass = userStatusClass(friend.status, presence);
   const statusLabel = userStatusLabel(friend.status, presence);
-  const selected = state.selectedFriendId === friend.id;
-  const detail = selected ? rowDetail(
-    `${detailRow("Status", [friend.status, friend.statusDescription].filter(Boolean).join(" - "))}${detailRow("Location", friendLocation(friend))}${detailRow("World ID", friend.worldId)}${detailRow("Current Avatar", friend.currentAvatarName)}${detailRow("User ID", friend.id)}`,
-    `<button type="button" data-friend-action="invite" data-friend-id="${escapeHtml(friend.id || "")}">Invite</button>
-     <button type="button" data-friend-action="request" data-friend-id="${escapeHtml(friend.id || "")}">Request</button>
-     <button type="button" data-friend-action="message" data-friend-id="${escapeHtml(friend.id || "")}">Message</button>
-     <button type="button" data-copy-text="${escapeHtml(friend.id || "")}">Copy ID</button>`
-  ) : "";
-  return `<article class="overlay-row friend-row ${selected ? "selected expanded" : ""}" data-friend-id="${escapeHtml(friend.id || "")}">
+  const selected = detailPanelMatches("user", friend.id);
+  return `<article class="overlay-row friend-row ${selected ? "selected" : ""}" data-friend-id="${escapeHtml(friend.id || "")}">
     ${friendImage(friend)}
     <div class="row-main">
       <div class="row-title friend-name-rank ${escapeHtml(trustRankClass(friend))}">${escapeHtml(title)}</div>
       <div class="row-subtitle">${escapeHtml(friend.statusDescription || friendLocation(friend))}</div>
       <div class="chips">${chip(statusLabel, statusClass)}${platform ? chip(platform, platform) : ""}${friend.location && friend.location.startsWith("wrld_") ? chip("Joinable", "joinable") : ""}</div>
     </div>
-    ${detail}
+    <div class="row-actions friend-actions">
+      <button class="row-action" type="button" data-friend-action="invite" data-friend-id="${escapeHtml(friend.id || "")}">Invite</button>
+      <button class="row-action" type="button" data-friend-action="request" data-friend-id="${escapeHtml(friend.id || "")}">Request</button>
+    </div>
   </article>`;
 }
 
@@ -466,6 +1030,35 @@ function placeholderRow(title, subtitle, chipsHtml, initial = "") {
 
 function renderGroupDropdown() {
   const dropdown = $("groupDropdown");
+  dropdown.classList.toggle("tall", state.panel === "avatars" || state.panel === "worlds");
+  if (state.panel === "database") {
+    dropdown.hidden = !state.groupDropdownOpen;
+    if (dropdown.hidden) {
+      dropdown.innerHTML = "";
+      return;
+    }
+    dropdown.innerHTML = DATABASE_PROVIDERS.map((provider) => `<button class="${provider.value === (state.database.provider || "all") ? "active" : ""}" type="button" data-database-provider="${escapeHtml(provider.value)}">
+      <strong>${escapeHtml(provider.label)}</strong>
+      <span>${escapeHtml(provider.value === "all" ? "Search every source" : provider.value === "avtrzip" ? "Avatar ZIP database" : provider.value === "pas" ? "Prismic PAS cache" : "VRCX database")}</span>
+    </button>`).join("");
+    return;
+  }
+  if (state.panel === "recent") {
+    dropdown.hidden = !state.groupDropdownOpen;
+    if (dropdown.hidden) {
+      dropdown.innerHTML = "";
+      return;
+    }
+    const options = [
+      { value: "avatars", label: "Recent Avatars", count: `${(state.data.recent || []).length} avatars` },
+      { value: "worlds", label: "Recent Worlds", count: `${(state.data.recentWorlds || []).length} worlds` }
+    ];
+    dropdown.innerHTML = options.map((option) => `<button class="${option.value === state.recentMode ? "active" : ""}" type="button" data-recent-mode="${escapeHtml(option.value)}">
+      <strong>${escapeHtml(option.label)}</strong>
+      <span>${escapeHtml(option.count)}</span>
+    </button>`).join("");
+    return;
+  }
   const groups = activeGroups();
   const itemKey = panelItemKey();
   dropdown.hidden = !["avatars", "worlds", "friends"].includes(state.panel) || !state.groupDropdownOpen || groups.length <= 1;
@@ -475,8 +1068,128 @@ function renderGroupDropdown() {
   }
   dropdown.innerHTML = groups.map((group, index) => `<button class="${index === (state.groupIndex[state.panel] || 0) ? "active" : ""}" type="button" data-group-index="${index}">
     <strong>${escapeHtml(group.name || "Unnamed group")}</strong>
-    <span>${Number(group.count ?? (group[itemKey] || []).length)} ${itemKey}</span>
+    <span>${escapeHtml(groupCountLabel(group, Number(group.count ?? (group[itemKey] || []).length), itemKey))}</span>
   </button>`).join("");
+}
+
+function withPanel(panel, callback) {
+  const previous = state.panel;
+  state.panel = panel;
+  try { return callback(); } finally { state.panel = previous; }
+}
+
+function panelView(panel, { detached = false } = {}) {
+  if (panel === "avatars") {
+    const group = activeGroup("avatars");
+    if (!group) return {
+      title: "Avatars",
+      count: "No groups",
+      hasGroups: false,
+      content: emptyHtml("No avatar groups", "Sync or create avatar groups in VRCNeph, then refresh this overlay.")
+    };
+    const avatars = group.avatars || [];
+    const visibleAvatars = sortedPanelItems("avatars", avatars.filter((avatar) => itemMatchesFilter(avatar, ["name", "authorName", "id"], "avatars")));
+    return {
+      title: group.name || "Avatars",
+      count: groupCountLabel(group, visibleAvatars.length, "avatars"),
+      hasGroups: true,
+      canPrev: (state.data.avatarGroups || []).length > 1,
+      canNext: (state.data.avatarGroups || []).length > 1,
+      tools: panelControlsHtml("avatars", detached),
+      content: visibleAvatars.length ? withPanel("avatars", () => visibleAvatars.map(avatarRow).join("")) : emptyHtml("No avatars in this group", "Pick another group or add avatars in the main app.")
+    };
+  }
+  if (panel === "worlds") {
+    const group = activeGroup("worlds");
+    const worlds = group?.worlds || [];
+    const visibleWorlds = sortedPanelItems("worlds", worlds.filter((world) => itemMatchesFilter(world, ["name", "authorName", "description", "id"], "worlds")));
+    return {
+      title: group?.name || "Favorite Worlds",
+      count: groupCountLabel(group, visibleWorlds.length, "worlds"),
+      hasGroups: true,
+      canPrev: (state.data.worldGroups || []).length > 1,
+      canNext: (state.data.worldGroups || []).length > 1,
+      tools: panelControlsHtml("worlds", detached),
+      content: visibleWorlds.length ? withPanel("worlds", () => visibleWorlds.map(worldRow).join("")) : emptyHtml("No favorite worlds loaded", "Refresh the overlay after logging in, or favorite worlds in VRChat first.")
+    };
+  }
+  if (panel === "friends") {
+    const group = activeGroup("friends");
+    const friends = sortedPanelItems("friends", (group?.friends || []).filter((friend) => itemMatchesFilter(friend, ["displayName", "statusDescription", "status", "location", "currentAvatarName", "id"], "friends")));
+    return {
+      title: group?.name || "Friends",
+      count: groupCountLabel(group, friends.length, "friends"),
+      hasGroups: true,
+      canPrev: (state.data.friendGroups || []).length > 1,
+      canNext: (state.data.friendGroups || []).length > 1,
+      tools: panelControlsHtml("friends", detached),
+      content: friends.length ? friendsGroupedHtml(friends) : emptyHtml("No friends loaded", "Refresh the overlay after logging in, or check the main app connection.")
+    };
+  }
+  if (panel === "database") {
+    const query = String(state.filters.database || "").trim();
+    const key = databaseSearchKey(query);
+    const randomPageReady = String(state.database.key || "").startsWith("random\n") && (state.database.results || []).length;
+    let content = "";
+    if (randomPageReady) {
+      const results = sortedDatabaseResults();
+      content = withPanel("database", () => results.map((item, index) => avatarRow({
+        id: item.avatarId || item.id || "",
+        name: item.name || item.avatarId || item.id || "Database avatar",
+        authorName: item.authorName || "Unknown author",
+        imageUrl: item.thumbnailImageUrl || item.imageUrl || "",
+        fullImageUrl: item.imageUrl || "",
+        releaseStatus: item.releaseStatus || "public",
+        platforms: item.platforms || "",
+        source: item.source || "avatar-database"
+      }, index)).join(""));
+    } else if (!query) content = emptyHtml("Search avatar database", "Choose a database source and type at least 3 characters.");
+    else if (query.length < 3) content = emptyHtml("Keep typing", "Database search starts at 3 characters.");
+    else if (state.database.loading && state.database.key === key) content = emptyHtml("Searching", `Looking through ${databaseProviderLabel().toLowerCase()}...`);
+    else if (state.database.error && state.database.key === key) content = emptyHtml("Search failed", state.database.error);
+    else if (state.database.key !== key) {
+      scheduleDatabaseSearch(query);
+      content = emptyHtml("Searching", `Looking through ${databaseProviderLabel().toLowerCase()}...`);
+    } else {
+      const results = sortedDatabaseResults();
+      content = results.length
+        ? withPanel("database", () => results.map((item, index) => avatarRow({
+          id: item.avatarId || item.id || "",
+          name: item.name || item.avatarId || item.id || "Database avatar",
+          authorName: item.authorName || "Unknown author",
+          imageUrl: item.thumbnailImageUrl || item.imageUrl || "",
+          fullImageUrl: item.imageUrl || "",
+          releaseStatus: item.releaseStatus || "public",
+          platforms: item.platforms || "",
+          source: item.source || "avatar-database"
+        }, index)).join(""))
+        : emptyHtml("No database results", "Try a different avatar name, author, or id.");
+    }
+    return {
+      title: "Database Search",
+      count: databaseProviderLabel(),
+      full: true,
+      tools: databaseControlsHtml(detached),
+      content
+    };
+  }
+  const showingWorlds = state.recentMode === "worlds";
+  const items = showingWorlds ? (state.data.recentWorlds || []) : (state.data.recent || []);
+  const visibleItems = items.filter((item) => itemMatchesFilter(item, showingWorlds ? ["name", "room", "location", "id"] : ["title", "subtitle", "id"], "recent"));
+  return {
+    title: showingWorlds ? "Recent Worlds" : "Recent Avatars",
+    count: `${visibleItems.length} ${showingWorlds ? "worlds" : "avatars"}`,
+    content: visibleItems.length
+      ? withPanel("recent", () => showingWorlds ? visibleItems.map(recentWorldRow).join("") : visibleItems.map((item, index) => avatarRow({
+        ...item,
+        id: item.id || item.avatarId || "",
+        name: item.name || item.title || item.id || "Recent avatar",
+        authorName: item.authorName || item.subtitle || "Recent avatar",
+        releaseStatus: item.releaseStatus || "public",
+        platforms: item.platforms || "standalonewindows"
+      }, index)).join(""))
+      : emptyHtml(showingWorlds ? "No recent worlds yet" : "No recent avatars yet", showingWorlds ? "Join worlds in VRChat and they will appear here from your recent logs." : "Equip avatars and they will appear here.")
+  };
 }
 
 function renderAvatars() {
@@ -493,11 +1206,11 @@ function renderAvatars() {
     return;
   }
   const avatars = group.avatars || [];
-  const visibleAvatars = avatars.filter((avatar) => itemMatchesFilter(avatar, ["name", "authorName", "id"], "avatars"));
+  const visibleAvatars = sortedPanelItems("avatars", avatars.filter((avatar) => itemMatchesFilter(avatar, ["name", "authorName", "id"], "avatars")));
   $("panelTitle").textContent = group.name || "Avatars";
-  $("panelCount").textContent = `${visibleAvatars.length}/${Number(group.count ?? avatars.length)} avatars`;
-  $("prevGroupBtn").disabled = (state.groupIndex.avatars || 0) <= 0;
-  $("nextGroupBtn").disabled = (state.groupIndex.avatars || 0) >= (state.data.avatarGroups || []).length - 1;
+  $("panelCount").textContent = groupCountLabel(group, visibleAvatars.length, "avatars");
+  $("prevGroupBtn").disabled = (state.data.avatarGroups || []).length <= 1;
+  $("nextGroupBtn").disabled = (state.data.avatarGroups || []).length <= 1;
   renderGroupDropdown();
   $("content").innerHTML = visibleAvatars.length
     ? visibleAvatars.map(avatarRow).join("")
@@ -511,11 +1224,11 @@ function renderWorlds() {
   $("nextGroupBtn").hidden = false;
   $("groupSelectBtn").disabled = false;
   const worlds = group?.worlds || [];
-  const visibleWorlds = worlds.filter((world) => itemMatchesFilter(world, ["name", "authorName", "description", "id"], "worlds"));
+  const visibleWorlds = sortedPanelItems("worlds", worlds.filter((world) => itemMatchesFilter(world, ["name", "authorName", "description", "id"], "worlds")));
   $("panelTitle").textContent = group?.name || "Favorite Worlds";
-  $("panelCount").textContent = `${visibleWorlds.length}/${Number(group?.count ?? worlds.length)} worlds`;
-  $("prevGroupBtn").disabled = (state.groupIndex.worlds || 0) <= 0;
-  $("nextGroupBtn").disabled = (state.groupIndex.worlds || 0) >= (state.data.worldGroups || []).length - 1;
+  $("panelCount").textContent = groupCountLabel(group, visibleWorlds.length, "worlds");
+  $("prevGroupBtn").disabled = (state.data.worldGroups || []).length <= 1;
+  $("nextGroupBtn").disabled = (state.data.worldGroups || []).length <= 1;
   renderGroupDropdown();
   $("content").innerHTML = visibleWorlds.length
     ? visibleWorlds.map(worldRow).join("")
@@ -528,11 +1241,11 @@ function renderFriends() {
   $("prevGroupBtn").hidden = false;
   $("nextGroupBtn").hidden = false;
   $("groupSelectBtn").disabled = false;
-  const friends = sortFriends((group?.friends || []).filter((friend) => itemMatchesFilter(friend, ["displayName", "statusDescription", "status", "location", "currentAvatarName", "id"], "friends")));
+  const friends = sortedPanelItems("friends", (group?.friends || []).filter((friend) => itemMatchesFilter(friend, ["displayName", "statusDescription", "status", "location", "currentAvatarName", "id"], "friends")));
   $("panelTitle").textContent = group?.name || "Friends";
-  $("panelCount").textContent = `${friends.length}/${Number(group?.count ?? group?.friends?.length ?? friends.length)} friends`;
-  $("prevGroupBtn").disabled = (state.groupIndex.friends || 0) <= 0;
-  $("nextGroupBtn").disabled = (state.groupIndex.friends || 0) >= (state.data.friendGroups || []).length - 1;
+  $("panelCount").textContent = groupCountLabel(group, friends.length, "friends");
+  $("prevGroupBtn").disabled = (state.data.friendGroups || []).length <= 1;
+  $("nextGroupBtn").disabled = (state.data.friendGroups || []).length <= 1;
   renderGroupDropdown();
   $("content").innerHTML = friends.length
     ? friendsGroupedHtml(friends)
@@ -567,6 +1280,52 @@ function renderCurrent() {
   $("content").innerHTML = `${avatarCard}${worldCard}`;
 }
 
+function renderDatabase() {
+  state.groupDropdownOpen = false;
+  $("panelHead").classList.add("full");
+  $("prevGroupBtn").hidden = true;
+  $("nextGroupBtn").hidden = true;
+  $("groupSelectBtn").disabled = true;
+  $("panelTitle").textContent = "Database Search";
+  $("panelCount").textContent = "Avatars";
+  renderGroupDropdown();
+  const query = String(state.filters.database || "").trim();
+  if (!query) {
+    $("content").innerHTML = emptyHtml("Search avatar database", "Type at least 3 characters to search.");
+    return;
+  }
+  if (query.length < 3) {
+    $("content").innerHTML = emptyHtml("Keep typing", "Database search starts at 3 characters.");
+    return;
+  }
+  if (state.database.loading && state.database.query === query) {
+    $("content").innerHTML = emptyHtml("Searching", "Looking through the avatar database...");
+    return;
+  }
+  if (state.database.error && state.database.query === query) {
+    $("content").innerHTML = emptyHtml("Search failed", state.database.error);
+    return;
+  }
+  if (state.database.query !== query) {
+    scheduleDatabaseSearch(query);
+    $("content").innerHTML = emptyHtml("Searching", "Looking through the avatar database...");
+    return;
+  }
+  const results = sortedDatabaseResults();
+  $("content").innerHTML = results.length
+    ? results.map((item, index) => avatarRow({
+      id: item.avatarId || item.id || "",
+      name: item.name || item.avatarId || item.id || "Database avatar",
+      authorName: item.authorName || "Unknown author",
+      imageUrl: item.thumbnailImageUrl || item.imageUrl || "",
+      fullImageUrl: item.imageUrl || "",
+      releaseStatus: item.releaseStatus || "public",
+      platforms: item.platforms || "",
+      source: item.source || "avatar-database"
+    }, index)).join("")
+    : emptyHtml("No database results", "Try a different avatar name, author, or id.");
+}
+
 function renderRecent() {
   state.groupDropdownOpen = false;
   $("panelHead").classList.add("full");
@@ -579,7 +1338,14 @@ function renderRecent() {
   const items = state.data.recent || [];
   const visibleItems = items.filter((item) => itemMatchesFilter(item, ["title", "subtitle", "id"], "recent"));
   $("content").innerHTML = visibleItems.length
-    ? visibleItems.map((item) => `<article class="overlay-row">${imageHtml(item, item.title)}<div class="row-main"><div class="row-title">${escapeHtml(item.title)}</div><div class="row-subtitle">${escapeHtml(item.subtitle)}</div><div class="chips">${chip("Avatar", "pc")}${chip("Recent", "ready")}</div></div><button class="row-action" type="button" disabled>Open</button></article>`).join("")
+    ? visibleItems.map((item, index) => avatarRow({
+      ...item,
+      id: item.id || item.avatarId || "",
+      name: item.name || item.title || item.id || "Recent avatar",
+      authorName: item.authorName || item.subtitle || "Recent avatar",
+      releaseStatus: item.releaseStatus || "public",
+      platforms: item.platforms || "standalonewindows"
+    }, index)).join("")
     : emptyHtml("No recent items yet", "Recent avatars, worlds, and players will appear here as the overlay integration grows.");
 }
 
@@ -587,28 +1353,376 @@ function emptyHtml(title, message) {
   return `<section class="empty-panel"><h2>${escapeHtml(title)}</h2><p>${escapeHtml(message)}</p></section>`;
 }
 
+function applyMainPanelView() {
+  const split = isDetached(state.panel);
+  const hasGroupHeader = ["avatars", "worlds", "friends"].includes(state.panel);
+  const hasDatabaseHeader = state.panel === "database";
+  $("panelHead").classList.toggle("full", split || !hasGroupHeader);
+  $("prevGroupBtn").hidden = split || !["avatars", "worlds", "friends"].includes(state.panel);
+  $("nextGroupBtn").hidden = split || !["avatars", "worlds", "friends"].includes(state.panel);
+  $("groupSelectBtn").disabled = split || (!hasGroupHeader && !hasDatabaseHeader);
+  $("splitPanelBtn").textContent = split ? "Dock" : "Split";
+  $("splitPanelBtn").title = split ? "Dock this panel back into the main overlay" : "Split this tab into its own overlay panel";
+
+  if (split) {
+    $("panelTitle").textContent = PANEL_LABELS[state.panel] || "Panel";
+    $("panelCount").textContent = "Split panel";
+    $("content").innerHTML = emptyHtml("Panel is split out", "Use the detached panel, or dock it back here.");
+    $("groupDropdown").hidden = true;
+    $("groupDropdown").innerHTML = "";
+    return;
+  }
+
+  const view = panelView(state.panel);
+  $("panelHead").classList.toggle("full", Boolean(view.full) || !view.hasGroups);
+  $("prevGroupBtn").hidden = !view.hasGroups;
+  $("nextGroupBtn").hidden = !view.hasGroups;
+  $("prevGroupBtn").disabled = !view.canPrev;
+  $("nextGroupBtn").disabled = !view.canNext;
+  $("groupSelectBtn").disabled = !view.hasGroups && !["database", "recent"].includes(state.panel);
+  $("panelTitle").textContent = state.panel === "database" ? databaseProviderLabel() : view.title;
+  $("panelCount").textContent = state.panel === "database" ? "Database Search" : view.count;
+  if (view.hasGroups || ["database", "recent"].includes(state.panel)) renderGroupDropdown();
+  else {
+    $("groupDropdown").hidden = true;
+    $("groupDropdown").innerHTML = "";
+  }
+  $("content").innerHTML = view.content;
+}
+
+function detachedPanelHtml(panel, bounds) {
+  const view = panelView(panel, { detached: true });
+  const group = view.hasGroups ? activeGroup(panel) : null;
+  const groupTools = view.hasGroups ? `<button class="nav-button" type="button" data-detached-group-step="-1" ${view.canPrev ? "" : "disabled"}>&lt;</button>
+    <button class="group-button" type="button" disabled><span>${escapeHtml(group?.name || view.title)}</span><small>${escapeHtml(view.count)}</small></button>
+    <button class="nav-button" type="button" data-detached-group-step="1" ${view.canNext ? "" : "disabled"}>&gt;</button>` : "";
+  const searchable = ["avatars", "worlds", "friends", "database", "recent"].includes(panel);
+  const placeholder = panel === "friends" ? "Search friends" : panel === "worlds" ? "Search worlds" : panel === "database" ? `Search ${databaseProviderLabel().toLowerCase()}` : panel === "recent" ? "Search recent" : "Search avatars";
+  const search = searchable ? `<input class="detached-search" data-detached-search="${escapeHtml(panel)}" type="search" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(state.filters[panel] || "")}">` : "";
+  return `<article class="detached-panel ${escapeHtml(panel)}" data-detached-panel="${escapeHtml(panel)}" style="left:${Number(bounds.x) || 20}px;top:${Number(bounds.y) || 70}px;width:${Number(bounds.width) || 340}px;height:${Number(bounds.height) || 460}px">
+    <header class="detached-panel-titlebar" data-detached-drag="${escapeHtml(panel)}">
+      <div class="detached-panel-title"><strong>${escapeHtml(view.title)}</strong><span>${escapeHtml(view.count)}</span></div>
+      <button type="button" data-focus-panel="${escapeHtml(panel)}">Focus</button>
+      <button type="button" data-dock-panel="${escapeHtml(panel)}">Dock</button>
+    </header>
+    <section class="detached-panel-tools">
+      ${groupTools}
+      ${view.tools || ""}
+      ${search}
+    </section>
+    <section class="overlay-list" aria-live="polite">${view.content}</section>
+    <span class="detached-resize-handle" data-detached-resize="${escapeHtml(panel)}"></span>
+  </article>`;
+}
+
+function renderDetachedPanels() {
+  const panels = Object.entries(state.detachedPanels || {}).filter(([panel]) => PANEL_LABELS[panel]);
+  $("detachedPanels").innerHTML = panels.map(([panel, bounds]) => {
+    if (!bounds || typeof bounds !== "object") state.detachedPanels[panel] = defaultDetachedPanel(panel);
+    return detachedPanelHtml(panel, state.detachedPanels[panel]);
+  }).join("");
+}
+
+function detailImageHtml(item, label) {
+  const url = item?.thumbnailImageUrl || item?.imageUrl || item?.fullImageUrl || item?.profilePicOverrideThumbnail || item?.profilePicOverride || item?.profileImageUrl || item?.currentAvatarThumbnailImageUrl || "";
+  if (!url) return `<div class="detail-hero-image placeholder">${escapeHtml((label || "?").slice(0, 1).toUpperCase())}</div>`;
+  return `<div class="detail-hero-image"><img src="${escapeHtml(url)}" alt="" onerror="this.parentElement.className='detail-hero-image placeholder';this.parentElement.textContent='${escapeHtml((label || "?").slice(0, 1).toUpperCase())}'"></div>`;
+}
+
+function detailActionsHtml(actions) {
+  return `<div class="detail-popup-actions">${actions.filter(Boolean).join("")}</div>`;
+}
+
+function detailSectionHtml(title, body) {
+  if (!body) return "";
+  return `<section class="detail-section"><h3>${escapeHtml(title)}</h3>${body}</section>`;
+}
+
+function detailDescriptionHtml(text, fallback = "No description available.") {
+  const value = String(text || "").trim();
+  return `<p>${escapeHtml(value || fallback)}</p>`;
+}
+
+function normalizeAvatarDetail(item = {}) {
+  return {
+    ...item,
+    id: item.avatarId || item.id || "",
+    imageUrl: item.thumbnailImageUrl || item.imageUrl || item.fullImageUrl || "",
+    fullImageUrl: item.imageUrl || item.fullImageUrl || item.thumbnailImageUrl || ""
+  };
+}
+
+function normalizeWorldDetail(item = {}) {
+  return { ...item, id: item.id || item.worldId || "" };
+}
+
+function normalizeUserDetail(item = {}) {
+  return { ...item, id: item.id || item.userId || "" };
+}
+
+function findOverlayWorld(worldId = "") {
+  const id = String(worldId || "").toLowerCase();
+  if (!id) return null;
+  const sources = [
+    ...((state.data.worldGroups || []).flatMap((group) => group.worlds || [])),
+    ...(state.data.worlds || []),
+    state.data.current?.world || null
+  ].filter(Boolean);
+  return sources.find((world) => String(world.id || world.worldId || "").toLowerCase() === id) || null;
+}
+
+function findOverlayFriend(userId = "") {
+  const id = String(userId || "").toLowerCase();
+  if (!id) return null;
+  const sources = [
+    ...((state.data.friendGroups || []).flatMap((group) => group.friends || [])),
+    ...(state.data.friends || [])
+  ].filter(Boolean);
+  return sources.find((friend) => String(friend.id || friend.userId || "").toLowerCase() === id) || null;
+}
+
+async function openAvatarDetail(avatar) {
+  const id = avatar?.id || avatar?.avatarId || "";
+  if (!id) return;
+  const panel = state.detailPanels.avatar;
+  panel.open = true;
+  panel.item = normalizeAvatarDetail({ ...(findOverlayAvatar(id) || {}), ...avatar, id });
+  panel.loading = true;
+  panel.error = "";
+  panel.token++;
+  const token = panel.token;
+  state.selectedAvatarId = id;
+  render();
+  try {
+    const detail = await api("vrchatAvatarDetail", { id }, 45000);
+    if (token !== panel.token) return;
+    panel.item = normalizeAvatarDetail({ ...panel.item, ...detail });
+    panel.error = "";
+  } catch (error) {
+    if (token !== panel.token) return;
+    panel.error = error.message || "Avatar detail failed.";
+  } finally {
+    if (token === panel.token) {
+      panel.loading = false;
+      render();
+    }
+  }
+}
+
+async function openWorldDetail(world) {
+  const id = world?.id || world?.worldId || "";
+  if (!id) return;
+  const panel = state.detailPanels.world;
+  panel.open = true;
+  panel.item = normalizeWorldDetail({ ...(findOverlayWorld(id) || {}), ...world, id });
+  panel.loading = true;
+  panel.error = "";
+  panel.token++;
+  const token = panel.token;
+  state.selectedWorldId = id;
+  render();
+  try {
+    const detail = await api("vrchatWorldDetail", { id }, 45000);
+    if (token !== panel.token) return;
+    panel.item = normalizeWorldDetail({ ...panel.item, ...detail });
+    panel.error = "";
+  } catch (error) {
+    if (token !== panel.token) return;
+    panel.error = error.message || "World detail failed.";
+  } finally {
+    if (token === panel.token) {
+      panel.loading = false;
+      render();
+    }
+  }
+}
+
+async function openUserDetail(friend) {
+  const id = friend?.id || friend?.userId || "";
+  if (!id) return;
+  const panel = state.detailPanels.user;
+  panel.open = true;
+  panel.item = normalizeUserDetail({ ...(findOverlayFriend(id) || {}), ...friend, id });
+  panel.loading = true;
+  panel.error = "";
+  panel.token++;
+  const token = panel.token;
+  state.selectedFriendId = id;
+  render();
+  try {
+    const detail = await api("vrchatFriendDetail", { id }, 45000);
+    if (token !== panel.token) return;
+    panel.item = normalizeUserDetail({ ...panel.item, ...detail });
+    panel.error = "";
+  } catch (error) {
+    if (token !== panel.token) return;
+    panel.error = error.message || "User detail failed.";
+  } finally {
+    if (token === panel.token) {
+      panel.loading = false;
+      render();
+    }
+  }
+}
+
+function avatarDetailBody(panel) {
+  const avatar = normalizeAvatarDetail(panel.item || {});
+  const title = avatar.name || avatar.id || "Avatar";
+  return `<div class="detail-hero">
+    ${detailImageHtml(avatar, title)}
+    <div class="detail-hero-main">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(avatar.authorName || "Unknown author")}</span>
+      <div class="chips">${platformChips(avatar.platforms)}${chip(avatar.releaseStatus || "public", avatar.releaseStatus || "public")}</div>
+    </div>
+  </div>
+  ${detailActionsHtml([
+    avatar.id ? `<button type="button" data-equip-avatar="${escapeHtml(avatar.id)}">Equip</button>` : "",
+    avatar.id ? `<button type="button" data-save-avatar="${escapeHtml(avatar.id)}">Favorite</button>` : "",
+    avatar.id ? `<button type="button" data-copy-text="${escapeHtml(avatar.id)}">Copy ID</button>` : ""
+  ])}
+  ${panel.loading ? `<div class="detail-status">Loading avatar details...</div>` : ""}
+  ${panel.error ? `<div class="detail-status danger">${escapeHtml(panel.error)}</div>` : ""}
+  ${detailSectionHtml("Details", `<dl>${detailRow("Avatar ID", avatar.id)}${detailRow("Author ID", avatar.authorId)}${detailRow("Version", avatar.version)}${detailRow("Source", avatar.source)}${detailRow("Updated", avatar.remoteUpdatedAt)}${detailRow("Created", avatar.remoteCreatedAt)}</dl>`)}
+  ${detailSectionHtml("Description", detailDescriptionHtml(avatar.description))}
+  ${avatar.tags ? detailSectionHtml("Tags", `<p>${escapeHtml(avatar.tags)}</p>`) : ""}`;
+}
+
+function worldDetailBody(panel) {
+  const world = normalizeWorldDetail(panel.item || {});
+  const title = world.name || world.id || "World";
+  const occupancy = Number(world.capacity) > 0 ? `${Number(world.occupants) || 0}/${Number(world.capacity)}` : `${Number(world.occupants) || 0} online`;
+  return `<div class="detail-hero">
+    ${detailImageHtml(world, title)}
+    <div class="detail-hero-main">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(world.authorName ? `by ${world.authorName}` : "VRChat world")}</span>
+      <div class="chips">${chip(occupancy, "location")}${chip(world.releaseStatus || "public", world.releaseStatus || "public")}</div>
+    </div>
+  </div>
+  ${detailActionsHtml([
+    world.id ? `<button type="button" data-open-world="${escapeHtml(world.id)}">Join</button>` : "",
+    world.id ? `<button type="button" data-save-world="${escapeHtml(world.id)}">Save</button>` : "",
+    world.id ? `<button type="button" data-copy-text="${escapeHtml(world.id)}">Copy ID</button>` : ""
+  ])}
+  ${panel.loading ? `<div class="detail-status">Loading world details...</div>` : ""}
+  ${panel.error ? `<div class="detail-status danger">${escapeHtml(panel.error)}</div>` : ""}
+  ${detailSectionHtml("Details", `<dl>${detailRow("World ID", world.id)}${detailRow("Author", world.authorName || world.authorId)}${detailRow("Visits", world.visits)}${detailRow("Favorites", world.favorites)}${detailRow("Public", world.publicOccupants)}${detailRow("Private", world.privateOccupants)}${detailRow("Updated", world.updatedAt)}${detailRow("Created", world.createdAt)}</dl>`)}
+  ${detailSectionHtml("Description", detailDescriptionHtml(world.description))}
+  ${world.instances?.length ? detailSectionHtml("Instances", `<div class="detail-instance-list">${world.instances.slice(0, 8).map((instance) => `<span><strong>${escapeHtml(instance.region || instance.id || "Instance")}</strong>${escapeHtml([instance.type, instance.occupants ? `${instance.occupants} users` : "", instance.groupName].filter(Boolean).join(" - "))}</span>`).join("")}</div>`) : ""}`;
+}
+
+function userDetailBody(panel) {
+  const user = normalizeUserDetail(panel.item || {});
+  const title = user.displayName || user.id || "User";
+  const presence = friendPresence(user);
+  const statusLabel = userStatusLabel(user.status, presence);
+  const avatarId = user.currentAvatarId || "";
+  return `<div class="detail-hero">
+    ${detailImageHtml(user, title)}
+    <div class="detail-hero-main">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(user.statusDescription || friendLocation(user))}</span>
+      <div class="chips">${chip(statusLabel, userStatusClass(user.status, presence))}${user.lastPlatform ? chip(user.lastPlatform, user.lastPlatform) : ""}</div>
+    </div>
+  </div>
+  ${detailActionsHtml([
+    user.id ? `<button type="button" data-friend-action="invite" data-friend-id="${escapeHtml(user.id)}">Invite</button>` : "",
+    user.id ? `<button type="button" data-friend-action="request" data-friend-id="${escapeHtml(user.id)}">Request</button>` : "",
+    user.id ? `<button type="button" data-friend-action="message" data-friend-id="${escapeHtml(user.id)}">Message</button>` : "",
+    user.id ? `<button type="button" data-copy-text="${escapeHtml(user.id)}">Copy ID</button>` : ""
+  ])}
+  ${panel.loading ? `<div class="detail-status">Loading user details...</div>` : ""}
+  ${panel.error ? `<div class="detail-status danger">${escapeHtml(panel.error)}</div>` : ""}
+  ${detailSectionHtml("Details", `<dl>${detailRow("User ID", user.id)}${detailRow("Status", [user.status, user.statusDescription].filter(Boolean).join(" - "))}${detailRow("Location", friendLocation(user))}${detailRow("World ID", user.worldId)}${detailRow("Last platform", user.lastPlatform)}${detailRow("Joined", user.dateJoined)}${detailRow("Last login", user.lastLogin)}</dl>`)}
+  ${detailSectionHtml("Current Avatar", `<dl>${detailRow("Name", user.currentAvatarName)}${detailRow("Avatar ID", avatarId)}${detailRow("Avatar Cloning", user.allowAvatarCopying)}</dl>${avatarId ? detailActionsHtml([`<button type="button" data-avatar-detail-open="${escapeHtml(avatarId)}" data-avatar-name="${escapeHtml(user.currentAvatarName || avatarId)}">Open Avatar</button>`]) : ""}`)}
+  ${detailSectionHtml("Bio", detailDescriptionHtml(user.bio, "No bio available."))}
+  ${user.representedGroupName || user.representedGroupId ? detailSectionHtml("Represented Group", `<p>${escapeHtml([user.representedGroupName || user.representedGroupId, user.representedGroupShortCode ? `#${user.representedGroupShortCode}` : "", user.representedGroupMemberCount ? `${user.representedGroupMemberCount} members` : ""].filter(Boolean).join(" - "))}</p>`) : ""}`;
+}
+
+function detailPanelHtml(kind, panel) {
+  const position = detailPosition(kind);
+  const titles = { avatar: "Avatar Details", world: "World Details", user: "User Details" };
+  const item = panel.item || {};
+  const subtitle = kind === "user" ? item.displayName || item.id : item.name || item.id || item.avatarId || "";
+  const body = kind === "avatar" ? avatarDetailBody(panel) : kind === "world" ? worldDetailBody(panel) : userDetailBody(panel);
+  return `<article class="detail-popup ${escapeHtml(kind)}" data-detail-panel="${escapeHtml(kind)}" style="left:${Number(position.x) || 20}px;top:${Number(position.y) || 70}px">
+    <header class="detail-popup-titlebar" data-detail-drag="${escapeHtml(kind)}">
+      <div><strong>${escapeHtml(titles[kind] || "Details")}</strong><span>${escapeHtml(subtitle)}</span></div>
+      <button type="button" data-detail-close="${escapeHtml(kind)}" title="Close">x</button>
+    </header>
+    <section class="detail-popup-body">${body}</section>
+  </article>`;
+}
+
+function renderDetailPanels() {
+  $("detailPanels").innerHTML = Object.entries(state.detailPanels)
+    .filter(([, panel]) => panel.open)
+    .map(([kind, panel]) => detailPanelHtml(kind, panel))
+    .join("");
+}
+
 function render() {
   applySnapshotSettings();
-  const searchable = ["avatars", "worlds", "friends", "recent"].includes(state.panel);
+  const searchable = ["avatars", "worlds", "friends", "database", "recent"].includes(state.panel);
+  const panelControls = isDetached(state.panel) ? "" : panelControlsHtml(state.panel, false);
   $("overlayActions").hidden = !searchable && !["avatars", "worlds"].includes(state.panel);
   $("overlaySearchInput").hidden = !searchable;
   $("overlaySearchInput").value = state.filters[state.panel] || "";
-  $("overlaySearchInput").placeholder = state.panel === "friends" ? "Search friends" : state.panel === "worlds" ? "Search worlds" : state.panel === "recent" ? "Search recent" : "Search avatars";
+  $("overlaySearchInput").placeholder = state.panel === "friends" ? "Search friends" : state.panel === "worlds" ? "Search worlds" : state.panel === "database" ? "Search database" : state.panel === "recent" ? "Search recent" : "Search avatars";
+  $("overlayDatabaseControls").hidden = !panelControls;
+  $("overlayDatabaseControls").innerHTML = panelControls;
   $("saveCurrentAvatarOverlayBtn").hidden = state.panel !== "avatars";
   $("saveCurrentWorldOverlayBtn").hidden = state.panel !== "worlds";
-  if (state.panel === "avatars") renderAvatars();
-  else if (state.panel === "worlds") renderWorlds();
-  else if (state.panel === "friends") renderFriends();
-  else if (state.panel === "current") renderCurrent();
-  else renderRecent();
+  applyMainPanelView();
+  renderDetachedPanels();
+  renderDetailPanels();
+}
+
+function scheduleDatabaseSearch(query) {
+  clearTimeout(state.database.timer);
+  const key = databaseSearchKey(query);
+  state.database.loading = true;
+  state.database.error = "";
+  state.database.query = query;
+  state.database.key = key;
+  state.database.timer = setTimeout(async () => {
+    try {
+      const authorOnly = state.database.scope === "author";
+      const searchDetails = Boolean(state.database.searchDescriptionTags);
+      const platforms = state.database.platforms || {};
+      const platformFilters = [
+        platforms.pc ? "pc" : "",
+        platforms.android ? "android" : "",
+        platforms.ios ? "ios" : ""
+      ].filter(Boolean).join(",");
+      const result = await api("avatarDatabaseSearch", {
+        query,
+        limit: 30,
+        page: 1,
+        provider: state.database.provider || "all",
+        searchMode: state.database.searchMode || "phrase",
+        searchAvatar: !authorOnly,
+        searchAuthor: true,
+        searchDescription: !authorOnly && searchDetails,
+        searchTags: !authorOnly && searchDetails,
+        platformFilters
+      }, 120000);
+      state.database.results = result?.results || result?.avatars || [];
+      state.database.error = "";
+    } catch (error) {
+      state.database.results = [];
+      state.database.error = error.message || "Database search failed.";
+    } finally {
+      state.database.loading = false;
+      if ((state.panel === "database" || isDetached("database")) && databaseSearchKey(query) === key) render();
+    }
+  }, 260);
 }
 
 async function refresh() {
   try {
-    state.data = await api("overlaySnapshot");
-    saveOverlayJson(OVERLAY_CACHE_KEY, state.data);
-    if (state.data?.settings) saveOverlayJson(OVERLAY_SETTINGS_CACHE_KEY, state.data.settings);
-    render();
+    applyOverlaySnapshot(await api("overlaySnapshot"));
   } catch (error) {
     $("content").innerHTML = emptyHtml("Overlay failed to load", error.message);
   }
@@ -638,7 +1752,7 @@ function hydrateCachedSnapshot() {
 
 function applySnapshotSettings() {
   const settings = state.data.settings || {};
-  const opacity = Math.min(100, Math.max(45, Number(settings.overlayOpacity) || 86)) / 100;
+  const opacity = Math.min(100, Math.max(45, Number(settings.overlayOpacity) || 85)) / 100;
   const scale = Math.min(135, Math.max(80, Number(settings.overlayScale) || 100)) / 100;
   const theme = hexToRgb(settings.themeColor) || hexToRgb("#303735");
   const panel = hexToRgb(settings.panelColorSynced === false ? settings.panelColor : settings.themeColor) || theme;
@@ -661,7 +1775,7 @@ function applySnapshotSettings() {
   if (!applySnapshotSettings.didChooseDefault && settings.overlayDefaultPanel) {
     applySnapshotSettings.didChooseDefault = true;
     const panel = normalizedPanel(settings.overlayDefaultPanel);
-    state.panel = ["avatars", "worlds", "friends", "current", "recent"].includes(panel) ? panel : "avatars";
+    state.panel = ["avatars", "worlds", "friends", "database", "recent"].includes(panel) ? panel : "avatars";
     document.querySelectorAll(".overlay-tabs button").forEach((button) => button.classList.toggle("active", button.dataset.panel === state.panel));
   }
 }
@@ -819,7 +1933,8 @@ function worldSaveTargetStatus(group, worldId = "") {
   if (!group) return { ok: false, reason: "Choose a valid world group." };
   if (group.type === "synced" && group.canAccess === false) return { ok: false, reason: "VRC+ required." };
   if (worldGroupHasWorld(group, worldId)) return { ok: false, reason: "Already in this group." };
-  if (group.type === "synced" && Number(group.count ?? group.worlds?.length ?? 0) >= SYNCED_GROUP_AVATAR_LIMIT) return { ok: false, reason: `Synced groups can only contain ${SYNCED_GROUP_AVATAR_LIMIT} worlds.` };
+  const limit = Number(group.limit || 0) || SYNCED_GROUP_AVATAR_LIMIT;
+  if (group.type === "synced" && Number(group.count ?? group.worlds?.length ?? 0) >= limit) return { ok: false, reason: `Synced groups can only contain ${limit} worlds.` };
   return { ok: true, reason: "" };
 }
 
@@ -832,6 +1947,7 @@ function saveTargetWorldGroups(worldId = "") {
       tag: group.id,
       label: group.name || group.id,
       count: Number(group.count ?? group.worlds?.length ?? 0),
+      limit: Number(group.limit || 0),
       canAccess: group.canAccess !== false,
       worlds: group.worlds || []
     }));
@@ -907,6 +2023,71 @@ async function saveCurrentWorldFromOverlay() {
   }
 }
 
+function findOverlayAvatar(avatarId = "") {
+  const id = String(avatarId || "").toLowerCase();
+  if (!id) return null;
+  const sources = [
+    ...(state.database.results || []),
+    ...(state.data.recent || []),
+    ...((state.data.avatarGroups || []).flatMap((group) => group.avatars || [])),
+    state.data.current?.avatar || null
+  ].filter(Boolean);
+  return sources.find((avatar) => String(avatar.id || avatar.avatarId || "").toLowerCase() === id) || null;
+}
+
+async function saveAvatarByIdFromOverlay(button) {
+  const avatarId = button.dataset.saveAvatar || "";
+  if (!avatarId) return;
+  const normalLabel = button.textContent || "Fav";
+  const avatar = findOverlayAvatar(avatarId) || { id: avatarId, name: avatarId };
+  const title = avatar.name || avatar.title || avatarId;
+  const groups = saveTargetGroups(avatarId);
+  if (!groups.length) {
+    await confirmOverlay({ title: "No Groups", message: "Create or sync an avatar group first.", confirmLabel: "OK", danger: false });
+    return;
+  }
+  const choice = await chooseOverlay({
+    title: "Favorite Avatar",
+    message: `Choose a group for "${title}".`,
+    label: "Group",
+    confirmLabel: "Favorite",
+    options: groups.map((group) => ({
+      value: group.id,
+      disabled: !group.status.ok,
+      label: `${group.name || "Avatar Group"} (${Number(group.count || 0)} avatars)${group.status.ok ? "" : ` - ${group.status.reason}`}`
+    }))
+  });
+  if (!choice) return;
+  const group = groups.find((item) => item.id === choice);
+  const status = avatarSaveTargetStatus(group, avatarId);
+  if (!status.ok) {
+    await confirmOverlay({ title: "Favorite Avatar", message: status.reason, confirmLabel: "OK", danger: false });
+    return;
+  }
+  const restore = setBusy(button, "...");
+  try {
+    await api("saveAvatar", {
+      id: "",
+      groupId: group.id,
+      avatarId,
+      name: avatar.name || avatar.title || "",
+      authorName: avatar.authorName || avatar.subtitle || "",
+      imageUrl: avatar.fullImageUrl || avatar.imageUrl || "",
+      thumbnailImageUrl: avatar.imageUrl || "",
+      releaseStatus: avatar.releaseStatus || "",
+      platforms: avatar.platforms || "",
+      source: avatar.source || "vrchat"
+    }, 45000);
+    if (isSyncedGroupId(group.id)) await api("vrchatFavoriteAdd", { avatarId, groupId: group.id }, 60000);
+    await refresh();
+    restore("Saved");
+    setTimeout(() => { if (button.isConnected) button.textContent = normalLabel; }, 900);
+  } catch (error) {
+    await confirmOverlay({ title: "Favorite Avatar", message: error.message, confirmLabel: "OK", danger: false });
+    restore(normalLabel);
+  }
+}
+
 async function openSaveCurrentAvatarDialog() {
   const button = $("saveCurrentAvatarOverlayBtn");
   const restore = setBusy(button, "Loading...");
@@ -959,7 +2140,8 @@ async function openSaveCurrentAvatarDialog() {
 }
 
 async function unfavoriteAvatarFromOverlay(button) {
-  const group = activeGroup("avatars");
+  const groupId = button.dataset.avatarGroup || activeGroup("avatars")?.id || "";
+  const group = (state.data.avatarGroups || []).find((item) => item.id === groupId) || activeGroup("avatars");
   const avatarId = button.dataset.unfavoriteAvatar || "";
   const localId = button.dataset.localAvatar || "";
   if (!avatarId || !localId || !group?.id) return;
@@ -978,6 +2160,7 @@ async function unfavoriteAvatarFromOverlay(button) {
     await refresh();
   } catch (error) {
     button.title = error.message;
+    await confirmOverlay({ title: "Unfavorite Avatar", message: error.message, confirmLabel: "OK", danger: false });
   } finally {
     restore("Unfav");
   }
@@ -986,28 +2169,34 @@ async function unfavoriteAvatarFromOverlay(button) {
 async function openWorldFromOverlay(button) {
   const worldId = button.dataset.openWorld || "";
   if (!worldId) return;
-  const type = await chooseOverlay({
-    title: "Open World",
-    message: "Create an instance and send yourself an invite.",
+  const choice = await chooseOverlay({
+    title: "Join World",
+    message: "Create an instance, invite yourself, or also invite friends from your current lobby.",
     label: "Instance type",
-    confirmLabel: "Open",
+    confirmLabel: "Create Invite",
     options: [
-      { value: "private", label: "Invite" },
-      { value: "invite-plus", label: "Invite+" },
-      { value: "friends", label: "Friends" },
-      { value: "hidden", label: "Friends+" },
-      { value: "public", label: "Public" }
+      { value: "private|false", label: "Invite" },
+      { value: "invite-plus|false", label: "Invite+" },
+      { value: "friends|false", label: "Friends" },
+      { value: "hidden|false", label: "Friends+" },
+      { value: "public|false", label: "Public" },
+      { value: "private|true", label: "Invite + invite current lobby" },
+      { value: "invite-plus|true", label: "Invite+ + invite current lobby" },
+      { value: "friends|true", label: "Friends + invite current lobby" },
+      { value: "hidden|true", label: "Friends+ + invite current lobby" },
+      { value: "public|true", label: "Public + invite current lobby" }
     ]
   });
-  if (!type) return;
+  if (!choice) return;
+  const [type, inviteCurrentLobby] = String(choice).split("|");
   const restore = setBusy(button, "...");
   try {
-    await api("vrchatCreateWorldInstance", { worldId, type, region: "use", inviteCurrentInstanceFriends: false }, 60000);
+    await api("vrchatCreateWorldInstance", { worldId, type, region: "use", inviteCurrentInstanceFriends: inviteCurrentLobby === "true" }, inviteCurrentLobby === "true" ? 90000 : 60000);
     restore("Sent");
-    setTimeout(() => { if (button.isConnected) button.textContent = "Open"; }, 900);
+    setTimeout(() => { if (button.isConnected) button.textContent = "Join"; }, 900);
   } catch (error) {
     button.title = error.message;
-    restore("Open");
+    restore("Join");
   }
 }
 
@@ -1015,23 +2204,68 @@ async function runFriendAction(button) {
   const userId = button.dataset.friendId || "";
   const action = button.dataset.friendAction || "";
   if (!userId || !action) return;
-  const restore = setBusy(button, "...");
+  let restoreBusy = null;
+  const restoreLabel = action === "request" ? "Request" : action === "message" ? "Message" : "Invite";
   try {
     if (action === "invite") {
+      const choice = await chooseOverlay({
+        title: "Invite Friend",
+        message: "Send the default invite or write a short invite message.",
+        label: "Invite type",
+        options: [
+          { value: "default", label: "Default invite" },
+          { value: "message", label: "With message" }
+        ]
+      });
+      if (!choice) return;
       const instanceId = currentInstanceId();
       if (!instanceId) throw new Error("No current instance is available to invite from.");
-      await api("vrchatInviteUser", { userId, instanceId, messageSlot: 0 }, 45000);
+      const restore = setBusy(button, "...");
+      restoreBusy = restore;
+      if (choice === "message") {
+        const message = await textOverlay({ title: "Invite Message", message: "Send a VRChat invite with a custom message.", confirmLabel: "Send" });
+        if (!message) {
+          restore("Invite");
+          return;
+        }
+        await api("vrchatSendChatMessage", { userId, message, mode: "invite" }, 45000);
+      } else {
+        await api("vrchatInviteUser", { userId, instanceId, messageSlot: 0 }, 45000);
+      }
       restore("Sent");
       setTimeout(() => { if (button.isConnected) button.textContent = "Invite"; }, 900);
       return;
     }
     if (action === "request") {
-      await api("vrchatRequestInvite", { id: userId, messageSlot: 0 }, 45000);
+      const choice = await chooseOverlay({
+        title: "Request Invite",
+        message: "Send the default request or write a short request message.",
+        label: "Request type",
+        options: [
+          { value: "default", label: "Default request" },
+          { value: "message", label: "With message" }
+        ]
+      });
+      if (!choice) return;
+      const restore = setBusy(button, "...");
+      restoreBusy = restore;
+      if (choice === "message") {
+        const message = await textOverlay({ title: "Request Message", message: "Send a VRChat request invite with a custom message.", confirmLabel: "Send" });
+        if (!message) {
+          restore("Request");
+          return;
+        }
+        await api("vrchatSendChatMessage", { userId, message, mode: "request" }, 45000);
+      } else {
+        await api("vrchatRequestInvite", { id: userId, messageSlot: 0 }, 45000);
+      }
       restore("Sent");
       setTimeout(() => { if (button.isConnected) button.textContent = "Request"; }, 900);
       return;
     }
     if (action === "message") {
+      const restore = setBusy(button, "...");
+      restoreBusy = restore;
       restore("Message");
       const message = await textOverlay({ title: "Message Friend", message: "Send a VRChat invite/request message.", confirmLabel: "Send" });
       if (!message) return;
@@ -1043,7 +2277,7 @@ async function runFriendAction(button) {
     }
   } catch (error) {
     await confirmOverlay({ title: "Friend Action", message: error.message, confirmLabel: "OK", danger: false });
-    restore(action === "request" ? "Request" : action === "message" ? "Message" : "Invite");
+    restoreBusy?.(restoreLabel);
     return;
   }
   setTimeout(() => { if (button.isConnected) button.textContent = action === "request" ? "Request" : action === "message" ? "Message" : "Invite"; }, 900);
@@ -1062,15 +2296,136 @@ function showFirstOpenTip() {
   }, 250);
 }
 
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Tab") return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+}, true);
+
+document.addEventListener("click", (event) => {
+  const menuToggle = event.target.closest("[data-database-menu-toggle]");
+  if (menuToggle) {
+    event.stopPropagation();
+    toggleDatabaseMenu(menuToggle);
+    return;
+  }
+  const provider = event.target.closest("[data-database-provider]");
+  if (provider) {
+    state.database.provider = provider.dataset.databaseProvider || "all";
+    state.groupDropdownOpen = false;
+    resetDatabaseSearch();
+    hideDatabaseMenus();
+    render();
+    return;
+  }
+  const mode = event.target.closest("[data-database-mode]");
+  if (mode) {
+    state.database.searchMode = mode.dataset.databaseMode || "phrase";
+    resetDatabaseSearch();
+    hideDatabaseMenus();
+    render();
+    return;
+  }
+  const sort = event.target.closest("[data-database-sort]");
+  if (sort) {
+    state.database.sort = sort.dataset.databaseSort || "relevance";
+    hideDatabaseMenus();
+    render();
+    return;
+  }
+  const panelSort = event.target.closest("[data-panel-sort]");
+  if (panelSort) {
+    const panel = panelSort.closest("[data-detached-panel]")?.dataset.detachedPanel || state.panel;
+    if (PANEL_SORT_OPTIONS[panel]) state.sort[panel] = panelSort.dataset.panelSort || PANEL_SORT_OPTIONS[panel][0].value;
+    hideDatabaseMenus();
+    render();
+    return;
+  }
+  const scope = event.target.closest("[data-database-scope]");
+  if (scope) {
+    state.database.scope = scope.dataset.databaseScope || "avatar";
+    resetDatabaseSearch();
+    render();
+    return;
+  }
+  const dock = event.target.closest("[data-dock-panel]");
+  if (dock) {
+    dockPanel(dock.dataset.dockPanel || state.panel);
+    return;
+  }
+  const focus = event.target.closest("[data-focus-panel]");
+  if (focus) {
+    setPanel(focus.dataset.focusPanel || state.panel);
+    return;
+  }
+  if (!event.target.closest(".overlay-select-control")) hideDatabaseMenus();
+});
+
+document.addEventListener("wheel", (event) => {
+  const toggle = event.target.closest("[data-database-menu-toggle]");
+  if (!toggle) return;
+  const menu = toggle.dataset.databaseMenuToggle || "";
+  const direction = event.deltaY > 0 ? 1 : -1;
+  const cycle = (options, current, setValue) => {
+    if (!options?.length) return;
+    const index = Math.max(0, options.findIndex((option) => option.value === current));
+    setValue(options[(index + direction + options.length) % options.length].value);
+    event.preventDefault();
+    event.stopPropagation();
+    hideDatabaseMenus();
+    render();
+  };
+  if (menu === "panel-sort") {
+    const panel = toggle.closest("[data-detached-panel]")?.dataset.detachedPanel || state.panel;
+    cycle(PANEL_SORT_OPTIONS[panel] || [], state.sort[panel], (value) => { state.sort[panel] = value; });
+    return;
+  }
+  if (menu === "mode") {
+    cycle(DATABASE_SEARCH_MODES, state.database.searchMode || "phrase", (value) => { state.database.searchMode = value; resetDatabaseSearch(); });
+    return;
+  }
+  if (menu === "sort") {
+    cycle(DATABASE_SORT_OPTIONS, state.database.sort || "relevance", (value) => { state.database.sort = value; });
+  }
+}, { passive: false });
+
+document.addEventListener("change", (event) => {
+  const platform = event.target.closest("[data-database-platform]");
+  if (platform) {
+    const key = platform.dataset.databasePlatform || "";
+    state.database.platforms = { ...(state.database.platforms || {}), [key]: Boolean(platform.checked) };
+    resetDatabaseSearch();
+    render();
+    return;
+  }
+  const details = event.target.closest("[data-database-details-toggle]");
+  if (!details) return;
+  state.database.searchDescriptionTags = Boolean(details.checked);
+  resetDatabaseSearch();
+  render();
+});
+
 document.querySelectorAll(".overlay-tabs button").forEach((button) => button.addEventListener("click", () => setPanel(button.dataset.panel)));
-$("prevGroupBtn").addEventListener("click", () => { state.groupDropdownOpen = false; state.groupIndex[state.panel] = (state.groupIndex[state.panel] || 0) - 1; render(); });
-$("nextGroupBtn").addEventListener("click", () => { state.groupDropdownOpen = false; state.groupIndex[state.panel] = (state.groupIndex[state.panel] || 0) + 1; render(); });
+$("splitPanelBtn").addEventListener("click", () => {
+  if (isDetached(state.panel)) dockPanel(state.panel);
+  else detachPanel(state.panel);
+});
+$("prevGroupBtn").addEventListener("click", () => { state.groupDropdownOpen = false; stepGroupIndex(state.panel, -1); render(); });
+$("nextGroupBtn").addEventListener("click", () => { state.groupDropdownOpen = false; stepGroupIndex(state.panel, 1); render(); });
 $("groupSelectBtn").addEventListener("click", () => {
-  if (!["avatars", "worlds", "friends"].includes(state.panel)) return;
+  if (!["avatars", "worlds", "friends", "database", "recent"].includes(state.panel)) return;
   state.groupDropdownOpen = !state.groupDropdownOpen;
   render();
 });
 $("groupDropdown").addEventListener("click", (event) => {
+  const recentMode = event.target.closest("[data-recent-mode]");
+  if (recentMode) {
+    state.recentMode = recentMode.dataset.recentMode === "worlds" ? "worlds" : "avatars";
+    state.groupDropdownOpen = false;
+    render();
+    return;
+  }
   const button = event.target.closest("[data-group-index]");
   if (!button) return;
   state.groupIndex[state.panel] = Number(button.dataset.groupIndex) || 0;
@@ -1082,7 +2437,132 @@ $("overlaySearchInput").addEventListener("input", () => {
   state.filters[state.panel] = $("overlaySearchInput").value;
   render();
 });
-$("content").addEventListener("click", async (event) => {
+$("overlaySearchInput").addEventListener("pointerdown", () => {
+  send("overlayBeginTextInput");
+  setTimeout(() => $("overlaySearchInput").focus(), 50);
+});
+$("overlaySearchInput").addEventListener("focus", () => send("overlayBeginTextInput"));
+$("overlaySearchInput").addEventListener("blur", () => send("overlayEndTextInput"));
+$("overlaySearchInput").addEventListener("keydown", (event) => {
+  if (event.key === "Escape" || event.key === "Enter") {
+    event.preventDefault();
+    $("overlaySearchInput").blur();
+  }
+});
+$("detachedPanels").addEventListener("input", (event) => {
+  const input = event.target.closest("[data-detached-search]");
+  if (!input) return;
+  const panel = input.dataset.detachedSearch || "";
+  if (!Object.prototype.hasOwnProperty.call(state.filters, panel)) return;
+  state.filters[panel] = input.value;
+  render();
+});
+$("detachedPanels").addEventListener("focusin", (event) => {
+  if (event.target.closest("[data-detached-search]")) send("overlayBeginTextInput");
+});
+$("detachedPanels").addEventListener("focusout", (event) => {
+  if (event.target.closest("[data-detached-search]")) send("overlayEndTextInput");
+});
+$("detachedPanels").addEventListener("keydown", (event) => {
+  const input = event.target.closest("[data-detached-search]");
+  if (!input) return;
+  if (event.key === "Escape" || event.key === "Enter") {
+    event.preventDefault();
+    input.blur();
+  }
+});
+$("detachedPanels").addEventListener("click", (event) => {
+  const step = event.target.closest("[data-detached-group-step]");
+  if (!step) return;
+  const panel = step.closest("[data-detached-panel]")?.dataset.detachedPanel || "";
+  if (!["avatars", "worlds", "friends"].includes(panel)) return;
+  stepGroupIndex(panel, Number(step.dataset.detachedGroupStep) || 0);
+  render();
+});
+$("detachedPanels").addEventListener("pointerdown", (event) => {
+  const resize = event.target.closest("[data-detached-resize]");
+  const drag = event.target.closest("[data-detached-drag]");
+  const panel = resize?.dataset.detachedResize || drag?.dataset.detachedDrag || "";
+  if (!panel || !state.detachedPanels[panel]) return;
+  if (event.target.closest("button, input, .overlay-select-menu")) return;
+  event.preventDefault();
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const start = { ...state.detachedPanels[panel] };
+  const shell = document.querySelector(".overlay-shell").getBoundingClientRect();
+  const move = (moveEvent) => {
+    const dx = moveEvent.clientX - startX;
+    const dy = moveEvent.clientY - startY;
+    if (resize) {
+      state.detachedPanels[panel].width = Math.max(panel === "database" ? 420 : 260, Math.min(shell.width - 16, start.width + dx));
+      state.detachedPanels[panel].height = Math.max(panel === "database" ? 430 : 300, Math.min(shell.height - 16, start.height + dy));
+    } else {
+      const width = Number(start.width) || 340;
+      const height = Number(start.height) || 460;
+      state.detachedPanels[panel].x = Math.max(4, Math.min(shell.width - width - 4, start.x + dx));
+      state.detachedPanels[panel].y = Math.max(4, Math.min(shell.height - height - 4, start.y + dy));
+    }
+    const el = document.querySelector(`[data-detached-panel="${panel}"]`);
+    if (el) {
+      el.style.left = `${state.detachedPanels[panel].x}px`;
+      el.style.top = `${state.detachedPanels[panel].y}px`;
+      el.style.width = `${state.detachedPanels[panel].width}px`;
+      el.style.height = `${state.detachedPanels[panel].height}px`;
+    }
+  };
+  const up = () => {
+    saveDetachedPanels();
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up, { once: true });
+});
+$("detailPanels").addEventListener("click", (event) => {
+  const close = event.target.closest("[data-detail-close]");
+  if (close) {
+    event.stopPropagation();
+    closeDetailPanel(close.dataset.detailClose || "");
+    return;
+  }
+  const avatarOpen = event.target.closest("[data-avatar-detail-open]");
+  if (avatarOpen) {
+    event.stopPropagation();
+    void openAvatarDetail({ id: avatarOpen.dataset.avatarDetailOpen || "", name: avatarOpen.dataset.avatarName || "" });
+  }
+});
+$("detailPanels").addEventListener("pointerdown", (event) => {
+  const drag = event.target.closest("[data-detail-drag]");
+  const kind = drag?.dataset.detailDrag || "";
+  if (!kind || !state.detailPanels[kind]?.open) return;
+  if (event.target.closest("button, input, textarea, select")) return;
+  event.preventDefault();
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const start = detailPosition(kind);
+  const shell = document.querySelector(".overlay-shell").getBoundingClientRect();
+  const move = (moveEvent) => {
+    const el = document.querySelector(`[data-detail-panel="${kind}"]`);
+    const width = el?.offsetWidth || 390;
+    const height = el?.offsetHeight || 470;
+    state.detailPositions[kind] = {
+      x: Math.max(4, Math.min(shell.width - width - 4, start.x + moveEvent.clientX - startX)),
+      y: Math.max(4, Math.min(shell.height - height - 4, start.y + moveEvent.clientY - startY))
+    };
+    if (el) {
+      el.style.left = `${state.detailPositions[kind].x}px`;
+      el.style.top = `${state.detailPositions[kind].y}px`;
+    }
+  };
+  const up = () => {
+    saveDetailPositions();
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up, { once: true });
+});
+async function handleOverlayContentClick(event) {
   const copy = event.target.closest("[data-copy-text]");
   if (copy) {
     event.stopPropagation();
@@ -1107,7 +2587,8 @@ $("content").addEventListener("click", async (event) => {
   if (saveWorld) {
     event.stopPropagation();
     const worldId = saveWorld.dataset.saveWorld || "";
-    const world = (state.data.worlds || []).find((item) => item.id === worldId) || state.data.current?.world || null;
+    const detailWorld = state.detailPanels.world?.item?.id === worldId ? state.detailPanels.world.item : null;
+    const world = findOverlayWorld(worldId) || detailWorld || state.data.current?.world || null;
     await saveWorldById(worldId, world, saveWorld);
     return;
   }
@@ -1117,20 +2598,54 @@ $("content").addEventListener("click", async (event) => {
     await runFriendAction(friendAction);
     return;
   }
+  const randomAvatar = event.target.closest("[data-random-avatar]");
+  if (randomAvatar) {
+    event.stopPropagation();
+    await randomAvatarFromOverlay(randomAvatar);
+    return;
+  }
+  const avatarRoulette = event.target.closest("[data-avatar-roulette]");
+  if (avatarRoulette) {
+    event.stopPropagation();
+    await toggleAvatarRoulette(avatarRoulette);
+    return;
+  }
+  const randomWorld = event.target.closest("[data-random-world]");
+  if (randomWorld) {
+    event.stopPropagation();
+    await randomWorldFromOverlay(randomWorld);
+    return;
+  }
+  const randomDatabasePage = event.target.closest("[data-random-database-page]");
+  if (randomDatabasePage) {
+    event.stopPropagation();
+    await randomDatabasePageFromOverlay(randomDatabasePage);
+    return;
+  }
+  const randomDatabaseAvatar = event.target.closest("[data-random-database-avatar]");
+  if (randomDatabaseAvatar) {
+    event.stopPropagation();
+    await randomDatabaseAvatarFromOverlay(randomDatabaseAvatar, "Random Avatar");
+    return;
+  }
+  const databaseRoulette = event.target.closest("[data-database-roulette]");
+  if (databaseRoulette) {
+    event.stopPropagation();
+    await toggleDatabaseRoulette(databaseRoulette);
+    return;
+  }
+  const saveAvatar = event.target.closest("[data-save-avatar]");
+  if (saveAvatar) {
+    event.stopPropagation();
+    await saveAvatarByIdFromOverlay(saveAvatar);
+    return;
+  }
   const equip = event.target.closest("[data-equip-avatar]");
   if (equip) {
     event.stopPropagation();
     const id = equip.dataset.equipAvatar || "";
     if (!id) return;
-    const restore = setBusy(equip, "...");
-    try {
-      await api("overlayEquipAvatar", { id }, 120000);
-      restore("Sent");
-      setTimeout(() => { if (equip.isConnected) equip.textContent = "Equip"; }, 900);
-    } catch (error) {
-      equip.title = error.message;
-      restore("Equip");
-    }
+    await equipAvatarIdFromOverlay(id, equip, "Equip");
     return;
   }
   const unfavorite = event.target.closest("[data-unfavorite-avatar]");
@@ -1147,23 +2662,27 @@ $("content").addEventListener("click", async (event) => {
   }
   const worldRowEl = event.target.closest("[data-world-id]");
   if (worldRowEl) {
-    state.selectedWorldId = state.selectedWorldId === worldRowEl.dataset.worldId ? "" : worldRowEl.dataset.worldId || "";
-    render();
+    const id = worldRowEl.dataset.worldId || "";
+    await openWorldDetail(findOverlayWorld(id) || { id });
     return;
   }
   const friendRowEl = event.target.closest("[data-friend-id]");
   if (friendRowEl) {
-    state.selectedFriendId = state.selectedFriendId === friendRowEl.dataset.friendId ? "" : friendRowEl.dataset.friendId || "";
-    render();
+    const id = friendRowEl.dataset.friendId || "";
+    await openUserDetail(findOverlayFriend(id) || { id });
     return;
   }
   const row = event.target.closest("[data-avatar-id]");
   if (row) {
-    state.selectedAvatarId = state.selectedAvatarId === row.dataset.avatarId ? "" : row.dataset.avatarId || "";
-    render();
+    const id = row.dataset.avatarId || "";
+    await openAvatarDetail(findOverlayAvatar(id) || { id });
     return;
   }
-});
+}
+$("content").addEventListener("click", handleOverlayContentClick);
+$("overlayActions").addEventListener("click", handleOverlayContentClick);
+$("detachedPanels").addEventListener("click", handleOverlayContentClick);
+$("detailPanels").addEventListener("click", handleOverlayContentClick);
 $("saveCurrentAvatarOverlayBtn").addEventListener("click", openSaveCurrentAvatarDialog);
 $("saveCurrentWorldOverlayBtn").addEventListener("click", saveCurrentWorldFromOverlay);
 
