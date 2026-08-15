@@ -54,17 +54,12 @@ The app stores VRChat session cookies locally after login. It does not store you
 
 The database tab can search:
 
-- VRCX avatar cache, with remote fallback when no local VRCX database exists.
+- VRCNeph's local encounter cache, built from VRChat player and avatar logs.
+- The remote VRCX-compatible avatar database.
 - AVTRZIP.
 - Prismic PAS.
 
-For VRCX search, VRCNeph first looks for `VRCX.sqlite3` in common VRCX locations and in:
-
-```text
-Documents\VRCNeph\database
-```
-
-VRCX does not need to be running. If no local VRCX database exists, VRCNeph uses a remote VRCX-compatible avatar database instead.
+VRCNeph's local encounter cache is stored in its own local database and is refreshed from VRChat logs while VRCNeph is open. The remote VRCX-compatible database is a separate search source and does not require VRCX to be installed.
 
 ## Local Data
 

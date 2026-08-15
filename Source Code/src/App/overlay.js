@@ -72,6 +72,7 @@ function loadLocalWorldGroups() {
 
 function saveLocalWorldGroups(groups) {
   saveOverlayJson(LOCAL_WORLD_GROUPS_KEY, groups);
+  try { window.dispatchEvent(new StorageEvent("storage", { key: LOCAL_WORLD_GROUPS_KEY, newValue: JSON.stringify(groups || []) })); } catch { }
 }
 
 const state = {
@@ -186,7 +187,23 @@ function panelItemKey(panel = state.panel) {
 
 function activeGroups(panel = state.panel) {
   if (!["avatars", "worlds", "friends"].includes(panel)) return [];
+  if (panel === "worlds") return overlayWorldGroups();
   return state.data[panelGroupKey(panel)] || [];
+}
+
+function overlayWorldGroups() {
+  const synced = state.data.worldGroups || [];
+  const localGroups = loadLocalWorldGroups();
+  ensureDefaultLocalWorldGroup(localGroups);
+  const locals = localGroups.map((group) => ({
+    id: group.key,
+    name: group.label || "World Group",
+    description: group.description || "",
+    count: Number(group.worlds?.length || 0),
+    type: "local",
+    worlds: group.worlds || []
+  }));
+  return [...synced, ...locals];
 }
 
 function activeGroup(panel = state.panel) {
@@ -275,10 +292,15 @@ function panelControlsHtml(panel = state.panel, expanded = false) {
   if (panel === "database") return databaseControlsHtml(expanded);
   const options = PANEL_SORT_OPTIONS[panel];
   if (!options) return "";
+  const editIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m14 6 4 4"></path></svg>`;
+  const trashIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 9h8l-.7 11H8.7L8 9Z"></path><path d="M6 7h12"></path><path d="M10 5h4"></path></svg>`;
+  const groupActions = ["avatars", "worlds"].includes(panel)
+    ? `<button class="icon-action add" type="button" data-group-add="${escapeHtml(panel)}" title="Add group" aria-label="Add group"></button><button class="icon-action svg-icon" type="button" data-group-edit="${escapeHtml(panel)}" title="Edit group" aria-label="Edit group" ${currentGroupEditable(panel) ? "" : "disabled"}>${editIcon}</button><button class="icon-action danger svg-icon" type="button" data-group-delete="${escapeHtml(panel)}" title="Delete group" aria-label="Delete group" ${currentGroupDeleteable(panel) ? "" : "disabled"}>${trashIcon}</button>`
+    : "";
   const actions = panel === "avatars"
-    ? `<button type="button" data-random-avatar>Random</button><button type="button" data-avatar-roulette>${state.roulette.running.avatars ? "Running" : "Roulette"}</button>`
+    ? `${groupActions}<button type="button" data-random-avatar>Random</button><button type="button" data-avatar-roulette>${state.roulette.running.avatars ? "Running" : "Roulette"}</button>`
     : panel === "worlds"
-      ? `<button type="button" data-random-world>Random</button>`
+      ? `${groupActions}<button type="button" data-random-world>Random</button>`
       : "";
   return `<div class="overlay-database-controls panel-sort-controls ${actions ? `panel-sort-controls-${panel}` : ""}">
     <div class="overlay-select-control">
@@ -466,6 +488,27 @@ function isManagedAvatarGroup(groupId = "") {
   return ["recent_avatars", "deleted_avatars", "uploaded_avatars", "updated_avatars"].includes(String(groupId || "").toLowerCase());
 }
 
+function isEditableAvatarGroup(group) {
+  return Boolean(group?.id && !isSyncedGroupId(group.id) && !isManagedAvatarGroup(group.id));
+}
+
+function isEditableWorldGroup(group) {
+  return Boolean(group?.id && String(group.id).startsWith("local_world_"));
+}
+
+function currentGroupEditable(panel = state.panel) {
+  const group = activeGroup(panel);
+  if (panel === "avatars") return isEditableAvatarGroup(group);
+  if (panel === "worlds") return isEditableWorldGroup(group);
+  return false;
+}
+
+function currentGroupDeleteable(panel = state.panel) {
+  const group = activeGroup(panel);
+  if (panel === "worlds" && group?.id === DEFAULT_WORLD_GROUP_KEY) return false;
+  return currentGroupEditable(panel);
+}
+
 function avatarIdEquals(a = "", b = "") {
   return Boolean(a && b && String(a).toLowerCase() === String(b).toLowerCase());
 }
@@ -526,6 +569,20 @@ function rowDetail(rowsHtml, actionsHtml = "") {
   return `<div class="row-detail">${rowsHtml ? `<dl>${rowsHtml}</dl>` : ""}${actionsHtml ? `<div class="detail-actions">${actionsHtml}</div>` : ""}</div>`;
 }
 
+function starIconHtml() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9L12 3Z"></path></svg>`;
+}
+
+function favoriteStarButton({ active = false, action = "", id = "", extraAttrs = "", title = "" } = {}) {
+  const label = title || (active ? "Unfavorite" : "Favorite");
+  return `<button class="row-action favorite-star ${active ? "active" : ""}" type="button" ${action}="${escapeHtml(id)}" ${extraAttrs} title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${starIconHtml()}</button>`;
+}
+
+function detailFavoriteStarButton({ active = false, action = "", id = "", title = "" } = {}) {
+  const label = title || (active ? "Unfavorite" : "Favorite");
+  return `<button class="favorite-star ${active ? "active" : ""}" type="button" ${action}="${escapeHtml(id)}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${starIconHtml()}</button>`;
+}
+
 function currentInstanceId() {
   const location = state.data.current?.location || {};
   if (location.location && String(location.location).startsWith("wrld_")) return location.location;
@@ -537,6 +594,10 @@ function randomFrom(items = []) {
   const list = (items || []).filter(Boolean);
   if (!list.length) return null;
   return list[Math.floor(Math.random() * list.length)];
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function avatarRandomId(avatar) {
@@ -559,11 +620,38 @@ function excludedRandomAvatarIds() {
 function dedupeRandomAvatars(avatars = []) {
   const seen = new Set();
   return (avatars || []).filter((avatar) => {
-    const id = avatarRandomId(avatar);
-    if (!id || seen.has(id)) return false;
-    seen.add(id);
+    const keys = avatarDuplicateKeys(avatar);
+    if (!keys.length || keys.some((key) => seen.has(key))) return false;
+    keys.forEach((key) => seen.add(key));
     return true;
   });
+}
+
+function normalizeDuplicateText(value) {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizeDuplicateImageUrl(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .split("?")[0]
+    .replace(/\/+$/, "");
+}
+
+function avatarDuplicateKeys(avatar) {
+  const keys = [];
+  const id = avatarRandomId(avatar);
+  if (id) keys.push(`id:${id}`);
+  const name = normalizeDuplicateText(avatar?.name || avatar?.avatarName);
+  const author = normalizeDuplicateText(avatar?.authorName);
+  const image = normalizeDuplicateImageUrl(avatar?.thumbnailImageUrl || avatar?.imageUrl || avatar?.fullImageUrl);
+  if (name && image) {
+    keys.push(`visual:${name}|${author}|${image}`);
+    keys.push(`visual-name:${name}|${image}`);
+  }
+  return keys;
 }
 
 function randomFavoriteAvatar() {
@@ -578,14 +666,35 @@ function randomFavoriteAvatar() {
 
 function filterRandomDatabaseAvatars(results = []) {
   const excluded = excludedRandomAvatarIds();
-  return dedupeRandomAvatars(results || []).filter((avatar) => !excluded.has(avatarRandomId(avatar)));
+  return dedupeRandomAvatars(results || []).filter((avatar) => {
+    const id = avatarRandomId(avatar);
+    const status = String(avatar?.releaseStatus || "").trim().toLowerCase();
+    return /^avtr_[0-9a-f-]+$/i.test(id) && !["private", "deleted", "hidden", "unavailable"].includes(status) && !excluded.has(id);
+  });
 }
 
-async function equipAvatarIdFromOverlay(id, button = null, restoreLabel = "Equip") {
+async function waitForOverlayAvatarEquipped(id, kind = "") {
+  const target = avatarRandomId({ avatarId: id });
+  const started = Date.now();
+  while (Date.now() - started < 90000) {
+    if (kind && !state.roulette.running[kind]) throw new Error("Avatar roulette stopped.");
+    const avatar = await api("vrchatCurrentAvatar", {}, 30000).catch(() => null);
+    const current = avatarRandomId(avatar || {});
+    if (current && current === target) {
+      await delay(2000);
+      return true;
+    }
+    await delay(2500);
+  }
+  throw new Error("VRChat did not confirm the avatar equip within 90 seconds.");
+}
+
+async function equipAvatarIdFromOverlay(id, button = null, restoreLabel = "Equip", options = {}) {
   if (!id) return false;
   const restore = button ? setBusy(button, "...") : null;
   try {
     await api("overlayEquipAvatar", { id }, 120000);
+    if (options.waitForConfirm) await waitForOverlayAvatarEquipped(id, options.rouletteKind || "");
     if (restore) {
       restore("Sent");
       setTimeout(() => { if (button.isConnected) button.textContent = restoreLabel; }, 900);
@@ -603,14 +712,14 @@ async function equipAvatarIdFromOverlay(id, button = null, restoreLabel = "Equip
   }
 }
 
-async function randomAvatarFromOverlay(button) {
+async function randomAvatarFromOverlay(button, options = {}) {
   const avatar = randomFavoriteAvatar();
   const id = avatar?.avatarId || avatar?.id || "";
   if (!id) {
     await confirmOverlay({ title: "Random Avatar", message: "No favorite avatar is available to equip.", confirmLabel: "OK", danger: false });
     return false;
   }
-  return equipAvatarIdFromOverlay(id, button, "Random");
+  return equipAvatarIdFromOverlay(id, button, "Random", options);
 }
 
 async function randomDatabasePageFromOverlay(button) {
@@ -622,7 +731,7 @@ async function randomDatabasePageFromOverlay(button) {
       const page = Array.isArray(result?.results) ? result.results : Array.isArray(result?.avatars) ? result.avatars : [];
       avatars = filterRandomDatabaseAvatars([...avatars, ...page]).slice(0, 50);
     }
-    if (!avatars.length) throw new Error(`No random ${databaseProviderLabel().toLowerCase()} avatars found outside Recent or Deleted.`);
+    if (!avatars.length) throw new Error(`No safe random ${databaseProviderLabel().toLowerCase()} avatars found outside Recent, Deleted, Private, or invalid entries.`);
     state.filters.database = "";
     state.database.key = `random\n${Date.now()}`;
     state.database.query = "";
@@ -640,7 +749,7 @@ async function randomDatabasePageFromOverlay(button) {
   }
 }
 
-async function randomDatabaseAvatarFromOverlay(button = null, restoreLabel = "Roulette") {
+async function randomDatabaseAvatarFromOverlay(button = null, restoreLabel = "Roulette", options = {}) {
   const restore = button ? setBusy(button, "...") : null;
   try {
     let avatars = [];
@@ -653,6 +762,7 @@ async function randomDatabaseAvatarFromOverlay(button = null, restoreLabel = "Ro
     const id = avatar?.avatarId || avatar?.id || "";
     if (!id) throw new Error("No random database avatar was returned.");
     await api("overlayEquipAvatar", { id }, 120000);
+    if (options.waitForConfirm) await waitForOverlayAvatarEquipped(id, options.rouletteKind || "");
     if (restore) {
       restore("Sent");
       setTimeout(() => { if (button.isConnected) button.textContent = restoreLabel; }, 900);
@@ -719,7 +829,9 @@ async function openRouletteDialog(kind) {
 
 async function rouletteTick(kind) {
   if (!state.roulette.running[kind]) return;
-  const ok = kind === "database" ? await randomDatabaseAvatarFromOverlay(null) : await randomAvatarFromOverlay(null);
+  const ok = kind === "database"
+    ? await randomDatabaseAvatarFromOverlay(null, "Roulette", { waitForConfirm: true, rouletteKind: kind })
+    : await randomAvatarFromOverlay(null, { waitForConfirm: true, rouletteKind: kind });
   if (!ok || !state.roulette.running[kind]) {
     stopRoulette(kind);
     return;
@@ -735,7 +847,7 @@ async function toggleAvatarRoulette(button) {
   stopRoulette("avatars");
   state.roulette.intervals.avatars = rouletteIntervalMs();
   state.roulette.running.avatars = true;
-  const ok = await randomAvatarFromOverlay(button);
+  const ok = await randomAvatarFromOverlay(button, { waitForConfirm: true, rouletteKind: "avatars" });
   if (!ok) return stopRoulette("avatars");
   state.roulette.avatars = setTimeout(() => { void rouletteTick("avatars"); }, state.roulette.intervals.avatars);
   render();
@@ -748,7 +860,7 @@ async function toggleDatabaseRoulette(button) {
   stopRoulette("database");
   state.roulette.intervals.database = rouletteIntervalMs();
   state.roulette.running.database = true;
-  const ok = await randomDatabaseAvatarFromOverlay(button, "Roulette");
+  const ok = await randomDatabaseAvatarFromOverlay(button, "Roulette", { waitForConfirm: true, rouletteKind: "database" });
   if (!ok) return stopRoulette("database");
   state.roulette.database = setTimeout(() => { void rouletteTick("database"); }, state.roulette.intervals.database);
   render();
@@ -800,8 +912,8 @@ function avatarRow(avatar, index) {
   const favoriteLocalId = favoriteEntry?.avatar?.localId || favoriteEntry?.avatar?.id || "";
   const favoriteGroupId = favoriteEntry?.group?.id || "";
   const favoriteAction = favoriteEntry
-    ? `<button class="row-action danger" type="button" data-unfavorite-avatar="${escapeHtml(avatar.id || "")}" data-local-avatar="${escapeHtml(favoriteLocalId)}" data-avatar-group="${escapeHtml(favoriteGroupId)}">Unfav</button>`
-    : `<button class="row-action" type="button" data-save-avatar="${escapeHtml(avatar.id || "")}">Fav</button>`;
+    ? favoriteStarButton({ active: true, action: "data-unfavorite-avatar", id: avatar.id || "", extraAttrs: `data-local-avatar="${escapeHtml(favoriteLocalId)}" data-avatar-group="${escapeHtml(favoriteGroupId)}"`, title: "Unfavorite avatar" })
+    : favoriteStarButton({ active: false, action: "data-save-avatar", id: avatar.id || "", title: "Favorite avatar" });
   return `<article class="overlay-row ${selected ? "selected" : ""}" data-avatar-id="${escapeHtml(avatar.id || "")}" data-avatar-local-id="${escapeHtml(avatar.localId || "")}">
     ${imageHtml(avatar, title)}
     <div class="row-main">
@@ -821,6 +933,10 @@ function worldRow(world) {
   const occupancy = Number(world.capacity) > 0 ? `${Number(world.occupants) || 0}/${Number(world.capacity)}` : `${Number(world.occupants) || 0} online`;
   const tags = String(world.favoriteTags || "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, 1);
   const selected = detailPanelMatches("world", world.id);
+  const favoriteEntry = favoriteWorldEntry(world.id || world.worldId || "");
+  const favoriteAction = favoriteEntry
+    ? favoriteStarButton({ active: true, action: "data-unfavorite-world", id: world.id || "", title: "Unfavorite world" })
+    : favoriteStarButton({ active: false, action: "data-save-world", id: world.id || "", title: "Favorite world" });
   return `<article class="overlay-row ${selected ? "selected" : ""}" data-world-id="${escapeHtml(world.id || "")}">
     ${imageHtml(world, title)}
     <div class="row-main">
@@ -830,7 +946,7 @@ function worldRow(world) {
     </div>
     <div class="row-actions">
       <button class="row-action" type="button" data-open-world="${escapeHtml(world.id || "")}">Join</button>
-      <button class="row-action" type="button" data-save-world="${escapeHtml(world.id || "")}">Save</button>
+      ${favoriteAction}
     </div>
   </article>`;
 }
@@ -839,6 +955,10 @@ function recentWorldRow(world) {
   const title = world.name || world.room || world.id || "Recent world";
   const location = world.location || world.instanceId || "";
   const selected = detailPanelMatches("world", world.id);
+  const favoriteEntry = favoriteWorldEntry(world.id || world.worldId || "");
+  const favoriteAction = favoriteEntry
+    ? favoriteStarButton({ active: true, action: "data-unfavorite-world", id: world.id || "", title: "Unfavorite world" })
+    : favoriteStarButton({ active: false, action: "data-save-world", id: world.id || "", title: "Favorite world" });
   return `<article class="overlay-row ${selected ? "selected" : ""}" data-world-id="${escapeHtml(world.id || "")}">
     ${imageHtml(world, title)}
     <div class="row-main">
@@ -848,7 +968,7 @@ function recentWorldRow(world) {
     </div>
     <div class="row-actions">
       <button class="row-action" type="button" data-open-world="${escapeHtml(world.id || "")}">Join</button>
-      <button class="row-action" type="button" data-save-world="${escapeHtml(world.id || "")}">Save</button>
+      ${favoriteAction}
     </div>
   </article>`;
 }
@@ -1464,11 +1584,21 @@ function findOverlayWorld(worldId = "") {
   const id = String(worldId || "").toLowerCase();
   if (!id) return null;
   const sources = [
-    ...((state.data.worldGroups || []).flatMap((group) => group.worlds || [])),
+    ...(overlayWorldGroups().flatMap((group) => group.worlds || [])),
     ...(state.data.worlds || []),
     state.data.current?.world || null
   ].filter(Boolean);
   return sources.find((world) => String(world.id || world.worldId || "").toLowerCase() === id) || null;
+}
+
+function favoriteWorldEntry(worldId = "") {
+  const id = String(worldId || "").toLowerCase();
+  if (!id) return null;
+  for (const group of overlayWorldGroups()) {
+    const world = (group.worlds || []).find((item) => String(item.id || item.worldId || "").toLowerCase() === id);
+    if (world) return { group, world };
+  }
+  return null;
 }
 
 function findOverlayFriend(userId = "") {
@@ -1568,6 +1698,12 @@ async function openUserDetail(friend) {
 function avatarDetailBody(panel) {
   const avatar = normalizeAvatarDetail(panel.item || {});
   const title = avatar.name || avatar.id || "Avatar";
+  const favoriteEntry = favoriteAvatarEntry(avatar.id || avatar.avatarId || "");
+  const favoriteLocalId = favoriteEntry?.avatar?.localId || favoriteEntry?.avatar?.id || "";
+  const favoriteGroupId = favoriteEntry?.group?.id || "";
+  const favoriteAction = favoriteEntry
+    ? `<button class="favorite-star active" type="button" data-unfavorite-avatar="${escapeHtml(avatar.id || "")}" data-local-avatar="${escapeHtml(favoriteLocalId)}" data-avatar-group="${escapeHtml(favoriteGroupId)}" title="Unfavorite avatar" aria-label="Unfavorite avatar">${starIconHtml()}</button>`
+    : detailFavoriteStarButton({ active: false, action: "data-save-avatar", id: avatar.id || "", title: "Favorite avatar" });
   return `<div class="detail-hero">
     ${detailImageHtml(avatar, title)}
     <div class="detail-hero-main">
@@ -1578,7 +1714,7 @@ function avatarDetailBody(panel) {
   </div>
   ${detailActionsHtml([
     avatar.id ? `<button type="button" data-equip-avatar="${escapeHtml(avatar.id)}">Equip</button>` : "",
-    avatar.id ? `<button type="button" data-save-avatar="${escapeHtml(avatar.id)}">Favorite</button>` : "",
+    avatar.id ? favoriteAction : "",
     avatar.id ? `<button type="button" data-copy-text="${escapeHtml(avatar.id)}">Copy ID</button>` : ""
   ])}
   ${panel.loading ? `<div class="detail-status">Loading avatar details...</div>` : ""}
@@ -1592,6 +1728,10 @@ function worldDetailBody(panel) {
   const world = normalizeWorldDetail(panel.item || {});
   const title = world.name || world.id || "World";
   const occupancy = Number(world.capacity) > 0 ? `${Number(world.occupants) || 0}/${Number(world.capacity)}` : `${Number(world.occupants) || 0} online`;
+  const favoriteEntry = favoriteWorldEntry(world.id || world.worldId || "");
+  const favoriteAction = favoriteEntry
+    ? detailFavoriteStarButton({ active: true, action: "data-unfavorite-world", id: world.id || "", title: "Unfavorite world" })
+    : detailFavoriteStarButton({ active: false, action: "data-save-world", id: world.id || "", title: "Favorite world" });
   return `<div class="detail-hero">
     ${detailImageHtml(world, title)}
     <div class="detail-hero-main">
@@ -1602,7 +1742,7 @@ function worldDetailBody(panel) {
   </div>
   ${detailActionsHtml([
     world.id ? `<button type="button" data-open-world="${escapeHtml(world.id)}">Join</button>` : "",
-    world.id ? `<button type="button" data-save-world="${escapeHtml(world.id)}">Save</button>` : "",
+    world.id ? favoriteAction : "",
     world.id ? `<button type="button" data-copy-text="${escapeHtml(world.id)}">Copy ID</button>` : ""
   ])}
   ${panel.loading ? `<div class="detail-status">Loading world details...</div>` : ""}
@@ -1907,6 +2047,156 @@ function textOverlay({ title = "Message", message = "", confirmLabel = "Send", v
   });
 }
 
+function groupOverlay({ title = "Group", message = "", name = "", description = "", confirmLabel = "Save" } = {}) {
+  const dialog = $("groupDialog");
+  $("groupTitle").textContent = title;
+  $("groupMessage").textContent = message;
+  $("groupNameInput").value = name || "";
+  $("groupDescriptionInput").value = description || "";
+  $("groupOkBtn").textContent = confirmLabel;
+  return new Promise((resolve) => {
+    const cleanup = (result) => {
+      $("groupOkBtn").removeEventListener("click", onOk);
+      $("groupCancelBtn").removeEventListener("click", onCancel);
+      dialog.removeEventListener("cancel", onCancel);
+      dialog.removeEventListener("close", onCancel);
+      if (dialog.open) dialog.close();
+      resolve(result);
+    };
+    const onOk = () => cleanup({
+      name: $("groupNameInput").value.trim(),
+      description: $("groupDescriptionInput").value.trim()
+    });
+    const onCancel = () => cleanup(null);
+    $("groupOkBtn").addEventListener("click", onOk, { once: true });
+    $("groupCancelBtn").addEventListener("click", onCancel, { once: true });
+    dialog.addEventListener("cancel", onCancel, { once: true });
+    dialog.addEventListener("close", onCancel, { once: true });
+    dialog.showModal();
+    $("groupNameInput").focus();
+    $("groupNameInput").select();
+  });
+}
+
+function uniqueLocalWorldGroupLabel(name, excludeKey = "") {
+  const base = String(name || "New World Group").trim() || "New World Group";
+  const used = new Set(loadLocalWorldGroups()
+    .filter((group) => group.key !== excludeKey)
+    .map((group) => String(group.label || "").trim().toLowerCase())
+    .filter(Boolean));
+  if (!used.has(base.toLowerCase())) return base;
+  for (let index = 2; index < 1000; index++) {
+    const candidate = `${base} ${index}`;
+    if (!used.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${base} ${Date.now().toString(36)}`;
+}
+
+function selectGroupById(panel, groupId) {
+  const groups = activeGroups(panel);
+  const index = groups.findIndex((group) => String(group.id || "").toLowerCase() === String(groupId || "").toLowerCase());
+  if (index >= 0) state.groupIndex[panel] = index;
+}
+
+async function addGroupFromOverlay(panel = state.panel) {
+  const result = await groupOverlay({
+    title: panel === "worlds" ? "New World Group" : "New Avatar Group",
+    message: panel === "worlds" ? "Create a local world group for the overlay and main app." : "Create a local avatar group in VRCNeph.",
+    confirmLabel: "Create"
+  });
+  if (!result) return;
+  if (!result.name) {
+    await confirmOverlay({ title: "Group", message: "Group name is required.", confirmLabel: "OK", danger: false });
+    return;
+  }
+  try {
+    if (panel === "avatars") {
+      await api("createGroup", { name: result.name, icon: "", description: result.description }, 45000);
+      await refresh();
+      const created = [...(state.data.avatarGroups || [])].reverse().find((group) => isEditableAvatarGroup(group) && String(group.name || "").toLowerCase() === result.name.toLowerCase());
+      if (created) selectGroupById("avatars", created.id);
+      render();
+    } else if (panel === "worlds") {
+      const groups = loadLocalWorldGroups();
+      ensureDefaultLocalWorldGroup(groups);
+      const key = `local_world_${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 8)}`;
+      groups.push({ key, label: uniqueLocalWorldGroupLabel(result.name), description: result.description, worlds: [] });
+      saveLocalWorldGroups(groups);
+      selectGroupById("worlds", key);
+      render();
+    }
+  } catch (error) {
+    await confirmOverlay({ title: "Group", message: error.message, confirmLabel: "OK", danger: false });
+  }
+}
+
+async function editGroupFromOverlay(panel = state.panel) {
+  const group = activeGroup(panel);
+  if (!currentGroupEditable(panel)) return;
+  const result = await groupOverlay({
+    title: panel === "worlds" ? "Edit World Group" : "Edit Avatar Group",
+    message: panel === "worlds" ? "Rename or describe this local world group." : "Rename or describe this local avatar group.",
+    name: group.name || "",
+    description: group.description || "",
+    confirmLabel: "Save"
+  });
+  if (!result) return;
+  if (!result.name) {
+    await confirmOverlay({ title: "Group", message: "Group name is required.", confirmLabel: "OK", danger: false });
+    return;
+  }
+  try {
+    if (panel === "avatars") {
+      await api("updateGroup", { id: group.id, name: result.name, icon: group.icon || "", description: result.description }, 45000);
+      await refresh();
+      selectGroupById("avatars", group.id);
+      render();
+    } else if (panel === "worlds") {
+      const groups = loadLocalWorldGroups();
+      ensureDefaultLocalWorldGroup(groups);
+      const local = groups.find((item) => item.key === group.id);
+      if (!local) throw new Error("World group not found.");
+      local.label = group.id === DEFAULT_WORLD_GROUP_KEY ? "Favorites" : uniqueLocalWorldGroupLabel(result.name, group.id);
+      local.description = result.description;
+      saveLocalWorldGroups(groups);
+      selectGroupById("worlds", group.id);
+      render();
+    }
+  } catch (error) {
+    await confirmOverlay({ title: "Group", message: error.message, confirmLabel: "OK", danger: false });
+  }
+}
+
+async function deleteGroupFromOverlay(panel = state.panel) {
+  const group = activeGroup(panel);
+  if (!currentGroupEditable(panel)) return;
+  if (panel === "worlds" && group.id === DEFAULT_WORLD_GROUP_KEY) {
+    await confirmOverlay({ title: "Delete Group", message: "The default world Favorites group cannot be deleted.", confirmLabel: "OK", danger: false });
+    return;
+  }
+  const confirmed = await confirmOverlay({
+    title: "Delete Group",
+    message: `Delete "${group.name || "this group"}"? Items in this group will be removed from the group.`,
+    confirmLabel: "Delete",
+    danger: true
+  });
+  if (!confirmed) return;
+  try {
+    if (panel === "avatars") {
+      await api("deleteGroup", { id: group.id }, 45000);
+      await refresh();
+    } else if (panel === "worlds") {
+      const groups = loadLocalWorldGroups().filter((item) => item.key !== group.id);
+      ensureDefaultLocalWorldGroup(groups);
+      saveLocalWorldGroups(groups);
+      state.groupIndex.worlds = 0;
+      render();
+    }
+  } catch (error) {
+    await confirmOverlay({ title: "Delete Group", message: error.message, confirmLabel: "OK", danger: false });
+  }
+}
+
 function saveTargetGroups(avatarId = "") {
   return (state.data.avatarGroups || []).filter(canSaveToAvatarGroup).map((group) => {
     const status = avatarSaveTargetStatus(group, avatarId);
@@ -2007,6 +2297,38 @@ async function saveWorldById(worldId, world = null, button = null) {
   }
 }
 
+async function unfavoriteWorldFromOverlay(button) {
+  const worldId = button?.dataset?.unfavoriteWorld || "";
+  if (!worldId) return;
+  const entry = favoriteWorldEntry(worldId);
+  const label = entry?.world?.name || findOverlayWorld(worldId)?.name || worldId;
+  const confirmed = await confirmOverlay({
+    title: "Unfavorite World",
+    message: `Remove "${label}" from favorites?`,
+    confirmLabel: "Unfav",
+    danger: true
+  });
+  if (!confirmed) return;
+  const restore = setBusy(button, "...");
+  try {
+    if (entry?.group?.type === "local" || String(entry?.group?.id || "").startsWith("local_world_")) {
+      const groups = loadLocalWorldGroups();
+      const local = groups.find((group) => group.key === entry.group.id);
+      if (local) {
+        local.worlds = (local.worlds || []).filter((world) => String(world.id || world.worldId || "").toLowerCase() !== String(worldId).toLowerCase());
+        saveLocalWorldGroups(groups);
+      }
+    } else {
+      await api("vrchatFavoriteWorldRemove", { id: worldId }, 45000);
+    }
+    await refresh();
+    restore(button?.classList?.contains("favorite-star") ? undefined : "Unfav");
+  } catch (error) {
+    restore(button?.classList?.contains("favorite-star") ? undefined : "Unfav");
+    await confirmOverlay({ title: "Unfavorite World", message: error.message, confirmLabel: "OK", danger: false });
+  }
+}
+
 async function saveCurrentWorldFromOverlay() {
   const button = $("saveCurrentWorldOverlayBtn");
   try {
@@ -2038,7 +2360,8 @@ function findOverlayAvatar(avatarId = "") {
 async function saveAvatarByIdFromOverlay(button) {
   const avatarId = button.dataset.saveAvatar || "";
   if (!avatarId) return;
-  const normalLabel = button.textContent || "Fav";
+  const iconButton = button.classList.contains("favorite-star");
+  const normalLabel = iconButton ? undefined : button.textContent || "Fav";
   const avatar = findOverlayAvatar(avatarId) || { id: avatarId, name: avatarId };
   const title = avatar.name || avatar.title || avatarId;
   const groups = saveTargetGroups(avatarId);
@@ -2080,8 +2403,8 @@ async function saveAvatarByIdFromOverlay(button) {
     }, 45000);
     if (isSyncedGroupId(group.id)) await api("vrchatFavoriteAdd", { avatarId, groupId: group.id }, 60000);
     await refresh();
-    restore("Saved");
-    setTimeout(() => { if (button.isConnected) button.textContent = normalLabel; }, 900);
+    restore(iconButton ? undefined : "Saved");
+    if (!iconButton) setTimeout(() => { if (button.isConnected) button.textContent = normalLabel; }, 900);
   } catch (error) {
     await confirmOverlay({ title: "Favorite Avatar", message: error.message, confirmLabel: "OK", danger: false });
     restore(normalLabel);
@@ -2162,7 +2485,7 @@ async function unfavoriteAvatarFromOverlay(button) {
     button.title = error.message;
     await confirmOverlay({ title: "Unfavorite Avatar", message: error.message, confirmLabel: "OK", danger: false });
   } finally {
-    restore("Unfav");
+    restore(button.classList.contains("favorite-star") ? undefined : "Unfav");
   }
 }
 
@@ -2363,6 +2686,15 @@ document.addEventListener("click", (event) => {
 });
 
 document.addEventListener("wheel", (event) => {
+  if (event.target.closest("#groupSelectBtn, #groupDropdown")) {
+    if (!["avatars", "worlds", "friends"].includes(state.panel)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    state.groupDropdownOpen = false;
+    stepGroupIndex(state.panel, event.deltaY > 0 ? 1 : -1);
+    render();
+    return;
+  }
   const toggle = event.target.closest("[data-database-menu-toggle]");
   if (!toggle) return;
   const menu = toggle.dataset.databaseMenuToggle || "";
@@ -2448,6 +2780,11 @@ $("overlaySearchInput").addEventListener("keydown", (event) => {
     event.preventDefault();
     $("overlaySearchInput").blur();
   }
+});
+window.addEventListener("storage", (event) => {
+  if (event.key !== LOCAL_WORLD_GROUPS_KEY) return;
+  if (state.panel === "worlds") state.groupIndex.worlds = Math.min(state.groupIndex.worlds || 0, Math.max(0, activeGroups("worlds").length - 1));
+  render();
 });
 $("detachedPanels").addEventListener("input", (event) => {
   const input = event.target.closest("[data-detached-search]");
@@ -2592,10 +2929,34 @@ async function handleOverlayContentClick(event) {
     await saveWorldById(worldId, world, saveWorld);
     return;
   }
+  const unfavoriteWorld = event.target.closest("[data-unfavorite-world]");
+  if (unfavoriteWorld) {
+    event.stopPropagation();
+    await unfavoriteWorldFromOverlay(unfavoriteWorld);
+    return;
+  }
   const friendAction = event.target.closest("[data-friend-action]");
   if (friendAction) {
     event.stopPropagation();
     await runFriendAction(friendAction);
+    return;
+  }
+  const groupAdd = event.target.closest("[data-group-add]");
+  if (groupAdd) {
+    event.stopPropagation();
+    await addGroupFromOverlay(groupAdd.dataset.groupAdd || state.panel);
+    return;
+  }
+  const groupEdit = event.target.closest("[data-group-edit]");
+  if (groupEdit) {
+    event.stopPropagation();
+    await editGroupFromOverlay(groupEdit.dataset.groupEdit || state.panel);
+    return;
+  }
+  const groupDelete = event.target.closest("[data-group-delete]");
+  if (groupDelete) {
+    event.stopPropagation();
+    await deleteGroupFromOverlay(groupDelete.dataset.groupDelete || state.panel);
     return;
   }
   const randomAvatar = event.target.closest("[data-random-avatar]");

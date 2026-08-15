@@ -164,13 +164,15 @@ internal static class Program
     private static readonly object OverlayGate = new();
     private static Process? OverlayProcess;
     private static OverlayHotkeyPoller? OverlayHotkey;
+    private static OverlayHotkeyPoller? DatabaseRandomHotkey;
     private static PhotinoWindow? OverlayWindow;
     private static nint OverlayWindowHandle;
     private static FileSystemWatcher? LibraryWatcher;
     private static System.Threading.Timer? LibraryChangeTimer;
+    private static System.Threading.Timer? LocalAvatarCacheTimer;
     private static readonly object LibraryChangeGate = new();
     private static DateTimeOffset LastOverlayHotkeyToggle = DateTimeOffset.MinValue;
-    private static volatile bool AppCloseConfirmed;
+    private static volatile bool MainWindowClosing;
     private static volatile bool SyncedOrderCloseBlocked;
 
     [STAThread]
@@ -179,11 +181,13 @@ internal static class Program
         if (args.Any(arg => arg.Equals("--overlay", StringComparison.OrdinalIgnoreCase)))
         {
             TrySetOverlayAppUserModelId();
+            ConfigureWebViewUserDataFolder("overlay");
             RunOverlayProcess();
             return;
         }
 
         TrySetAppUserModelId();
+        ConfigureWebViewUserDataFolder("main");
         if (!VrChat.HasSavedSession)
         {
             Store.ResetSyncedGroupsToDefaults();
@@ -216,23 +220,25 @@ internal static class Program
             _ = Task.Run(async () =>
             {
                 var response = await HandleMessageAsync(message);
-                photino.SendWebMessage(JsonSerializer.Serialize(response, ProgramJson.Options));
+                if (!MainWindowClosing)
+                {
+                    TrySendWebMessage(photino, JsonSerializer.Serialize(response, ProgramJson.Options));
+                }
             });
         })
         .RegisterWindowClosingHandler((sender, _) =>
         {
             var syncedOrderProgress = GetSyncedOrderProgress();
             var syncedOrderApplying = SyncedOrderCloseBlocked || IsSyncedOrderApplying(syncedOrderProgress);
-            if (AppCloseConfirmed && !syncedOrderApplying) return false;
-            if (sender is PhotinoWindow photino)
+            if (syncedOrderApplying)
             {
-                photino.SendWebMessage(JsonSerializer.Serialize(AppEvent.Push("appCloseRequested", new
-                {
-                    syncedOrderApplying,
-                    syncedOrderMessage = syncedOrderProgress.Message
-                }), ProgramJson.Options));
+                return true;
             }
-            return true;
+
+            // Do not send a WebMessage from this callback: Photino may have already
+            // released its native browser, which causes an access-violation crash.
+            MainWindowClosing = true;
+            return false;
         })
         .Load(appPath);
         AppWindow = window;
@@ -242,7 +248,7 @@ internal static class Program
             try
             {
                 Logs.Info("Pipeline", $"Live event received: {evt.Type}");
-                window.SendWebMessage(JsonSerializer.Serialize(AppEvent.Push("vrchatPipeline", evt), ProgramJson.Options));
+                TrySendWebMessage(window, JsonSerializer.Serialize(AppEvent.Push("vrchatPipeline", evt), ProgramJson.Options));
                 await Task.CompletedTask;
             }
             catch
@@ -255,7 +261,7 @@ internal static class Program
                 if (status.Connected) Logs.Info("Pipeline", "Live sync connected.");
                 else if (status.State.Equals("Connecting", StringComparison.OrdinalIgnoreCase)) Logs.Info("Pipeline", status.State);
                 else if (!status.State.Equals("Stopped", StringComparison.OrdinalIgnoreCase)) Logs.Warn("Pipeline", status.State);
-                window.SendWebMessage(JsonSerializer.Serialize(AppEvent.Push("vrchatPipelineStatus", status), ProgramJson.Options));
+                TrySendWebMessage(window, JsonSerializer.Serialize(AppEvent.Push("vrchatPipelineStatus", status), ProgramJson.Options));
                 await Task.CompletedTask;
             }
             catch
@@ -263,7 +269,8 @@ internal static class Program
             }
         });
 
-        ConfigureOverlayHotkey();
+        ConfigureHotkeys();
+        StartLocalAvatarCache();
 
         try
         {
@@ -272,7 +279,10 @@ internal static class Program
         finally
         {
             OverlayHotkey?.Dispose();
+            DatabaseRandomHotkey?.Dispose();
             StopLibraryChangeWatcher();
+            LocalAvatarCacheTimer?.Dispose();
+            LocalAvatarCacheTimer = null;
             CloseOverlay();
             Pipeline.Stop();
         }
@@ -340,10 +350,12 @@ internal static class Program
         }
     }
 
-    private static void ConfigureOverlayHotkey()
+    private static void ConfigureHotkeys()
     {
         OverlayHotkey?.Dispose();
         OverlayHotkey = null;
+        DatabaseRandomHotkey?.Dispose();
+        DatabaseRandomHotkey = null;
         var settings = Settings.Get();
         OverlayHotkey = new OverlayHotkeyPoller(settings.OverlayHotkey, () =>
         {
@@ -364,12 +376,34 @@ internal static class Program
             });
         });
         OverlayHotkey.Start();
+        DatabaseRandomHotkey = new OverlayHotkeyPoller(settings.DatabaseRandomHotkey, () =>
+        {
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    Logs.Info("App", "Random database avatar hotkey detected.");
+                    SendAppEvent("randomDatabaseAvatarHotkey", new { });
+                }
+                catch (Exception ex)
+                {
+                    Logs.Error("App", "Random database avatar hotkey failed.", ex.ToString());
+                }
+            });
+        });
+        DatabaseRandomHotkey.Start();
+    }
+
+    private static void StartLocalAvatarCache()
+    {
+        LocalAvatarCacheTimer?.Dispose();
+        LocalAvatarCacheTimer = new System.Threading.Timer(_ => _ = Task.Run(() => AvatarDatabase.RefreshLocalEncounterCache()), null, TimeSpan.Zero, TimeSpan.FromMinutes(2));
     }
 
     private static object SaveSettings(AppSettings settings)
     {
         var saved = Settings.Save(settings);
-        if (OverlayHotkey is not null) ConfigureOverlayHotkey();
+        if (OverlayHotkey is not null || DatabaseRandomHotkey is not null) ConfigureHotkeys();
         return saved;
     }
 
@@ -387,15 +421,18 @@ internal static class Program
         catch { }
     }
 
+    private static void ConfigureWebViewUserDataFolder(string surface)
+    {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var profilePath = Path.Combine(localAppData, "VRCNeph", "WebView2", surface);
+        Directory.CreateDirectory(profilePath);
+        Environment.SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", profilePath, EnvironmentVariableTarget.Process);
+    }
+
     private static void SendAppEvent(string name, object data)
     {
-        try
-        {
-            AppWindow?.SendWebMessage(JsonSerializer.Serialize(AppEvent.Push(name, data), ProgramJson.Options));
-        }
-        catch
-        {
-        }
+        if (MainWindowClosing) return;
+        TrySendWebMessage(AppWindow, JsonSerializer.Serialize(AppEvent.Push(name, data), ProgramJson.Options));
     }
 
     private static void SendOverlayEvent(string name, object data)
@@ -407,6 +444,13 @@ internal static class Program
         catch
         {
         }
+    }
+
+    private static void TrySendWebMessage(PhotinoWindow? window, string message)
+    {
+        if (window is null || MainWindowClosing) return;
+        try { window.SendWebMessage(message); }
+        catch { }
     }
 
     private static void StartLibraryChangeWatcher()
@@ -650,6 +694,7 @@ internal static class Program
                 "vrchatWorldSearch" => await VrChat.SearchWorldsAsync(GetPayload<WorldSearchInput>(request)),
                 "vrchatFavoriteWorlds" => await VrChat.GetFavoriteWorldsAsync(GetPayload<PageInput>(request)),
                 "vrchatFavoriteWorldGroups" => await VrChat.GetFavoriteWorldGroupsAsync(GetPayload<PageInput>(request)),
+                "vrchatFavoriteFriendGroups" => await VrChat.GetFavoriteFriendGroupsAsync(GetPayload<PageInput>(request)),
                 "vrchatFavoriteWorldAdd" => await VrChat.AddFavoriteWorldAsync(GetPayload<WorldFavoriteInput>(request)),
                 "vrchatFavoriteWorldRemove" => await VrChat.RemoveFavoriteWorldAsync(GetPayload<IdInput>(request).Id),
                 "vrchatWorldDetail" => await VrChat.GetWorldDetailAsync(GetPayload<IdInput>(request).Id),
@@ -674,7 +719,7 @@ internal static class Program
                 "avatarDatabaseCountProgress" => AvatarDatabase.CountProgress(GetPayload<AvatarSearchInput>(request)),
                 "avatarDatabaseRandom" => await AvatarDatabase.RandomAsync(GetPayload<AvatarSearchInput>(request), VrChat),
                 "avatarDatabaseResolveImage" => await AvatarDatabase.ResolveByImageAsync(GetPayload<AvatarImageResolveInput>(request), VrChat),
-                "avatarDatabaseVrcxStatus" => AvatarDatabase.GetVrcxStatus(),
+                "avatarDatabaseSourceStatus" => await AvatarDatabase.GetSourceStatusAsync(),
                 "avatarDatabasePasUpdateStatus" => await AvatarDatabase.GetPasUpdateStatusAsync(),
                 "avatarDatabasePasUpdate" => await AvatarDatabase.UpdatePasDatabaseAsync(),
                 "appVersion" => AppUpdateClient.CurrentVersionInfo(UpdateRepositoryOwner, UpdateRepositoryName),
@@ -789,7 +834,6 @@ internal static class Program
 
     private static async Task<SyncedAvatarOrderApplyResult> ApplySyncedAvatarOrderWithCloseBlock(SyncedAvatarOrderInput input)
     {
-        AppCloseConfirmed = false;
         SyncedOrderCloseBlocked = true;
         UpdateSyncedOrderProgress(new SyncedAvatarOrderProgress(input.GroupId, "starting", "Starting synced order save...", 0, input.AvatarIds?.Count ?? 0));
         try
@@ -804,7 +848,7 @@ internal static class Program
 
     private static object CloseApp()
     {
-        AppCloseConfirmed = true;
+        MainWindowClosing = true;
         AppWindow?.Close();
         return new { closing = true };
     }
@@ -984,7 +1028,8 @@ internal static class Program
         {
             var friendsResult = await VrChat.GetFriendsAsync(new PageInput(80, 0));
             var favoriteResult = await TryFavoriteFriendsAsync();
-            return BuildOverlayFriendGroups(friendsResult.Friends, favoriteResult.Friends, favoriteLimits.FriendPerGroupLimit);
+            var favoriteGroups = await TryFavoriteFriendGroupsAsync();
+            return BuildOverlayFriendGroups(friendsResult.Friends, favoriteResult.Friends, favoriteGroups.Groups, favoriteLimits.FriendPerGroupLimit);
         });
         return new
         {
@@ -1159,7 +1204,7 @@ internal static class Program
         return index <= Math.Max(4, favoriteGroupLimit);
     }
 
-    private static List<object> BuildOverlayFriendGroups(List<VrChatFriendSummary> friends, List<VrChatFriendSummary> favoriteFriends, int favoritePerGroupLimit)
+    private static List<object> BuildOverlayFriendGroups(List<VrChatFriendSummary> friends, List<VrChatFriendSummary> favoriteFriends, List<VrChatFavoriteGroupSummary> favoriteGroups, int favoritePerGroupLimit)
     {
         var byId = new Dictionary<string, VrChatFriendSummary>(StringComparer.OrdinalIgnoreCase);
         foreach (var friend in favoriteFriends.Concat(friends))
@@ -1176,12 +1221,14 @@ internal static class Program
         {
             new { id = "all", name = "All Friends", count = all.Count, friends = all.Take(100).Select(OverlayFriend).ToList() }
         };
-        var orderedTags = favoriteFriends.SelectMany(friend => SplitTags(friend.FavoriteTags)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var orderedTags = favoriteGroups.Select(group => group.Name).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        orderedTags.AddRange(favoriteFriends.SelectMany(friend => SplitTags(friend.FavoriteTags)).Where(tag => !orderedTags.Contains(tag, StringComparer.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase));
         foreach (var tag in orderedTags)
         {
             var items = all.Where(friend => SplitTags(friend.FavoriteTags).Contains(tag, StringComparer.OrdinalIgnoreCase)).ToList();
             if (items.Count == 0) continue;
-            groups.Add(new { id = tag, name = FavoriteGroupLabel(tag, "Favorite Friends"), count = items.Count, limit = favoritePerGroupLimit, friends = items.Take(100).Select(OverlayFriend).ToList() });
+            var label = favoriteGroups.FirstOrDefault(group => group.Name.Equals(tag, StringComparison.OrdinalIgnoreCase))?.DisplayName;
+            groups.Add(new { id = tag, name = string.IsNullOrWhiteSpace(label) ? FavoriteGroupLabel(tag, "Favorite Friends") : label, count = items.Count, limit = favoritePerGroupLimit, friends = items.Take(100).Select(OverlayFriend).ToList() });
         }
         return groups;
     }
@@ -1233,9 +1280,33 @@ internal static class Program
         catch { return new VrChatFavoriteGroupsResult([], false); }
     }
 
+    private static async Task<VrChatFavoriteGroupsResult> TryFavoriteFriendGroupsAsync()
+    {
+        try { return await VrChat.GetFavoriteFriendGroupsAsync(new PageInput(100, 0)); }
+        catch { return new VrChatFavoriteGroupsResult([], false); }
+    }
+
     private static async Task<VrChatFriendListResult> TryFavoriteFriendsAsync()
     {
-        try { return await VrChat.GetFavoriteFriendsAsync(new PageInput(100, 0)); }
+        try
+        {
+            var friends = new List<VrChatFriendSummary>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var offset = 0;
+            while (offset < 1000)
+            {
+                var page = await VrChat.GetFavoriteFriendsAsync(new PageInput(100, offset));
+                if (page.Friends.Count == 0) break;
+                foreach (var friend in page.Friends)
+                {
+                    if (string.IsNullOrWhiteSpace(friend.Id) || !seen.Add(friend.Id)) continue;
+                    friends.Add(friend);
+                }
+                if (!page.HasMore) break;
+                offset += page.Friends.Count;
+            }
+            return new VrChatFriendListResult(friends, false);
+        }
         catch { return new VrChatFriendListResult([], false); }
     }
 
@@ -3704,7 +3775,7 @@ internal sealed class AvatarStore
 
 internal sealed class AppSettingsStore
 {
-    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", true, "F8", "avatars", 85, 100, 8, 16, 360, 519, 12);
+    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", true, "F8", "Ctrl+Alt+R", "avatars", 85, 100, 8, 16, 360, 519, 13);
     private readonly string _settingsPath = AppPaths.SettingsPath;
     public AppSettings Get()
     {
@@ -3736,11 +3807,13 @@ internal sealed class AppSettingsStore
         var hotkey = string.IsNullOrWhiteSpace(s.OverlayHotkey) ? DefaultSettings.OverlayHotkey : s.OverlayHotkey.Trim();
         if (s.SchemaVersion < 11 && hotkey.Equals("Ctrl+Shift+O", StringComparison.OrdinalIgnoreCase)) hotkey = DefaultSettings.OverlayHotkey;
         hotkey = OverlayHotkeyPoller.NormalizeDisplayHotkey(hotkey, DefaultSettings.OverlayHotkey);
+        var databaseRandomHotkey = string.IsNullOrWhiteSpace(s.DatabaseRandomHotkey) ? DefaultSettings.DatabaseRandomHotkey : s.DatabaseRandomHotkey.Trim();
+        databaseRandomHotkey = OverlayHotkeyPoller.NormalizeDisplayHotkey(databaseRandomHotkey, DefaultSettings.DatabaseRandomHotkey);
         var overlayX = s.SchemaVersion < 11 && s.OverlayX == 0 ? DefaultSettings.OverlayX : Math.Clamp(s.OverlayX, -10000, 10000);
         var overlayY = s.SchemaVersion < 11 && s.OverlayY == 0 ? DefaultSettings.OverlayY : Math.Clamp(s.OverlayY, -10000, 10000);
         var overlayWidth = s.SchemaVersion < 11 && s.OverlayWidth == 0 ? DefaultSettings.OverlayWidth : Math.Clamp(s.OverlayWidth, 360, 900);
         var overlayHeight = s.SchemaVersion < 11 && s.OverlayHeight == 0 ? DefaultSettings.OverlayHeight : Math.Clamp(s.OverlayHeight, 420, 1000);
-        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", s.OverlayEnabled, hotkey, overlayPanel, overlayOpacity, overlayScale, overlayX, overlayY, overlayWidth, overlayHeight, 12);
+        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", s.OverlayEnabled, hotkey, databaseRandomHotkey, overlayPanel, overlayOpacity, overlayScale, overlayX, overlayY, overlayWidth, overlayHeight, 13);
     }
 }
 
@@ -4033,6 +4106,69 @@ internal sealed class AppDataStore
         }
     }
 
+    public void UpsertLocalAvatarEncounters(IEnumerable<LocalAvatarEncounter> encounters)
+    {
+        var items = encounters.Where(x => !string.IsNullOrWhiteSpace(x.AvatarId)).ToList();
+        if (items.Count == 0) return;
+        lock (_gate)
+        {
+            EnsureInitialized();
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction();
+            foreach (var item in items)
+            {
+                using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                command.CommandText = """
+                    INSERT INTO local_avatar_cache (avatar_id, avatar_name, user_id, display_name, first_seen, last_seen, world_name, location, world_id, log_file, seen_count)
+                    VALUES ($avatarId, $avatarName, $userId, $displayName, $seen, $seen, $worldName, $location, $worldId, $logFile, 1)
+                    ON CONFLICT(avatar_id) DO UPDATE SET avatar_name=excluded.avatar_name, user_id=excluded.user_id, display_name=excluded.display_name, last_seen=excluded.last_seen, world_name=excluded.world_name, location=excluded.location, world_id=excluded.world_id, log_file=excluded.log_file, seen_count=local_avatar_cache.seen_count+1;
+                    """;
+                command.Parameters.AddWithValue("$avatarId", item.AvatarId);
+                command.Parameters.AddWithValue("$avatarName", item.AvatarName);
+                command.Parameters.AddWithValue("$userId", item.UserId);
+                command.Parameters.AddWithValue("$displayName", item.DisplayName);
+                command.Parameters.AddWithValue("$seen", item.Timestamp);
+                command.Parameters.AddWithValue("$worldName", item.WorldName);
+                command.Parameters.AddWithValue("$location", item.Location);
+                command.Parameters.AddWithValue("$worldId", item.WorldId);
+                command.Parameters.AddWithValue("$logFile", item.LogFile);
+                command.ExecuteNonQuery();
+            }
+            transaction.Commit();
+        }
+    }
+
+    public AvatarInput? FindLocalAvatarEncounter(string avatarId, string userId, string displayName, string avatarName)
+    {
+        lock (_gate)
+        {
+            EnsureInitialized();
+            using var connection = OpenConnection();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT avatar_id, avatar_name, user_id, display_name, last_seen, world_name, location, world_id
+                FROM local_avatar_cache
+                WHERE ($avatarId <> '' AND avatar_id = $avatarId)
+                   OR ($userId <> '' AND user_id = $userId)
+                   OR ($displayName <> '' AND lower(display_name) = lower($displayName))
+                   OR ($avatarName <> '' AND lower(avatar_name) = lower($avatarName))
+                ORDER BY last_seen DESC LIMIT 1;
+                """;
+            command.Parameters.AddWithValue("$avatarId", avatarId?.Trim() ?? "");
+            command.Parameters.AddWithValue("$userId", userId?.Trim() ?? "");
+            command.Parameters.AddWithValue("$displayName", displayName?.Trim() ?? "");
+            command.Parameters.AddWithValue("$avatarName", avatarName?.Trim() ?? "");
+            using var reader = command.ExecuteReader();
+            if (!reader.Read()) return null;
+            var id = reader.GetString(0);
+            var name = reader.GetString(1);
+            var seen = reader.GetString(4);
+            var world = reader.GetString(5);
+            return new AvatarInput { AvatarId = id, Name = string.IsNullOrWhiteSpace(name) ? id : name, AuthorId = reader.GetString(2), AuthorName = reader.GetString(3), SourceUrl = $"https://vrchat.com/home/avatar/{id}", Notes = $"Found in VRCNeph's local encounter cache. Last seen {seen}{(string.IsNullOrWhiteSpace(world) ? "" : $" in {world}") }.", Source = "local-encounter", RemoteUpdatedAt = seen };
+        }
+    }
+
     public SyncActionListResult ListSyncActions(int limit = 80)
     {
         lock (_gate)
@@ -4262,10 +4398,24 @@ internal sealed class AppDataStore
                 detail TEXT NOT NULL DEFAULT '',
                 resolved INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS local_avatar_cache (
+                avatar_id TEXT PRIMARY KEY,
+                avatar_name TEXT NOT NULL DEFAULT '',
+                user_id TEXT NOT NULL DEFAULT '',
+                display_name TEXT NOT NULL DEFAULT '',
+                first_seen TEXT NOT NULL DEFAULT '',
+                last_seen TEXT NOT NULL DEFAULT '',
+                world_name TEXT NOT NULL DEFAULT '',
+                location TEXT NOT NULL DEFAULT '',
+                world_id TEXT NOT NULL DEFAULT '',
+                log_file TEXT NOT NULL DEFAULT '',
+                seen_count INTEGER NOT NULL DEFAULT 0
+            );
             CREATE INDEX IF NOT EXISTS idx_sync_runs_timestamp ON sync_runs(timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_avatar_metadata_history_avatar ON avatar_metadata_history(avatar_id, changed_at DESC);
             CREATE INDEX IF NOT EXISTS idx_sync_actions_action ON sync_actions(action_id, timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_sync_conflicts_open ON sync_conflicts(resolved, detected_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_local_avatar_cache_last_seen ON local_avatar_cache(last_seen DESC);
             """;
         command.ExecuteNonQuery();
         TryEnsureColumn("sync_actions", "payload", "TEXT NOT NULL DEFAULT ''");
@@ -4596,6 +4746,7 @@ internal static class VrChatLogWatcher
         "LocalLow",
         "VRChat",
         "VRChat");
+    public static string LogDirectoryPath => LogDirectory;
     private static readonly System.Text.RegularExpressions.Regex AvatarIdRegex = new(@"avtr_[0-9a-fA-F-]{36}", System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex JoinedPlayerRegex = new(@"\[Behaviour\]\s+OnPlayerJoined\s+(.+?)\s+\((usr_[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{12})\)", System.Text.RegularExpressions.RegexOptions.Compiled);
     private static readonly System.Text.RegularExpressions.Regex LeftPlayerRegex = new(@"\[Behaviour\]\s+OnPlayerLeft\s+(.+?)\s+\((usr_[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{12})\)", System.Text.RegularExpressions.RegexOptions.Compiled);
@@ -4731,6 +4882,44 @@ internal static class VrChatLogWatcher
             }
         }
         return new PlayerActivityLogResult(items.OrderByDescending(x => x.Timestamp).Take(limit).ToList());
+    }
+
+    public static List<LocalAvatarEncounter> RecentAvatarEncounters(int limit = 2000)
+    {
+        if (!Directory.Exists(LogDirectory)) return [];
+        var encounters = new List<LocalAvatarEncounter>();
+        foreach (var file in Directory.EnumerateFiles(LogDirectory, "output_log*.txt", SearchOption.TopDirectoryOnly).OrderByDescending(File.GetLastWriteTimeUtc).Take(60).Reverse())
+        {
+            var users = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var pending = new List<(string Name, string AvatarName, string Timestamp, string Room, string Location, int Remaining)>();
+            var room = "";
+            var location = "";
+            foreach (var line in ReadTailLines(file, 9000))
+            {
+                for (var i = pending.Count - 1; i >= 0; i--)
+                {
+                    var item = pending[i] with { Remaining = pending[i].Remaining - 1 };
+                    if (item.Remaining <= 0) pending.RemoveAt(i);
+                    else pending[i] = item;
+                }
+                var timestamp = line.Length >= 19 ? line[..19] : "";
+                var entering = line.IndexOf("[Behaviour] Entering Room:", StringComparison.OrdinalIgnoreCase);
+                if (entering >= 0) room = line[(entering + "[Behaviour] Entering Room:".Length)..].Trim();
+                var joining = line.IndexOf("[Behaviour] Joining ", StringComparison.OrdinalIgnoreCase);
+                if (joining >= 0 && !line.Contains("Joining or Creating Room:", StringComparison.OrdinalIgnoreCase)) location = line[(joining + "[Behaviour] Joining ".Length)..].Trim();
+                var joined = JoinedPlayerRegex.Match(line);
+                if (joined.Success) users[joined.Groups[1].Value.Trim()] = joined.Groups[2].Value.Trim();
+                var switching = Regex.Match(line, @"\[Behaviour\]\s+Switching\s+(.+?)\s+to avatar\s+(.+)$", RegexOptions.IgnoreCase);
+                if (switching.Success) pending.Add((switching.Groups[1].Value.Trim(), switching.Groups[2].Value.Trim(), timestamp, room, location, 45));
+                var avatar = AvatarIdRegex.Match(line);
+                if (!avatar.Success || !line.Contains("Loading Avatar Data:", StringComparison.OrdinalIgnoreCase) || pending.Count == 0) continue;
+                var match = pending[^1];
+                pending.RemoveAt(pending.Count - 1);
+                if (!users.TryGetValue(match.Name, out var userId) || string.IsNullOrWhiteSpace(userId)) continue;
+                encounters.Add(new LocalAvatarEncounter(avatar.Value, match.AvatarName, userId, match.Name, match.Timestamp, match.Room, match.Location, WorldIdFromLocation(match.Location), Path.GetFileName(file)));
+            }
+        }
+        return encounters.OrderByDescending(x => x.Timestamp).Take(Math.Clamp(limit, 1, 5000)).ToList();
     }
     public static LatestWorldLocationResult LatestWorldLocation()
     {
@@ -4908,11 +5097,6 @@ internal static class Diagnostics
             : new DiagnosticItem("VRChat Login", session.RequiresTwoFactor ? "Two-factor required" : "Signed out", "VRChat API features need login.", "warning"));
         items.Add(VrChatLogWatcher.Diagnostic());
 
-        var vrcx = database.GetVrcxStatus();
-        items.Add(vrcx.HasLocalDatabase
-            ? new DiagnosticItem("VRCX Database", "Found", vrcx.Path, "ok")
-            : new DiagnosticItem("VRCX Database", "Missing", "Remote VRCX-compatible search will be used.", "warning"));
-
         try
         {
             var pas = await database.GetPasUpdateStatusAsync();
@@ -4937,7 +5121,7 @@ internal static class Diagnostics
             items.Add(new DiagnosticItem("GitHub Updater", "Check failed", ex.Message, "error"));
         }
 
-        items.Add(new DiagnosticItem("AVTRZIP", "On demand", "Checked during database searches.", "info"));
+        items.AddRange(database.SourceDiagnostics());
         return new DiagnosticsResult(items);
     }
 }
@@ -5955,6 +6139,47 @@ internal sealed class VrChatClient
         }
         return new VrChatFavoriteGroupsResult(groups, input.Offset > 0 && groups.Count == limit, groupLimit, perGroupLimit);
     }
+
+    public async Task<VrChatFavoriteGroupsResult> GetFavoriteFriendGroupsAsync(PageInput input)
+    {
+        var limit = Math.Clamp(input.Limit <= 0 ? 100 : input.Limit, 1, 100);
+        var startOffset = Math.Max(0, input.Offset);
+        var currentUser = await GetCurrentUserAsync();
+        var favoriteLimits = await GetFavoriteLimitsAsync();
+        var groupLimit = HasSupporterTag(currentUser) ? favoriteLimits.FriendGroupLimit : DefaultFriendFavoriteGroupLimit;
+        var perGroupLimit = favoriteLimits.FriendPerGroupLimit;
+        var groups = new List<VrChatFavoriteGroupSummary>();
+        var offset = startOffset;
+        while (true)
+        {
+            var owner = string.IsNullOrWhiteSpace(currentUser.Id) ? "" : $"&ownerId={WebUtility.UrlEncode(currentUser.Id)}";
+            using var response = await _client.GetAsync($"favorite/groups?n={limit}&offset={offset}{owner}");
+            var json = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat favorite groups returned {(int)response.StatusCode}.");
+            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "[]" : json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) break;
+            var count = doc.RootElement.GetArrayLength();
+            if (count == 0) break;
+            foreach (var item in doc.RootElement.EnumerateArray())
+            {
+                var type = ReadString(item, "type") ?? "";
+                var name = ReadString(item, "name") ?? "";
+                if (!type.Contains("friend", StringComparison.OrdinalIgnoreCase) && !name.StartsWith("friends", StringComparison.OrdinalIgnoreCase)) continue;
+                groups.Add(new VrChatFavoriteGroupSummary(
+                    ReadString(item, "id") ?? "",
+                    name,
+                    ReadString(item, "displayName") ?? ReadString(item, "name") ?? "Favorite Friends",
+                    type,
+                    ReadString(item, "visibility") ?? "",
+                    JsonSerializer.Serialize(item, ProgramJson.Options)));
+            }
+            if (count < limit) break;
+            offset += count;
+            if (input.Offset > 0) break;
+        }
+        return new VrChatFavoriteGroupsResult(groups, input.Offset > 0 && groups.Count == limit, groupLimit, perGroupLimit);
+    }
+
     public async Task<object> AddFavoriteWorldAsync(WorldFavoriteInput input)
     {
         var worldId = input.Id?.Trim() ?? "";
@@ -7022,7 +7247,28 @@ internal sealed class VrChatClient
     private static int ReadInt(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var value) ? value : 0;
     private static bool ReadBool(JsonElement e, string name) => e.TryGetProperty(name, out var v) && (v.ValueKind == JsonValueKind.True || (v.ValueKind == JsonValueKind.String && bool.TryParse(v.GetString(), out var parsed) && parsed));
     private static string ReadValueString(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.String or JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False ? v.ToString() : "";
-    private static string ReadStringArray(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Array ? string.Join(", ", v.EnumerateArray().Select(x => x.GetString()).Where(x => !string.IsNullOrWhiteSpace(x))) : "";
+    private static string ReadStringArray(JsonElement e, string name)
+    {
+        if (!e.TryGetProperty(name, out var v)) return "";
+        if (v.ValueKind == JsonValueKind.String) return v.GetString() ?? "";
+        if (v.ValueKind != JsonValueKind.Array) return "";
+        return string.Join(", ", v.EnumerateArray().Select(ReadArrayStringValue).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase));
+    }
+
+    private static string ReadArrayStringValue(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.String) return element.GetString() ?? "";
+        if (element.ValueKind == JsonValueKind.Number || element.ValueKind == JsonValueKind.True || element.ValueKind == JsonValueKind.False) return element.ToString();
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            return ReadString(element, "name")
+                ?? ReadString(element, "tag")
+                ?? ReadString(element, "id")
+                ?? ReadString(element, "displayName")
+                ?? "";
+        }
+        return "";
+    }
     private static string ReadFullGroupShortCode(JsonElement e)
     {
         var shortCode = ReadString(e, "shortCode") ?? "";
@@ -7148,12 +7394,10 @@ internal sealed class AvatarDatabaseClient
     private const int VrcxRemotePageSize = 50;
     private const int VrcxRemoteRandomPageCeiling = 1000;
     private const int DatabaseFullSearchPageLimit = 1000;
-    private const string AvtrZipSearchBaseUrl = "https://g.avtr.zip/s/";
-    private const string AvtrZipAuthorBaseUrl = "https://g.avtr.zip/sa/";
-    private const string AvtrZipActionBaseUrl = "https://g.avtr.zip/a/";
-    private const string AvtrZipCaptchaUrl = "https://g.avtr.zip/v2/verify";
+    private const string AvtrZipActionBaseUrl = "https://avtr.zip/v3/g/a/";
+    private const int AvtrZipHomeActionCode = 40960;
     private const string PasDatabaseFileName = "pasavtrdb_pc.bin";
-    private const string PasDatabasePrimaryUrl = "https://gist.githubusercontent.com/Mwr247/a80c1f9060fc4fd46a8f00d589c47c5a/raw/pasavtrdb.txt";
+    private const string PasDatabasePrimaryUrl = "https://gist.githubusercontent.com/Prismic247/930d08f34c61e4282992cdb3afbafca0/raw/pasavtrdb.txt";
     private const string PasDatabaseBackupUrl = "https://prismic.net/vrc/pasavtrdb.txt";
     private static readonly Dictionary<string, AvatarDatabaseSearchResult> Cache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, AvatarDatabaseCountResult> CountCache = new(StringComparer.OrdinalIgnoreCase);
@@ -7217,6 +7461,60 @@ internal sealed class AvatarDatabaseClient
         return new VrcxDatabaseStatus(!string.IsNullOrWhiteSpace(path), path ?? "", AppPaths.DatabaseDirectory);
     }
 
+    public List<DiagnosticItem> SourceDiagnostics() =>
+    [
+        new DiagnosticItem(
+            "AVTRZIP source",
+            "Remote service",
+            $"AVTRZIP gateway: {AvtrZipActionBaseUrl} (fresh search actions are obtained from {AvtrZipActionUrl(AvtrZipHomeActionCode)})",
+            "info",
+            true),
+        new DiagnosticItem(
+            "Prismic PAS source",
+            "Downloaded file",
+            $"Downloads from: {PasDatabasePrimaryUrl}  |  Stored locally: {PasDatabasePath()}",
+            "info",
+            true),
+        new DiagnosticItem(
+            "VRCX-compatible source",
+            "Remote service",
+            VrcxRemoteDatabaseUrl,
+            "info",
+            true),
+        new DiagnosticItem(
+            "VRCNeph local encounter cache",
+            "Local only",
+            $"Built from VRChat output logs: {VrChatLogWatcher.LogDirectoryPath}",
+            "info",
+            true)
+    ];
+
+    public async Task<DatabaseSourceStatusResult> GetSourceStatusAsync()
+    {
+        var checks = new[]
+        {
+            CheckDatabaseSourceAsync("avtrzip", "AVTRZIP", async () => { await QueryAvtrZipAvatarsAsync("avatar", 1); }),
+            CheckDatabaseSourceAsync("pas", "Prismic PAS", async () => { await GetRemotePasDatabaseInfoAsync(); }),
+            CheckDatabaseSourceAsync("vrcx", "VRCX Remote DB", async () => { await GetRemoteVrcxStringAsync(RemoteVrcxUrl(new AvatarSearchInput("avatar", Limit: 1, Provider: "vrcx"), 1, 1)); })
+        };
+        return new DatabaseSourceStatusResult(await Task.WhenAll(checks));
+    }
+
+    public void RefreshLocalEncounterCache() => AppDataStore.Shared.UpsertLocalAvatarEncounters(VrChatLogWatcher.RecentAvatarEncounters());
+
+    private static async Task<DatabaseSourceStatus> CheckDatabaseSourceAsync(string provider, string name, Func<Task> check)
+    {
+        try
+        {
+            await check();
+            return new DatabaseSourceStatus(provider, name, true, "");
+        }
+        catch (Exception ex)
+        {
+            return new DatabaseSourceStatus(provider, name, false, ex.Message);
+        }
+    }
+
     public async Task<AvatarInput?> ResolveByImageAsync(AvatarImageResolveInput input, VrChatClient? vrchat = null)
     {
         var avatarId = input.AvatarId?.Trim() ?? "";
@@ -7230,14 +7528,8 @@ internal sealed class AvatarDatabaseClient
             if (byId is not null) return byId;
         }
 
-        var local = await ResolveLocalVrcxAvatarByImageAsync(imageKey, input.ImageUrl);
-        if (local is not null)
-        {
-            if (vrchat is not null) await HydrateAvtrZipResultsAsync(new List<AvatarInput> { local }, vrchat);
-            return local;
-        }
-
-        local = await ResolveLocalVrcxAvatarByFeedAsync(input.UserId, input.DisplayName, imageKey, input.ImageUrl);
+        RefreshLocalEncounterCache();
+        var local = AppDataStore.Shared.FindLocalAvatarEncounter(avatarId, input.UserId, input.DisplayName, name);
         if (local is not null)
         {
             if (vrchat is not null) await HydrateAvtrZipResultsAsync(new List<AvatarInput> { local }, vrchat);
@@ -7690,11 +7982,12 @@ internal sealed class AvatarDatabaseClient
             {
                 var index = Random.Shared.Next(database.FileAvatarCount);
                 if (!used.Add(index)) continue;
-                results.Add(ReadPasAvatar(database, index));
+                var avatar = ReadPasAvatar(database, index);
+                if (IsRandomDatabaseAvatarEligible(avatar)) results.Add(avatar);
             }
 
             if (vrchat is not null) await HydrateAvtrZipResultsAsync(results, vrchat);
-            return new AvatarDatabaseSearchResult(results, 1, false, DateTimeOffset.UtcNow);
+            return new AvatarDatabaseSearchResult(results.Where(IsRandomDatabaseAvatarEligible).Take(limit).ToList(), 1, false, DateTimeOffset.UtcNow);
         }
         finally
         {
@@ -7727,6 +8020,7 @@ internal sealed class AvatarDatabaseClient
             Shuffle(pageResults);
             foreach (var avatar in pageResults.Take(12))
             {
+                if (!IsRandomDatabaseAvatarEligible(avatar)) continue;
                 var key = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
                 if (string.IsNullOrWhiteSpace(key) || !seen.Add(key)) continue;
                 results.Add(avatar);
@@ -7750,8 +8044,9 @@ internal sealed class AvatarDatabaseClient
                 Shuffle(pageResults);
                 foreach (var avatar in pageResults.Take(12))
                 {
-                    var key = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
-                    if (string.IsNullOrWhiteSpace(key) || !seen.Add(key)) continue;
+                if (!IsRandomDatabaseAvatarEligible(avatar)) continue;
+                var key = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
+                if (string.IsNullOrWhiteSpace(key) || !seen.Add(key)) continue;
                     results.Add(avatar);
                     if (results.Count >= limit) break;
                 }
@@ -7760,7 +8055,7 @@ internal sealed class AvatarDatabaseClient
 
         Shuffle(results);
         if (vrchat is not null) await HydrateAvtrZipResultsAsync(results, vrchat);
-        return new AvatarDatabaseSearchResult(results.Take(limit).ToList(), 1, false, DateTimeOffset.UtcNow);
+        return new AvatarDatabaseSearchResult(results.Where(IsRandomDatabaseAvatarEligible).Take(limit).ToList(), 1, false, DateTimeOffset.UtcNow);
     }
 
     private static AvatarDatabaseSearchResult QueryPasDatabase(PasDatabaseData database, AvatarSearchInput input, int page, int limit)
@@ -8254,6 +8549,13 @@ internal sealed class AvatarDatabaseClient
             || value.Equals("unavailable", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsRandomDatabaseAvatarEligible(AvatarInput avatar)
+    {
+        var id = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
+        return !string.IsNullOrWhiteSpace(id)
+            && !IsUnavailableDatabaseReleaseStatus(avatar.ReleaseStatus);
+    }
+
     private static string MergeSourceTags(params string[] sources) =>
         string.Join(", ", sources
             .SelectMany(x => (x ?? "").Split(new[] { ',', '+', '|', ';' }, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
@@ -8324,33 +8626,17 @@ internal sealed class AvatarDatabaseClient
         await QueryGate.WaitAsync();
         try
         {
-            var firstPage = await LoadAvtrZipSearchPageAsync(AvtrZipSearchUrl(input.Query?.Trim() ?? ""));
-            if (firstPage.RandomCode < 0) throw new InvalidOperationException("AVTRZIP did not return a random-page action.");
             var results = new List<AvatarInput>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var randomCode = firstPage.RandomCode;
             var attempts = Math.Max(10, limit / 4 + 6);
 
             for (var attempt = 0; results.Count < limit && attempt < attempts; attempt++)
             {
-                var randomPage = await LoadAvtrZipSearchPageAsync(AvtrZipActionUrl(randomCode));
-                if (randomPage.RandomCode >= 0) randomCode = randomPage.RandomCode;
-                var pageResults = randomPage.Result.Results;
+                var pageResults = (await QueryAvtrZipAvatarsAsync(input.Query?.Trim() ?? "", 1)).Result.Results;
                 Shuffle(pageResults);
                 foreach (var avatar in pageResults.Take(5))
                 {
-                    var key = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
-                    if (string.IsNullOrWhiteSpace(key) || !seen.Add(key)) continue;
-                    results.Add(avatar);
-                    if (results.Count >= limit) break;
-                }
-            }
-
-            if (results.Count < limit)
-            {
-                Shuffle(firstPage.Result.Results);
-                foreach (var avatar in firstPage.Result.Results)
-                {
+                    if (!IsRandomDatabaseAvatarEligible(avatar)) continue;
                     var key = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
                     if (string.IsNullOrWhiteSpace(key) || !seen.Add(key)) continue;
                     results.Add(avatar);
@@ -8361,7 +8647,7 @@ internal sealed class AvatarDatabaseClient
             Shuffle(results);
             var finalResults = results.Take(limit).ToList();
             if (vrchat is not null) await HydrateAvtrZipResultsAsync(finalResults, vrchat);
-            return new AvatarDatabaseSearchResult(finalResults, 1, false, DateTimeOffset.UtcNow);
+            return new AvatarDatabaseSearchResult(finalResults.Where(IsRandomDatabaseAvatarEligible).Take(limit).ToList(), 1, false, DateTimeOffset.UtcNow);
         }
         finally
         {
@@ -8371,46 +8657,29 @@ internal sealed class AvatarDatabaseClient
 
     private static async Task<AvtrZipSearchPage> QueryAvtrZipAvatarsAsync(string query, int page)
     {
-        var firstPage = await LoadAvtrZipSearchPageAsync(AvtrZipSearchUrl(query));
-        if (page <= 1) return firstPage;
-        if (firstPage.InputPageCode < 0) throw new InvalidOperationException("AVTRZIP did not return a page-jump action.");
-        return await LoadAvtrZipSearchPageAsync(AvtrZipActionUrl(firstPage.InputPageCode, (page - 1).ToString()));
+        for (var retry = 0; retry < 2; retry++)
+        {
+            var home = await LoadAvtrZipSearchPageAsync(AvtrZipActionUrl(AvtrZipHomeActionCode));
+            if (home.SearchCode < 0) throw new InvalidOperationException("AVTRZIP did not return a fresh search action.");
+            var current = await LoadAvtrZipSearchPageAsync(AvtrZipActionUrl(home.SearchCode, query));
+            if (!current.IsReset)
+            {
+                for (var currentPage = 1; currentPage < Math.Max(1, page) && current.NextCode >= 0; currentPage++)
+                {
+                    current = await LoadAvtrZipSearchPageAsync(AvtrZipActionUrl(current.NextCode));
+                    if (current.IsReset) break;
+                }
+
+                if (!current.IsReset) return current;
+            }
+        }
+
+        throw new InvalidOperationException("AVTRZIP search session expired. Please try again.");
     }
 
     private static async Task<AvtrZipSearchPage> QueryAvtrZipAuthorAvatarsAsync(string query, int page)
     {
-        var authorCode = await LoadAvtrZipAuthorSearchCodeAsync(query);
-        if (authorCode < 0)
-        {
-            return new AvtrZipSearchPage(new AvatarDatabaseSearchResult([], 1, false, DateTimeOffset.UtcNow), 0, 0, -1, -1, -1);
-        }
-
-        var firstPage = await LoadAvtrZipSearchPageAsync(AvtrZipActionUrl(authorCode));
-        if (page <= 1) return firstPage;
-        if (firstPage.InputPageCode < 0) throw new InvalidOperationException("AVTRZIP did not return a page-jump action.");
-        return await LoadAvtrZipSearchPageAsync(AvtrZipActionUrl(firstPage.InputPageCode, (page - 1).ToString()));
-    }
-
-    private static async Task<int> LoadAvtrZipAuthorSearchCodeAsync(string query)
-    {
-        var body = await GetAvtrZipStringAsync(AvtrZipAuthorUrl(query));
-        using var document = JsonDocument.Parse(body);
-        ThrowIfAvtrZipCaptcha(document.RootElement);
-        var root = document.RootElement;
-        if (!ReadString(root, "type").Equals("AuthorListing", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException($"AVTRZIP returned {ReadString(root, "type")} instead of author results.");
-        }
-
-        if (!root.TryGetProperty("results", out var results) || results.ValueKind != JsonValueKind.Array) return -1;
-        JsonElement? fallback = null;
-        foreach (var author in results.EnumerateArray())
-        {
-            fallback ??= author;
-            if (ReadString(author, "name").Equals(query, StringComparison.OrdinalIgnoreCase)) return ReadCode(author, "search");
-        }
-
-        return fallback.HasValue ? ReadCode(fallback.Value, "search") : -1;
+        return await QueryAvtrZipAvatarsAsync(query, page);
     }
 
     private static async Task<AvtrZipSearchPage> LoadAvtrZipSearchPageAsync(string url)
@@ -8418,61 +8687,76 @@ internal sealed class AvatarDatabaseClient
         var body = await GetAvtrZipStringAsync(url);
         using var document = JsonDocument.Parse(body);
         var root = document.RootElement;
-        ThrowIfAvtrZipCaptcha(root);
-        if (!ReadString(root, "type").Equals("SearchAvatars", StringComparison.OrdinalIgnoreCase))
+        var responseType = ReadString(root, "responseType");
+        if (responseType.Equals("reset", StringComparison.OrdinalIgnoreCase))
         {
-            var type = ReadString(root, "type");
-            throw new InvalidOperationException(string.IsNullOrWhiteSpace(type) ? "AVTRZIP returned an unexpected response." : $"AVTRZIP returned {type} instead of avatars.");
+            return new AvtrZipSearchPage(new AvatarDatabaseSearchResult([], 1, false, DateTimeOffset.UtcNow), 0, -1, -1, true);
         }
+        if (!responseType.Equals("search", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("AVTRZIP returned an unexpected response.");
 
-        var totalCount = ReadNestedInt(root, "meta", "totalCount");
-        var currentPageIndex = ReadNestedInt(root, "pagination", "current");
-        var totalPages = ReadNestedInt(root, "pagination", "total");
-        var nextCode = ReadNestedCode(root, "pagination", "codes", "next");
-        var randomCode = ReadNestedCode(root, "pagination", "codes", "random");
-        var inputPageCode = ReadNestedCode(root, "pagination", "codes", "inputPage");
-        var page = Math.Max(1, currentPageIndex + 1);
-        var hasMore = nextCode >= 0 || (totalPages > 0 && currentPageIndex + 1 < totalPages);
+        var totalCount = ReadInt(root, "n");
+        var nextCode = ReadInt(root, "cNext", -1);
+        var searchCode = ReadInt(root, "cSearch", -1);
+        var hasMore = root.TryGetProperty("more", out var more) && more.ValueKind == JsonValueKind.True || nextCode >= 0;
         var results = new List<AvatarInput>();
 
-        if (root.TryGetProperty("results", out var resultElements) && resultElements.ValueKind == JsonValueKind.Array)
+        if (root.TryGetProperty("rId", out var resultIds) && resultIds.ValueKind == JsonValueKind.Array)
         {
-            foreach (var item in resultElements.EnumerateArray())
+            var index = 0;
+            foreach (var id in resultIds.EnumerateArray())
             {
-                var avatar = ReadAvtrZipAvatar(item);
+                var avatar = ReadAvtrZipAvatar(root, index++, id.GetString() ?? "");
                 if (!string.IsNullOrWhiteSpace(avatar.AvatarId)) results.Add(avatar);
             }
         }
 
-        return new AvtrZipSearchPage(new AvatarDatabaseSearchResult(results, page, hasMore, DateTimeOffset.UtcNow), totalCount, totalPages, nextCode, randomCode, inputPageCode);
+        return new AvtrZipSearchPage(new AvatarDatabaseSearchResult(results, 1, hasMore, DateTimeOffset.UtcNow), totalCount, nextCode, searchCode, false);
     }
 
-    private static AvatarInput ReadAvtrZipAvatar(JsonElement item)
+    private static AvatarInput ReadAvtrZipAvatar(JsonElement root, int index, string id)
     {
-        var id = ReadString(item, "id");
-        var name = ReadString(item, "name");
-        var authorName = ReadString(item, "authorName");
-        var createdAt = ReadString(item, "createdAt");
-        var tags = CombineAvtrZipTags(ReadString(item, "tags"), ReadString(item, "aiTags"));
-        var useCount = ReadInt(item, "useCount");
-        var imageUrl = FirstString(item, "imageUrl", "thumbnailImageUrl", "image", "thumbnail");
+        var name = ReadAvtrZipArrayString(root, "rNm", index);
+        var authorName = ReadAvtrZipArrayString(root, "rAn", index);
+        var authorId = ReadAvtrZipArrayString(root, "rAi", index);
+        var tags = CombineAvtrZipTags(ReadAvtrZipArrayText(root, "rTg", index), ReadAvtrZipArrayText(root, "rAt", index));
+        var useCount = ReadAvtrZipArrayInt(root, "rUc", index);
 
         return new AvatarInput
         {
             AvatarId = id,
             Name = string.IsNullOrWhiteSpace(name) ? id : name,
             AuthorName = authorName,
-            ImageUrl = imageUrl,
-            ThumbnailImageUrl = imageUrl,
+            AuthorId = authorId,
             ReleaseStatus = "public",
             Tags = tags,
-            SourceUrl = string.IsNullOrWhiteSpace(id) ? "https://g.avtr.zip/" : $"https://vrchat.com/home/avatar/{id}",
+            SourceUrl = string.IsNullOrWhiteSpace(id) ? "https://avtr.zip/" : $"https://vrchat.com/home/avatar/{id}",
             Notes = useCount > 0 ? $"Found in the AVTRZIP database. Used {useCount} times." : "Found in the AVTRZIP database.",
-            RawJson = item.GetRawText(),
+            RawJson = root.GetRawText(),
             Source = "avtrzip",
-            RemoteCreatedAt = createdAt,
-            RemoteUpdatedAt = createdAt
         };
+    }
+
+    private static string ReadAvtrZipArrayString(JsonElement root, string name, int index)
+    {
+        if (!root.TryGetProperty(name, out var values) || values.ValueKind != JsonValueKind.Array || index >= values.GetArrayLength()) return "";
+        var value = values[index];
+        return value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : value.ToString();
+    }
+
+    private static string ReadAvtrZipArrayText(JsonElement root, string name, int index)
+    {
+        if (!root.TryGetProperty(name, out var values) || values.ValueKind != JsonValueKind.Array || index >= values.GetArrayLength()) return "";
+        var value = values[index];
+        return value.ValueKind == JsonValueKind.Array
+            ? string.Join(", ", value.EnumerateArray().Select(x => x.GetString() ?? x.ToString()).Where(x => !string.IsNullOrWhiteSpace(x)))
+            : value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : value.ToString();
+    }
+
+    private static int ReadAvtrZipArrayInt(JsonElement root, string name, int index)
+    {
+        if (!root.TryGetProperty(name, out var values) || values.ValueKind != JsonValueKind.Array || index >= values.GetArrayLength()) return 0;
+        var value = values[index];
+        return value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number) ? number : 0;
     }
 
     private static async Task HydrateAvtrZipResultsAsync(List<AvatarInput> avatars, VrChatClient vrchat)
@@ -8551,17 +8835,6 @@ internal sealed class AvatarDatabaseClient
         return body;
     }
 
-    private static void ThrowIfAvtrZipCaptcha(JsonElement root)
-    {
-        var status = ReadString(root, "status");
-        if (status.Equals("Pending", StringComparison.OrdinalIgnoreCase) || root.TryGetProperty("encodedString", out _))
-        {
-            throw new InvalidOperationException($"AVTRZIP captcha required. Complete verification at {AvtrZipCaptchaUrl}, then try again.");
-        }
-    }
-
-    private static string AvtrZipSearchUrl(string query) => string.IsNullOrWhiteSpace(query) ? AvtrZipSearchBaseUrl : AvtrZipSearchBaseUrl + Uri.EscapeDataString(query);
-    private static string AvtrZipAuthorUrl(string query) => AvtrZipAuthorBaseUrl + Uri.EscapeDataString(query);
     private static string AvtrZipActionUrl(int code, string input = "") => AvtrZipActionBaseUrl + code + "/" + (string.IsNullOrWhiteSpace(input) ? "" : Uri.EscapeDataString(input));
     private static bool IsAllProvider(AvatarSearchInput input) => string.Equals(input.Provider, "all", StringComparison.OrdinalIgnoreCase);
     private static bool IsAvtrZipProvider(AvatarSearchInput input) => string.Equals(input.Provider, "avtrzip", StringComparison.OrdinalIgnoreCase);
@@ -9448,11 +9721,11 @@ internal sealed record SyncConflictRecord(long Id, string DetectedAt, string Kin
 internal sealed record SyncConflictListResult(List<SyncConflictRecord> Conflicts);
 internal sealed record MetadataHistoryRecord(string ChangedAt, string AvatarId, string ChangeType, string OldName, string NewName, string OldAuthor, string NewAuthor, string OldStatus, string NewStatus, string OldRemoteUpdatedAt, string NewRemoteUpdatedAt);
 internal sealed record MetadataHistoryListResult(List<MetadataHistoryRecord> Items);
-internal sealed record DiagnosticItem(string Name, string Status, string Detail, string Level = "info");
+internal sealed record DiagnosticItem(string Name, string Status, string Detail, string Level = "info", bool IsSource = false);
 internal sealed record DiagnosticsResult(List<DiagnosticItem> Items);
 internal sealed record ExportResult(string Path);
 internal sealed record GroupClearResult(LibraryData Library, int Removed, string BackupPath);
-internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayHotkey = "F8", string OverlayDefaultPanel = "avatars", int OverlayOpacity = 85, int OverlayScale = 100, int OverlayX = 8, int OverlayY = 16, int OverlayWidth = 360, int OverlayHeight = 519, int SchemaVersion = 12);
+internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayHotkey = "F8", string DatabaseRandomHotkey = "Ctrl+Alt+R", string OverlayDefaultPanel = "avatars", int OverlayOpacity = 85, int OverlayScale = 100, int OverlayX = 8, int OverlayY = 16, int OverlayWidth = 360, int OverlayHeight = 519, int SchemaVersion = 13);
 internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx", string SearchMode = "phrase");
 internal sealed record AvatarListResult(List<AvatarInput> Avatars);
 internal sealed record AvatarImageResolveInput(string AvatarId = "", string ImageUrl = "", string Name = "", string UserId = "", string DisplayName = "");
@@ -9460,8 +9733,10 @@ internal sealed record AvatarDatabaseSearchResult(List<AvatarInput> Results, int
 internal sealed record AvatarDatabaseCountResult(string Query, int Total, DateTimeOffset CachedAt);
 internal sealed record AvatarDatabaseCountProgress(int Discovered, bool Counting, bool Finished);
 internal sealed record VrcxDatabaseStatus(bool HasLocalDatabase, string Path, string DatabaseDirectory);
+internal sealed record DatabaseSourceStatus(string Provider, string Name, bool Available, string Message);
+internal sealed record DatabaseSourceStatusResult(DatabaseSourceStatus[] Sources);
 internal sealed record PasUpdateStatus(bool HasLocalFile, bool HasUpdate, string LocalFileDate, string RemoteFileDate, long LocalBytes, long RemoteBytes, string Url, string Message);
-internal sealed record AvtrZipSearchPage(AvatarDatabaseSearchResult Result, int TotalCount, int TotalPages, int NextCode, int RandomCode, int InputPageCode);
+internal sealed record AvtrZipSearchPage(AvatarDatabaseSearchResult Result, int TotalCount, int NextCode, int SearchCode, bool IsReset);
 internal sealed record PasDatabaseData(string Path, string PlatformLabel, string FileDate, int AvatarCount, int AuthorCount, int FileAvatarCount, int FileAuthorCount, byte[] DynamicBytes, byte[] AvatarIds, uint[] AuthorIds, string[] AvatarNames, string[] AuthorNames);
 internal sealed record VrcxFeedAvatarRow(string CreatedAt, string UserId, string DisplayName, string OwnerId, string AvatarName, string CurrentImageUrl, string CurrentThumbnailImageUrl);
 internal sealed record PasDatabaseInfo(string Location, string FileDate, long ContentLength, DateTimeOffset? LastModifiedUtc, string ETag, int AvatarCount, int AuthorCount, int FileAvatarCount, int FileAuthorCount, bool HeaderVerified);
@@ -9515,6 +9790,7 @@ internal sealed record EncounterHistoryItem(string Timestamp, string Action, str
 internal sealed record EncounterHistoryResult(List<EncounterHistoryItem> Items);
 internal sealed record PlayerActivityLogItem(string Timestamp, string Action, string DisplayName, string UserId, string WorldName, string Location, string WorldId, string LogFile);
 internal sealed record PlayerActivityLogResult(List<PlayerActivityLogItem> Items);
+internal sealed record LocalAvatarEncounter(string AvatarId, string AvatarName, string UserId, string DisplayName, string Timestamp, string WorldName, string Location, string WorldId, string LogFile);
 internal sealed record WorldVisitHistoryItem(string Timestamp, string Action, string WorldName, string Location, string LogFile);
 internal sealed record WorldVisitHistoryResult(List<WorldVisitHistoryItem> Items);
 internal sealed record VrChatRemoteGroup(string Tag, string DisplayName, int SortOrder);

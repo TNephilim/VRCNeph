@@ -352,6 +352,57 @@ button { font: inherit; }
   border-color: var(--overlay-line-strong);
   background: var(--overlay-accent-soft);
 }
+.overlay-actions button:disabled {
+  cursor: default;
+  opacity: .42;
+}
+.overlay-actions button:disabled:hover {
+  border-color: var(--overlay-line);
+  background: var(--overlay-bg-soft);
+}
+.overlay-actions button.danger {
+  border-color: rgba(255, 105, 130, .48);
+  color: #ff9aad;
+}
+.overlay-actions button.danger:hover {
+  background: rgba(255, 82, 112, .16);
+}
+.overlay-actions button.icon-action {
+  position: relative;
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+.overlay-actions button.icon-action::before,
+.overlay-actions button.icon-action::after {
+  content: "";
+  position: absolute;
+  display: block;
+}
+.overlay-actions button.icon-action.add::before,
+.overlay-actions button.icon-action.add::after {
+  width: 12px;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.overlay-actions button.icon-action.add::after {
+  transform: rotate(90deg);
+}
+.overlay-actions button.svg-icon svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+}
+.overlay-actions button.svg-icon svg path:first-child {
+  fill: none;
+}
 .overlay-database-controls {
   grid-column: 1 / -1;
   width: 100%;
@@ -365,10 +416,10 @@ button { font: inherit; }
   align-items: stretch;
 }
 .overlay-database-controls.panel-sort-controls-avatars {
-  grid-template-columns: minmax(142px, 1fr) 76px 88px;
+  grid-template-columns: minmax(82px, 1fr) 28px 28px 28px 62px 74px;
 }
 .overlay-database-controls.panel-sort-controls-worlds {
-  grid-template-columns: minmax(164px, 1fr) 82px;
+  grid-template-columns: minmax(104px, 1fr) 28px 28px 28px 70px;
 }
 .overlay-database-controls.expanded {
   grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr) 88px auto auto;
@@ -757,6 +808,33 @@ button { font: inherit; }
 .row-action.danger {
   color: var(--overlay-danger);
   border-color: rgba(255, 107, 107, .36);
+}
+.row-action.favorite-star,
+.detail-actions .favorite-star {
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  color: var(--overlay-gold);
+  border-color: rgba(241, 201, 100, .45);
+}
+.row-action.favorite-star svg,
+.detail-actions .favorite-star svg {
+  width: 15px;
+  height: 15px;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  fill: transparent;
+}
+.row-action.favorite-star.active,
+.detail-actions .favorite-star.active {
+  background: rgba(241, 201, 100, .16);
+}
+.row-action.favorite-star.active svg,
+.detail-actions .favorite-star.active svg {
+  fill: currentColor;
 }
 
 .empty-panel,

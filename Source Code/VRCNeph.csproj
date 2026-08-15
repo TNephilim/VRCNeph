@@ -14,10 +14,10 @@
     <Company>VRCNeph</Company>
     <Authors>VRCNeph</Authors>
     <Copyright></Copyright>
-    <Version>1.0.23</Version>
-    <AssemblyVersion>1.0.23.0</AssemblyVersion>
-    <FileVersion>1.0.23.0</FileVersion>
-    <InformationalVersion>1.0.23</InformationalVersion>
+    <Version>1.0.24</Version>
+    <AssemblyVersion>1.0.24.0</AssemblyVersion>
+    <FileVersion>1.0.24.0</FileVersion>
+    <InformationalVersion>1.0.24</InformationalVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <UseWindowsForms>true</UseWindowsForms>

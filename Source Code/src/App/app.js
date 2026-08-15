@@ -1,5 +1,7 @@
-const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", overlayEnabled: true, overlayHotkey: "F8", overlayDefaultPanel: "avatars", overlayOpacity: 85, overlayScale: 100, overlayX: 8, overlayY: 16, overlayWidth: 360, overlayHeight: 519, schemaVersion: 12 };
+const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", overlayEnabled: true, overlayHotkey: "F8", databaseRandomHotkey: "Ctrl+Alt+R", overlayDefaultPanel: "avatars", overlayOpacity: 85, overlayScale: 100, overlayX: 8, overlayY: 16, overlayWidth: 360, overlayHeight: 519, schemaVersion: 13 };
 const OVERLAY_TAB_TIP_SEEN_KEY = "vrcneph.overlay.tabTipSeen.v1";
+const DATABASE_HIDE_OLDER_AVATARS_KEY = "vrcneph.database.hideOlderAvatars";
+const DATABASE_OLDER_AVATAR_CUTOFF_MS = Date.parse("2020-08-06T00:00:00Z");
 const LIVE_SYNC_TIMING = {
   favoriteSyncMs: 45 * 1000,
   safetySyncMs: 10 * 60 * 1000,
@@ -49,6 +51,7 @@ const state = {
   avatarDatabaseRandomPages: [],
   avatarDatabaseSearchHistory: [],
   avatarDatabaseScope: "avatar",
+  avatarDatabaseHideOlderAvatars: false,
   pasUpdatePromptShown: false,
   pasUpdateBusy: false,
   syncedAvatarEdit: { groupId: "", avatarIds: [], backupPath: "", applying: false },
@@ -61,6 +64,7 @@ const state = {
   avatarRouletteRunId: 0,
   avatarRouletteMode: 'favorites',
   avatarRoulettePendingMode: 'favorites',
+  randomDatabaseHotkeyRunning: false,
   appHistory: [],
   appHistoryIndex: -1,
   applyingAppHistory: false,
@@ -73,6 +77,7 @@ const state = {
   pendingMoveAvatarId: "",
   pendingMoveAvatarIds: [],
   pendingAvatarGroupAction: "",
+  pendingFavoriteAvatarAction: null,
   copyGroupDialogMode: "copy",
   pendingCopyTargetGroupId: "",
   pendingCurrentAvatarSave: null,
@@ -124,7 +129,7 @@ const state = {
   worldUploadedWorlds: [],
   worldSearchHistory: [],
   vrchat: { isLoggedIn: false, requiresTwoFactor: false, twoFactorMethods: [], user: null },
-  social: { loaded: false, friendsLoaded: false, worldsLoaded: false, busy: false, friends: [], favoriteFriends: [], worlds: [], worldSections: [], worldDiscoverySectionsCache: [], favoriteWorlds: [], favoriteWorldGroups: [], selectedWorldGroup: "", location: null, selectedType: "", selectedItem: null, selectToken: 0, friendTab: "info", worldTab: "info", sidebarTab: "friends" },
+  social: { loaded: false, friendsLoaded: false, worldsLoaded: false, busy: false, friends: [], favoriteFriends: [], favoriteFriendGroups: [], worlds: [], worldSections: [], worldDiscoverySectionsCache: [], favoriteWorlds: [], favoriteWorldGroups: [], selectedWorldGroup: "", selectedFriendFavoriteGroup: "all", location: null, selectedType: "", selectedItem: null, selectToken: 0, friendTab: "info", worldTab: "info", sidebarTab: "friends" },
   worldInstanceFilter: { enabled: false, minPlayers: 1, hideLocked: false, hideFull: false },
   notifications: { loaded: false, busy: false, items: [], filter: "all" },
   playerActivityLog: { loaded: false, busy: false, items: [], page: 0, pageSize: 50 },
@@ -411,6 +416,7 @@ async function loadSettings() {
       backgroundEffect: String(saved.backgroundEffect || ""),
       overlayEnabled: saved.overlayEnabled !== false,
       overlayHotkey: String(saved.overlayHotkey || DEFAULT_SETTINGS.overlayHotkey),
+      databaseRandomHotkey: String(saved.databaseRandomHotkey || DEFAULT_SETTINGS.databaseRandomHotkey),
       overlayDefaultPanel: ["avatars", "worlds", "friends", "session", "current", "database", "recent"].includes(String(saved.overlayDefaultPanel || "")) ? (saved.overlayDefaultPanel === "session" || saved.overlayDefaultPanel === "current" ? "database" : saved.overlayDefaultPanel) : DEFAULT_SETTINGS.overlayDefaultPanel,
       overlayOpacity: Number.isFinite(saved.overlayOpacity) ? Math.min(100, Math.max(45, Number(saved.overlayOpacity))) : DEFAULT_SETTINGS.overlayOpacity,
       overlayScale: Number.isFinite(saved.overlayScale) ? Math.min(135, Math.max(80, Number(saved.overlayScale))) : DEFAULT_SETTINGS.overlayScale,
@@ -479,6 +485,7 @@ function updatePipelineStatusText() {
 function handleAppEvent(name, data) {
   if (name === "vrchatPipeline") handleVrchatPipelineEvent(data);
   if (name === "vrchatPipelineStatus") handleVrchatPipelineStatus(data);
+  if (name === "randomDatabaseAvatarHotkey") void handleRandomDatabaseHotkey();
   if (name === "appCloseRequested") void handleAppCloseRequested(data);
   if (name === "libraryChanged") handleLibraryChanged(data);
 }
@@ -630,6 +637,22 @@ function currentAvatarFavoriteTargetStatus(groupId = state.activeGroupId, avatar
   if (id && avatarAlreadyInGroup({ avatarId: id, id }, groupId)) return { ok: false, code: "duplicate", group, reason: "This avatar is already in that group." };
   if (isSyncedGroup(groupId) && groupAvatars(groupId).length >= SYNCED_GROUP_AVATAR_LIMIT) return { ok: false, code: "full", group, reason: `Synced VRChat groups can only contain ${SYNCED_GROUP_AVATAR_LIMIT} avatars.` };
   return { ok: true, code: "", group, reason: "" };
+}
+function avatarFavoriteEntry(avatar = {}) {
+  const ids = avatarIdentityValues(avatar);
+  if (!ids.size) return null;
+  return state.library.avatars.find((item) =>
+    !isPinnedSystemGroup(item.groupId) &&
+    [...avatarIdentityValues(item)].some((id) => ids.has(id))
+  ) || null;
+}
+function avatarFavoriteStarIconHtml() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9L12 3Z"></path></svg>`;
+}
+function avatarFavoriteStarButtonHtml(avatar = {}) {
+  const active = Boolean(avatarFavoriteEntry(avatar));
+  const title = active ? "Edit favorite" : "Favorite avatar";
+  return `<button class="avatar-card-save avatar-favorite-star ${active ? "active" : ""}" type="button" title="${escapeAttr(title)}" aria-label="${escapeAttr(title)}">${avatarFavoriteStarIconHtml()}</button>`;
 }
 function isGroupReorderLocked(group) {
   if (!group) return false;
@@ -1275,7 +1298,7 @@ function renderAvatars() {
     const reorderTitle = canReorderCurrentGroup ? "Drag to reorder" : canDragAvatarsToGroup ? "Drag to copy to another group" : "Enable edit mode to reorder synced avatars";
     const release = releaseStatusBadge(avatar.releaseStatus);
     const syncBadge = pendingFavorite ? `<span class="avatar-sync-badge" title="${escapeAttr(pendingFavorite.desired === "remove" ? "Unfavorite syncing" : "Favorite syncing")}">${pendingFavorite.desired === "remove" ? "Removing" : "Syncing"}</span>` : "";
-    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name)}</div><div class="meta-line">${escapeHtml(displayAvatarAuthorName(avatar) || "Author unavailable")}</div><div class="badges">${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${platformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}</div></div></button><div class="avatar-card-footer"><button class="avatar-position" type="button" title="${reorderTitle}" ${canReorderCurrentGroup ? "" : "disabled"}>#${listPosition(orderedAvatars, avatar.id)}</button>${syncBadge}<button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
+    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name)}</div><div class="meta-line">${escapeHtml(displayAvatarAuthorName(avatar) || "Author unavailable")}</div><div class="badges">${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${platformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}</div></div></button><div class="avatar-card-footer"><button class="avatar-position" type="button" title="${reorderTitle}" ${canReorderCurrentGroup ? "" : "disabled"}>#${listPosition(orderedAvatars, avatar.id)}</button>${syncBadge}<div class="avatar-card-actions">${avatarFavoriteStarButtonHtml(avatar)}<button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div></div>`;
     bindAvatarImageFallback(card);
     card.querySelector("button").addEventListener("click", (event) => {
       if (event.ctrlKey || event.metaKey || event.shiftKey) {
@@ -1291,9 +1314,10 @@ function renderAvatars() {
       openAvatarDialog(avatar);
     });
     if (canReorderCurrentGroup) card.querySelector(".avatar-position").addEventListener("click", () => openPositionDialog("avatar", avatar));
+    card.querySelector(".avatar-card-save").addEventListener("click", (event) => { event.stopPropagation(); openAvatarFavoriteActionDialog(avatar); });
     card.querySelector(".avatar-card-equip").addEventListener("click", (event) => { event.stopPropagation(); equipAvatar(avatar.avatarId || avatar.id); });
     const startAvatarDrag = (event) => {
-      if (event.target.closest(".avatar-card-equip, .avatar-position")) {
+      if (event.target.closest(".avatar-card-save, .avatar-card-equip, .avatar-position")) {
         event.preventDefault();
         return;
       }
@@ -1693,6 +1717,7 @@ function openAvatarGroupActionDialog(avatar, action) {
   const plural = ids.length > 1;
   $("saveAvatarGroupDialog").querySelector("h3").textContent = action === "copy" ? (plural ? "Copy Avatars" : "Copy Avatar") : (plural ? "Move Avatars" : "Move Avatar");
   $("confirmSaveAvatarGroupBtn").textContent = action === "copy" ? (plural ? "Copy Avatars" : "Copy Avatar") : (plural ? "Move Avatars" : "Move Avatar");
+  $("unfavoriteAvatarGroupBtn").hidden = true;
   $("saveAvatarGroupName").textContent = plural ? `Choose a group for ${ids.length} selected avatars.` : `Choose a group for "${avatar.name || avatar.avatarId || "this avatar"}".`;
   fillSaveAvatarGroupSelect(avatar.groupId ?? state.activeGroupId);
   $("saveAvatarGroupDialog").showModal();
@@ -1704,15 +1729,33 @@ function openSaveCurrentAvatarGroupDialog(avatar) {
   state.pendingCurrentAvatarSave = avatar;
   $("saveAvatarGroupDialog").querySelector("h3").textContent = "Save Current Avatar";
   $("confirmSaveAvatarGroupBtn").textContent = "Save Avatar";
+  $("unfavoriteAvatarGroupBtn").hidden = true;
   $("saveAvatarGroupName").textContent = `Choose a group for "${avatar.name || avatar.avatarId || avatar.id || "your current avatar"}".`;
   fillSaveAvatarGroupSelect(state.activeGroupId);
+  $("saveAvatarGroupDialog").showModal();
+}
+function openAvatarFavoriteActionDialog(avatar = {}) {
+  const favorite = avatarFavoriteEntry(avatar);
+  state.pendingMoveAvatarId = favorite?.id || "";
+  state.pendingMoveAvatarIds = favorite?.id ? [favorite.id] : [];
+  state.pendingAvatarGroupAction = "favorite";
+  state.pendingFavoriteAvatarAction = { avatar, favoriteId: favorite?.id || "" };
+  $("saveAvatarGroupDialog").querySelector("h3").textContent = favorite ? "Favorite Options" : "Save Avatar";
+  $("confirmSaveAvatarGroupBtn").textContent = favorite ? "Apply" : "Save Avatar";
+  $("saveAvatarGroupName").textContent = favorite
+    ? `Choose a group for "${avatar.name || avatar.avatarId || avatar.id || "this avatar"}" or unfavorite it.`
+    : `Choose a group for "${avatar.name || avatar.avatarId || avatar.id || "this avatar"}".`;
+  $("unfavoriteAvatarGroupBtn").hidden = !favorite;
+  fillSaveAvatarGroupSelect(favorite?.groupId ?? state.activeGroupId);
   $("saveAvatarGroupDialog").showModal();
 }
 function resetAvatarGroupDialogMode() {
   state.pendingMoveAvatarId = "";
   state.pendingMoveAvatarIds = [];
   state.pendingAvatarGroupAction = "";
+  state.pendingFavoriteAvatarAction = null;
   state.pendingCurrentAvatarSave = null;
+  $("unfavoriteAvatarGroupBtn").hidden = true;
   $("saveAvatarGroupDialog").querySelector("h3").textContent = "Save Avatar";
   $("confirmSaveAvatarGroupBtn").textContent = "Save Avatar";
 }
@@ -2315,20 +2358,17 @@ function updateAvatarDatabaseCopy() {
       ? "All-database searches take longer. Pick one database for quicker results."
     : "Start typing at least three characters to search VRCX-compatible avatars.";
 }
-async function maybeShowVrcxDatabaseNotice() {
-  if (avatarDatabaseProvider() !== "vrcx") return;
+async function checkDatabaseSourceAvailability({ deferSummary = false } = {}) {
   try {
-    const status = await api("avatarDatabaseVrcxStatus");
-    if (status?.hasLocalDatabase) return;
-    await confirmAction({
-      title: "Local VRCX Database Not Found",
-      message: "No local VRCX database was found. VRCNeph will still use remote VRCX search, so VRCX is not required for database search. VRCX is only needed if you want it to build or update its own local cache outside VRCNeph.",
-      confirmLabel: "OK",
-      confirmClass: "primary",
-      hideCancel: true
-    });
+    const result = await api("avatarDatabaseSourceStatus", {}, 45000);
+    const unavailable = (result?.sources || []).filter((source) => !source?.available);
+    if (!unavailable.length) return;
+    const details = unavailable.map((source) => `${source.name || source.provider}: ${source.message || "Could not connect."}`).join("\n");
+    addStartupSummaryItem("Database Sources Unavailable", `VRCNeph could not connect to:\n${details}`);
   } catch (e) {
-    toast(e.message);
+    addStartupSummaryItem("Database Source Check Failed", e.message || "VRCNeph could not check the database sources.");
+  } finally {
+    if (!deferSummary) scheduleStartupSummary();
   }
 }
 function resetAvatarDatabaseResults() {
@@ -2350,7 +2390,7 @@ function resetAvatarDatabaseResults() {
   updateAvatarDatabaseCopy();
 }
 
-async function checkPasDatabaseUpdate() {
+async function checkPasDatabaseUpdate({ deferSummary = false } = {}) {
   if (state.pasUpdatePromptShown || state.pasUpdateBusy) return;
   state.pasUpdateBusy = true;
   try {
@@ -2361,7 +2401,7 @@ async function checkPasDatabaseUpdate() {
       startupSummary.pasStatus = status;
       const updateDetail = status.message || `Prismic PAS has an update (${status.localFileDate || "local cache"} -> ${status.remoteFileDate || "remote database"}).`;
       addStartupSummaryItem("Prismic PAS Update", status.hasLocalFile ? updateDetail : "Prismic PAS is not cached in Documents yet.");
-      scheduleStartupSummary();
+      if (!deferSummary) scheduleStartupSummary();
       return;
     }
     const updateDetail = status.message || `Prismic PAS has an update (${status.localFileDate || "local cache"} -> ${status.remoteFileDate || "remote database"}).`;
@@ -2384,6 +2424,14 @@ async function checkPasDatabaseUpdate() {
   } finally {
     state.pasUpdateBusy = false;
   }
+}
+
+async function initializeDatabaseStartupStatus() {
+  await Promise.all([
+    checkPasDatabaseUpdate({ deferSummary: true }),
+    checkDatabaseSourceAvailability({ deferSummary: true })
+  ]);
+  scheduleStartupSummary();
 }
 
 function databaseSearchFieldPayload() {
@@ -2561,7 +2609,7 @@ async function runRandomAvatarDatabasePage() {
       if (token !== state.avatarDatabaseSearchToken) return;
       page = filterRandomDatabaseAvatars([...page, ...(result.results || [])]).slice(0, 50);
     }
-    if (!page.length) throw new Error(`No random ${providerLabel} avatars found outside Recent or Deleted.`);
+    if (!page.length) throw new Error(`No safe random ${providerLabel} avatars found outside Recent, Deleted, Private, or invalid entries.`);
     state.avatarDatabaseMode = "random";
     state.avatarDatabaseRandomPages.push(page);
     state.avatarDatabaseResults = state.avatarDatabaseRandomPages.flat();
@@ -2585,7 +2633,7 @@ async function fetchRandomDatabaseAvatar() {
     const result = await api("avatarDatabaseRandom", { provider, query: "", limit: 50, page: 1 }, 120000);
     results = filterRandomDatabaseAvatars(result.results || []);
   }
-  if (!results.length) throw new Error(`No random ${avatarDatabaseProviderLabel(provider)} avatars found.`);
+  if (!results.length) throw new Error(`No safe random ${avatarDatabaseProviderLabel(provider)} avatars found.`);
   return results[Math.floor(Math.random() * results.length)];
 }
 async function equipRandomDatabaseAvatar({ quiet = false } = {}) {
@@ -2607,6 +2655,17 @@ async function equipRandomDatabaseAvatar({ quiet = false } = {}) {
     throw e;
   } finally {
     if (!quiet) $("equipRandomAvatarBtn").disabled = false;
+  }
+}
+async function handleRandomDatabaseHotkey() {
+  if (state.randomDatabaseHotkeyRunning) return;
+  state.randomDatabaseHotkeyRunning = true;
+  try {
+    toast("Random database avatar hotkey.");
+    await equipRandomDatabaseAvatar();
+  } catch {
+  } finally {
+    state.randomDatabaseHotkeyRunning = false;
   }
 }
 function openAvatarRouletteDialog(mode = 'favorites') {
@@ -2654,6 +2713,29 @@ function updateRouletteButtons() {
   $("favRouletteBtn").setAttribute("aria-pressed", favoritesRunning ? "true" : "false");
 }
 function avatarRandomId(avatar) { return String(avatar?.avatarId || avatar?.id || "").trim().toLowerCase(); }
+function databaseAvatarUnavailableStatus(avatar = {}) {
+  const status = String(avatar.releaseStatus || "").trim().toLowerCase();
+  return ["private", "deleted", "hidden", "unavailable"].includes(status);
+}
+function databaseAvatarRandomEligible(avatar = {}) {
+  const id = avatar.avatarId || avatar.id;
+  return avatarIdLooksValid(id) && !databaseAvatarUnavailableStatus(avatar);
+}
+function databaseAvatarKnownOlderThan3Era(avatar = {}) {
+  const versionText = `${avatar.version || ""} ${avatar.tags || ""} ${avatar.rawJson || ""}`.toLowerCase();
+  if (/\bavatar\s*3\b|\bavatar3\b|\bsdk\s*3\b|\bav3\b/.test(versionText)) return false;
+  const dates = [avatar.remoteUpdatedAt, avatar.updatedAt, avatar.remoteCreatedAt, avatar.createdAt]
+    .map((value) => Date.parse(value || ""))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (!dates.length) return false;
+  return Math.max(...dates) < DATABASE_OLDER_AVATAR_CUTOFF_MS;
+}
+function visibleDatabaseAvatarResults(results = []) {
+  const deduped = dedupeAvatarDatabaseResults(results || []);
+  return state.avatarDatabaseHideOlderAvatars
+    ? deduped.filter((avatar) => !databaseAvatarKnownOlderThan3Era(avatar))
+    : deduped;
+}
 function excludedRandomAvatarIds() {
   const excluded = new Set();
   for (const avatar of state.library.avatars || []) {
@@ -2665,7 +2747,7 @@ function excludedRandomAvatarIds() {
 }
 function filterRandomDatabaseAvatars(results = []) {
   const excluded = excludedRandomAvatarIds();
-  return dedupeAvatarDatabaseResults(results || []).filter((avatar) => avatarRandomId(avatar) && !excluded.has(avatarRandomId(avatar)));
+  return dedupeAvatarDatabaseResults(results || []).filter((avatar) => databaseAvatarRandomEligible(avatar) && !excluded.has(avatarRandomId(avatar)));
 }
 function randomFavoriteAvatar() {
   const blockedGroups = new Set(["updated_avatars", "uploaded_avatars"]);
@@ -2902,7 +2984,7 @@ function startAvatarRoulette() {
   void runAvatarRouletteTick();
 }
 function updateAvatarDatabaseStatus() {
-  const count = state.avatarDatabaseResults.length;
+  const count = visibleDatabaseAvatarResults(state.avatarDatabaseResults).length;
   const providerLabel = avatarDatabaseProviderLabel(state.avatarDatabaseProvider);
   if (!count) { $("avatarDatabaseStatus").textContent = `No ${providerLabel} avatars found.`; return; }
   if (state.avatarDatabaseTotal == null) {
@@ -2986,7 +3068,7 @@ function currentAvatarDatabasePageResults() {
 }
 function sortedAvatarDatabaseResults() {
   const sort = $("databaseSortSelect").value;
-  const results = dedupeAvatarDatabaseResults(currentAvatarDatabasePageResults());
+  const results = visibleDatabaseAvatarResults(currentAvatarDatabasePageResults());
   if (sort === "updatedDesc") return results.sort((a, b) => new Date(b.remoteUpdatedAt || b.updatedAt || 0) - new Date(a.remoteUpdatedAt || a.updatedAt || 0));
   if (sort === "createdDesc") return results.sort((a, b) => new Date(b.remoteCreatedAt || b.createdAt || 0) - new Date(a.remoteCreatedAt || a.createdAt || 0));
   if (sort === "nameAsc") return results.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
@@ -3122,15 +3204,15 @@ function renderAvatarDatabaseResults() {
     card.className = "avatar-card database-avatar-card";
     card.dataset.avatarId = avatar.avatarId || avatar.id;
     card.draggable = true;
-    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name || avatar.avatarId)}</div><div class="meta-line">${escapeHtml(displayAvatarAuthorName(avatar) || "Author unavailable")}</div><div class="badges">${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${databasePlatformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}${sourceBadges}</div></div></button><div class="avatar-card-footer"><button class="avatar-card-save primary" type="button" title="Save avatar">Save</button><button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div>`;
+    card.innerHTML = `<button type="button"><div class="thumb">${image ? `<img src="${escapeAttr(image)}" alt="">` : "<span>No thumbnail</span>"}</div><div class="avatar-info"><div class="avatar-name">${escapeHtml(avatar.name || avatar.avatarId)}</div><div class="meta-line">${escapeHtml(displayAvatarAuthorName(avatar) || "Author unavailable")}</div><div class="badges">${release ? `<span class="badge ${release.className}">${escapeHtml(release.label)}</span>` : ""}${databasePlatformBadgeLabels(avatar.platforms).map((p) => `<span class="badge ${p.className}">${escapeHtml(p.label)}</span>`).join("")}${sourceBadges}</div></div></button><div class="avatar-card-footer"><div class="avatar-card-actions">${avatarFavoriteStarButtonHtml(avatar)}<button class="avatar-card-equip primary" type="button" title="Equip avatar">Equip</button></div></div>`;
     bindAvatarImageFallback(card);
     card.querySelector("button").addEventListener("click", () => openAvatarDialog({ ...avatar, groupId: state.activeGroupId }));
-    card.querySelector(".avatar-card-save").addEventListener("click", (event) => { event.stopPropagation(); openAddDatabaseAvatarDialog(avatar); });
+    card.querySelector(".avatar-card-save").addEventListener("click", (event) => { event.stopPropagation(); openAvatarFavoriteActionDialog(avatar); });
     card.querySelector(".avatar-card-equip").addEventListener("click", (event) => { event.stopPropagation(); equipAvatar(avatar.avatarId || avatar.id); });
     card.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       showContextMenu(event.clientX, event.clientY, [
-        { label: "Add to Group", action: () => openAddDatabaseAvatarDialog(avatar) }
+        { label: "Favorite Options", action: () => openAvatarFavoriteActionDialog(avatar) }
       ]);
     });
     card.addEventListener("dragstart", (event) => {
@@ -3324,7 +3406,8 @@ function updateDatabaseFieldMenuButton() {
   const platforms = ["databasePlatformPcToggle", "databasePlatformAndroidToggle", "databasePlatformIosToggle"].filter((id) => $(id).checked).length;
   const authorOnly = (state.avatarDatabaseScope || "avatar") === "author";
   const details = !authorOnly && !$("databaseSearchDescriptionTagsToggle").checked ? 1 : 0;
-  const checked = platforms + details;
+  const older = $("databaseHideOlderAvatarsToggle")?.checked ? 1 : 0;
+  const checked = platforms + details + older;
   $("databaseFieldMenuBtn").textContent = checked ? `Filters (${checked})` : "Filters";
 }
 function updateDatabaseScopeControls() {
@@ -3571,11 +3654,15 @@ function renderSocialSidebar() {
   }
   if (state.activePage === "friends") {
     title.textContent = "Friends";
-    list.innerHTML = state.social.friends.length || state.social.favoriteFriends.length ? friendsSidebarHtml(state.social.friends, state.social.favoriteFriends) : `<div class="group-empty">No friends loaded.</div>`;
+    list.innerHTML = state.social.friends.length || state.social.favoriteFriends.length ? friendsSidebarHtml(state.social.friends, state.social.favoriteFriends, state.social.favoriteFriendGroups) : `<div class="group-empty">No friends loaded.</div>`;
     list.querySelectorAll("[data-social-sidebar-tab]").forEach((button) => button.addEventListener("click", () => {
       state.social.sidebarTab = button.dataset.socialSidebarTab || "friends";
       renderSocialSidebar();
     }));
+    list.querySelector("[data-friend-favorite-group-select]")?.addEventListener("change", (event) => {
+      state.social.selectedFriendFavoriteGroup = event.target.value || "all";
+      renderSocialSidebar();
+    });
     list.querySelectorAll("[data-friend-id]").forEach((button) => button.addEventListener("click", () => selectSocialFriend(button.dataset.friendId, { clickedPresence: button.dataset.presence })));
     return;
   }
@@ -5285,6 +5372,7 @@ function applyOverlaySettingsControls() {
   $("overlayEnabledToggle").checked = state.settings.overlayEnabled !== false;
   $("overlayDefaultPanelSelect").value = state.settings.overlayDefaultPanel || DEFAULT_SETTINGS.overlayDefaultPanel;
   $("overlayHotkeyInput").value = state.settings.overlayHotkey || DEFAULT_SETTINGS.overlayHotkey;
+  $("databaseRandomHotkeyInput").value = state.settings.databaseRandomHotkey || DEFAULT_SETTINGS.databaseRandomHotkey;
   applyOverlayOpacityControls();
   applyOverlayScaleControls();
 }
@@ -5690,7 +5778,7 @@ async function loadDiagnostics() {
     const result = await api("diagnosticsGet", {}, 45000);
     const items = result.items || [];
     list.innerHTML = items.length
-      ? items.map((item) => `<div class="diagnostic-item ${escapeAttr(String(item.level || "info").toLowerCase())}"><div><strong>${escapeHtml(item.name || "")}</strong><span>${escapeHtml(item.detail || "")}</span></div><small>${escapeHtml(item.status || "")}</small></div>`).join("")
+      ? items.map((item) => `<div class="diagnostic-item ${escapeAttr(String(item.level || "info").toLowerCase())}${item.isSource ? " source-item" : ""}"><div><strong>${escapeHtml(item.name || "")}</strong><span>${escapeHtml(item.detail || "")}</span></div><small>${escapeHtml(item.status || "")}</small></div>`).join("")
       : `<div class="settings-empty"><h4>No diagnostics</h4></div>`;
   } catch (e) {
     list.innerHTML = `<div class="settings-empty"><h4>Could not load diagnostics</h4><p>${escapeHtml(e.message)}</p></div>`;
@@ -5719,11 +5807,29 @@ function worldSocialStatusBase() {
   if (query) return state.social.worlds.length ? `${state.social.worlds.length} world search results` : "No world search results";
   return `${state.social.worldSections.length || 0} world sections loaded`;
 }
+async function loadAllFavoriteFriends() {
+  const all = [];
+  const seen = new Set();
+  let offset = 0;
+  while (offset < 1000) {
+    const page = await api("vrchatFavoriteFriends", { limit: 100, offset }, 45000).catch(() => ({ friends: [], hasMore: false }));
+    const friends = page.friends || [];
+    for (const friend of friends) {
+      const key = String(friend.id || "").toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      all.push(friend);
+    }
+    if (!page.hasMore || !friends.length) break;
+    offset += friends.length;
+  }
+  return { friends: all };
+}
 async function loadVrchatSocial({ worldsOnly = false } = {}) {
   if (!state.vrchat?.isLoggedIn) {
     clearTimeout(state.friendDetailLoadTimer);
     state.friendDetailLoadTimer = null;
-    state.social = { ...state.social, loaded: false, friendsLoaded: false, worldsLoaded: false, busy: false, friends: [], favoriteFriends: [], worlds: [], worldSections: [], worldDiscoverySectionsCache: [], favoriteWorlds: [], favoriteWorldGroups: [], selectedWorldGroup: "", location: null, selectedType: "", selectedItem: null, friendTab: "info", worldTab: "info" };
+    state.social = { ...state.social, loaded: false, friendsLoaded: false, worldsLoaded: false, busy: false, friends: [], favoriteFriends: [], favoriteFriendGroups: [], worlds: [], worldSections: [], worldDiscoverySectionsCache: [], favoriteWorlds: [], favoriteWorldGroups: [], selectedWorldGroup: "", selectedFriendFavoriteGroup: "all", location: null, selectedType: "", selectedItem: null, friendTab: "info", worldTab: "info" };
     setSocialHeaderStatus("friends", "Log in to load VRChat friends.");
     setSocialHeaderStatus("worlds", "Log in to search VRChat worlds.");
     renderVrchatSocial();
@@ -5756,15 +5862,17 @@ async function loadVrchatSocial({ worldsOnly = false } = {}) {
       state.social.loaded = state.social.friendsLoaded || state.social.worldsLoaded;
       setSocialHeaderStatus("worlds", query ? (state.social.worlds.length ? `${state.social.worlds.length} world search results.` : "No world search results.") : `${state.social.worldSections.length || 0} world sections loaded.`);
     } else {
-      const [location, friends, favoriteFriends] = await Promise.all([
+      const [location, friends, favoriteFriends, favoriteFriendGroups] = await Promise.all([
         api("vrchatCurrentLocation", {}, 45000),
         api("vrchatFriendsList", { limit: 100, offset: 0 }, 45000),
-        api("vrchatFavoriteFriends", { limit: 100, offset: 0 }, 45000).catch(() => ({ friends: [] }))
+        loadAllFavoriteFriends(),
+        api("vrchatFavoriteFriendGroups", { limit: 100, offset: 0 }, 45000).catch(() => ({ groups: [] }))
       ]);
       const listedFriends = friends.friends || [];
       rememberFriendPresences(listedFriends, "friend-list");
       state.social.location = location;
       state.social.favoriteFriends = (favoriteFriends.friends || []).map((friend) => applyFriendPresenceAuthority(friend));
+      state.social.favoriteFriendGroups = favoriteFriendGroups.groups || [];
       state.social.friends = mergeFriendLists(listedFriends, state.social.favoriteFriends);
       rememberFriendPresences(state.social.friends, "friend-list");
       recordPlayerNamesFromUsers(state.social.friends, "Friends");
@@ -5784,10 +5892,11 @@ async function loadVrchatSocial({ worldsOnly = false } = {}) {
 async function refreshFriendsLive({ forceRender = false } = {}) {
   if (!state.vrchat?.isLoggedIn || state.social.busy) return;
   try {
-    const [location, friends, favoriteFriends] = await Promise.all([
+    const [location, friends, favoriteFriends, favoriteFriendGroups] = await Promise.all([
       api("vrchatCurrentLocation", {}, 45000).catch(() => null),
       api("vrchatFriendsList", { limit: 100, offset: 0 }, 45000),
-      api("vrchatFavoriteFriends", { limit: 100, offset: 0 }, 45000).catch(() => ({ friends: [] }))
+      loadAllFavoriteFriends(),
+      api("vrchatFavoriteFriendGroups", { limit: 100, offset: 0 }, 45000).catch(() => ({ groups: [] }))
     ]);
     if (location) {
       state.social.location = location;
@@ -5801,6 +5910,7 @@ async function refreshFriendsLive({ forceRender = false } = {}) {
     const listedFriends = friends.friends || [];
     rememberFriendPresences(listedFriends, "friend-list-live");
     state.social.favoriteFriends = (favoriteFriends.friends || []).map((friend) => applyFriendPresenceAuthority(friend));
+    state.social.favoriteFriendGroups = favoriteFriendGroups.groups || state.social.favoriteFriendGroups || [];
     state.social.friends = mergeFriendLists(listedFriends, state.social.favoriteFriends);
     state.social.friendsLoaded = true;
     state.social.loaded = true;
@@ -8399,17 +8509,51 @@ function friendsSectionHtml(items) {
   const offline = items.filter((friend) => friendPresence(friend) === "offline");
   return `${online.length ? `<div class="social-list-section"><h4>Online</h4>${online.map(friendHtml).join("")}</div>` : ""}${active.length ? `<div class="social-list-section"><h4>Active</h4>${active.map(friendHtml).join("")}</div>` : ""}${offline.length ? `<div class="social-list-section"><h4>Offline</h4>${offline.map(friendHtml).join("")}</div>` : ""}`;
 }
-function friendsSidebarHtml(friends = [], favoriteFriends = []) {
+function friendsSidebarHtml(friends = [], favoriteFriends = [], favoriteGroups = []) {
   const tab = state.social.sidebarTab === "favorites" ? "favorites" : "friends";
+  const groupCount = favoriteFriendGroupsModel(favoriteFriends, favoriteGroups).length - 1;
   const tabs = `<div class="social-sidebar-tabs">
     <button class="${tab === "friends" ? "active" : ""}" data-social-sidebar-tab="friends" type="button">Friends</button>
-    <button class="${tab === "favorites" ? "active" : ""}" data-social-sidebar-tab="favorites" type="button">Favorites</button>
+    <button class="${tab === "favorites" ? "active" : ""}" data-social-sidebar-tab="favorites" type="button">${groupCount > 1 ? "Favorite Groups" : "Favorites"}</button>
   </div>`;
   if (tab === "favorites") {
-    const favoritesHtml = favoriteFriendsSectionHtml(favoriteFriends);
-    return `${tabs}${favoritesHtml || `<div class="group-empty">No favorite friends loaded.</div>`}`;
+    const groups = favoriteFriendGroupsModel(favoriteFriends, favoriteGroups);
+    const selected = selectedFavoriteFriendGroup(groups);
+    const selector = groups.length > 1 ? favoriteFriendGroupSelectHtml(groups, selected?.key || "all") : "";
+    const favoritesHtml = selected?.friends?.length ? friendsSectionHtml(selected.friends) : "";
+    return `${tabs}${selector}${favoritesHtml || `<div class="group-empty">No favorite friends loaded.</div>`}`;
   }
   return `${tabs}${friends?.length ? friendsSectionHtml(friends) : `<div class="group-empty">No friends loaded.</div>`}`;
+}
+function favoriteFriendGroupsModel(favorites = [], favoriteGroups = []) {
+  const normalized = (favorites || []).map((friend) => applyFriendPresenceAuthority(friend));
+  const labels = new Map((favoriteGroups || []).map((group) => [String(group.name || "").toLowerCase(), group.displayName || group.name || "Favorite Friends"]));
+  const groups = [{ key: "all", label: "All Favorite Friends", friends: normalized }];
+  const byTag = new Map();
+  for (const group of favoriteGroups || []) {
+    const key = group.name || group.id || "";
+    if (!key) continue;
+    byTag.set(key, { key, label: group.displayName || group.name || "Favorite Friends", friends: [] });
+  }
+  for (const friend of normalized) {
+    const tags = splitCsv(friend.favoriteTags);
+    const friendTags = tags.length ? tags : ["Favorite Friends"];
+    for (const tag of friendTags) {
+      const key = tag || "Favorite Friends";
+      if (!byTag.has(key)) byTag.set(key, { key, label: labels.get(String(key).toLowerCase()) || favoriteGroupLabel(key, "Favorite Friends"), friends: [] });
+      byTag.get(key).friends.push(friend);
+    }
+  }
+  return groups.concat([...byTag.values()].filter((group) => group.friends.length));
+}
+function selectedFavoriteFriendGroup(groups = favoriteFriendGroupsModel(state.social.favoriteFriends, state.social.favoriteFriendGroups)) {
+  const selected = state.social.selectedFriendFavoriteGroup || "all";
+  const group = groups.find((item) => item.key === selected) || groups[0] || null;
+  state.social.selectedFriendFavoriteGroup = group?.key || "all";
+  return group;
+}
+function favoriteFriendGroupSelectHtml(groups, selectedKey) {
+  return `<label class="social-sidebar-select-label"><span>Favorite group</span><select class="social-sidebar-select" data-friend-favorite-group-select>${groups.map((group) => `<option value="${escapeAttr(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml(group.label)} (${group.friends.length})</option>`).join("")}</select></label>`;
 }
 function favoriteFriendsSectionHtml(favorites = []) {
   if (!favorites.length) return "";
@@ -8536,6 +8680,11 @@ function saveWorldLocalGroups() {
   ensureDefaultWorldLocalGroup();
   localStorage.setItem("vrcneph.worldGroups", JSON.stringify(state.worldLocalGroups || []));
 }
+window.addEventListener("storage", (event) => {
+  if (event.key !== "vrcneph.worldGroups") return;
+  loadWorldLocalGroups();
+  if (state.activePage === "worlds") renderVrchatSocial();
+});
 function isDefaultWorldLocalGroup(key = "") { return key === DEFAULT_WORLD_GROUP_KEY; }
 function uniqueWorldGroupName(name, excludeKey = "") {
   const base = (name || "New World Group").trim() || "New World Group";
@@ -11513,6 +11662,29 @@ async function deleteAvatarById(id, name) {
     toast(e.message);
   }
 }
+async function unfavoriteAvatarEntry(avatar) {
+  if (!avatar?.id) return;
+  const syncedRemoval = syncedAvatarRemovalPayload(avatar);
+  if (syncedRemoval && toastDuplicatePendingFavoriteAction(syncedRemoval.avatarId, syncedRemoval.groupId, "remove")) return;
+  try {
+    trackPendingSyncedAvatarRemovals([syncedRemoval]);
+    state.library = await api("deleteAvatar", { id: avatar.id });
+    render();
+    enqueueSyncedAvatarRemovals([syncedRemoval]);
+  } catch (e) {
+    if (syncedRemoval) clearPendingSyncedAvatarRemoval(syncedRemoval.avatarId, syncedRemoval.groupId);
+    toast(e.message);
+  }
+}
+async function unfavoritePendingFavoriteAvatar() {
+  const pending = state.pendingFavoriteAvatarAction || {};
+  const favorite = pending.favoriteId
+    ? state.library.avatars.find((item) => item.id === pending.favoriteId)
+    : avatarFavoriteEntry(pending.avatar || {});
+  resetAvatarGroupDialogMode();
+  $("saveAvatarGroupDialog").close();
+  if (favorite) await unfavoriteAvatarEntry(favorite);
+}
 async function deleteSelectedAvatars(ids) {
   const avatars = ids.map((id) => state.library.avatars.find((x) => x.id === id)).filter(Boolean);
   if (!avatars.length) return;
@@ -12601,6 +12773,19 @@ $("resetOverlayHotkeyBtn").addEventListener("click", () => {
   state.settings.overlayHotkey = DEFAULT_SETTINGS.overlayHotkey;
   applyOverlaySettingsControls();
 });
+$("databaseRandomHotkeyInput").addEventListener("focus", () => { $("databaseRandomHotkeyInput").value = "Press keys..."; });
+$("databaseRandomHotkeyInput").addEventListener("blur", () => { $("databaseRandomHotkeyInput").value = state.settings.databaseRandomHotkey || DEFAULT_SETTINGS.databaseRandomHotkey; });
+$("databaseRandomHotkeyInput").addEventListener("keydown", (event) => {
+  event.preventDefault();
+  const hotkey = overlayHotkeyFromEvent(event);
+  if (!hotkey) return;
+  state.settings.databaseRandomHotkey = hotkey;
+  $("databaseRandomHotkeyInput").value = hotkey;
+});
+$("resetDatabaseRandomHotkeyBtn").addEventListener("click", () => {
+  state.settings.databaseRandomHotkey = DEFAULT_SETTINGS.databaseRandomHotkey;
+  applyOverlaySettingsControls();
+});
 $("overlayOpacityInput").addEventListener("input", () => { state.settings.overlayOpacity = Number($("overlayOpacityInput").value); applyOverlayOpacityControls(); });
 $("overlayOpacityNumber").addEventListener("input", syncOverlayOpacityFromNumber);
 $("overlayOpacityPrevBtn").addEventListener("click", () => stepOverlayOpacity(-1));
@@ -12755,11 +12940,41 @@ $("saveAvatarBtn").addEventListener("click", (event) => { event.preventDefault()
 $("deleteAvatarBtn").addEventListener("click", async (event) => { event.preventDefault(); await deleteAvatarById(state.editingAvatarId, $("avatarNameInput").value); closeAvatarDetails(); });
 $("equipAvatarBtn").addEventListener("click", async () => equipAvatar($("avatarIdInput").value));
 $("closeAvatarDetailsBtn").addEventListener("click", closeAvatarDetails);
+$("unfavoriteAvatarGroupBtn").addEventListener("click", async (event) => {
+  event.preventDefault();
+  await unfavoritePendingFavoriteAvatar();
+});
 $("confirmSaveAvatarGroupBtn").addEventListener("click", async (event) => {
   event.preventDefault();
   try {
     const groupId = $("saveAvatarGroupInput").value;
     if (!groupId) { toast("Choose a group."); return; }
+    if (state.pendingAvatarGroupAction === "favorite") {
+      const pending = state.pendingFavoriteAvatarAction || {};
+      const avatar = pending.avatar || {};
+      const favorite = pending.favoriteId
+        ? state.library.avatars.find((item) => item.id === pending.favoriteId)
+        : avatarFavoriteEntry(avatar);
+      if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage(groupId)); return; }
+      const avatarId = avatar.avatarId || avatar.id || favorite?.avatarId || favorite?.id;
+      if (favorite && favorite.groupId === groupId) {
+        resetAvatarGroupDialogMode();
+        $("saveAvatarGroupDialog").close();
+        return;
+      }
+      const targetStatus = currentAvatarFavoriteTargetStatus(groupId, avatarId);
+      if (!targetStatus.ok) {
+        if (targetStatus.code === "duplicate") showAvatarAlreadyInGroup(avatar, targetStatus.group || activeGroup());
+        else if (targetStatus.code === "full") showSyncedGroupFullPopup();
+        else toast(targetStatus.reason);
+        return;
+      }
+      resetAvatarGroupDialogMode();
+      $("saveAvatarGroupDialog").close();
+      if (favorite) await moveAvatarToGroup(favorite.id, groupId, { confirm: false });
+      else await saveDatabaseAvatarToGroup(avatar, groupId, { focusTarget: true });
+      return;
+    }
     if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage(groupId)); return; }
     if (state.pendingAvatarGroupAction === "saveCurrent") {
       const avatar = state.pendingCurrentAvatarSave;
@@ -12880,17 +13095,14 @@ $("clearAvatarDatabaseBtn").addEventListener("click", (event) => {
 $("avatarDatabaseProviderMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "avatarDatabaseProviderSelect", "avatarDatabaseProviderMenu", "avatarDatabaseProviderMenuBtn", () => {
   state.avatarDatabaseProvider = avatarDatabaseProvider();
   resetAvatarDatabaseResults();
-  maybeShowVrcxDatabaseNotice();
 }));
 $("avatarDatabaseProviderMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "avatarDatabaseProviderSelect", "avatarDatabaseProviderMenuBtn", () => {
   state.avatarDatabaseProvider = avatarDatabaseProvider();
   resetAvatarDatabaseResults();
-  maybeShowVrcxDatabaseNotice();
 }), { passive: false });
 $("avatarDatabaseProviderSelect").addEventListener("change", () => {
   state.avatarDatabaseProvider = avatarDatabaseProvider();
   resetAvatarDatabaseResults();
-  maybeShowVrcxDatabaseNotice();
 });
 $("databaseSearchScopeControl").querySelectorAll("[data-database-scope]").forEach((button) => button.addEventListener("click", () => {
   state.avatarDatabaseScope = button.dataset.databaseScope || "avatar";
@@ -12899,6 +13111,14 @@ $("databaseSearchScopeControl").querySelectorAll("[data-database-scope]").forEac
   updateDatabaseFieldMenuButton();
 }));
 ["databaseSearchDescriptionTagsToggle", "databasePlatformPcToggle", "databasePlatformAndroidToggle", "databasePlatformIosToggle"].forEach((id) => $(id).addEventListener("change", () => { state.avatarDatabaseAuthorId = ""; updateDatabaseFieldMenuButton(); }));
+$("databaseHideOlderAvatarsToggle").addEventListener("change", () => {
+  state.avatarDatabaseHideOlderAvatars = $("databaseHideOlderAvatarsToggle").checked;
+  saveLocalJson(DATABASE_HIDE_OLDER_AVATARS_KEY, state.avatarDatabaseHideOlderAvatars);
+  state.avatarDatabasePage = 0;
+  updateDatabaseFieldMenuButton();
+  renderAvatarDatabaseResults();
+  updateAvatarDatabaseStatus();
+});
 $("randomAvatarDatabaseBtn").addEventListener("click", runRandomAvatarDatabasePage);
 $("equipRandomAvatarBtn").addEventListener("click", () => equipRandomDatabaseAvatar().catch(() => {}));
 $("avatarRouletteBtn").addEventListener("click", () => openAvatarRouletteDialog('database'));
@@ -13279,6 +13499,8 @@ function dragHasJsonFile(event) {
   return items.some((item) => item.kind === "file" && (!item.type || item.type === "application/json" || item.type === "text/json" || item.type === "text/plain"));
 }
 
+state.avatarDatabaseHideOlderAvatars = Boolean(loadLocalJson(DATABASE_HIDE_OLDER_AVATARS_KEY, false));
+$("databaseHideOlderAvatarsToggle").checked = state.avatarDatabaseHideOlderAvatars;
 updateAvatarDatabaseCopy();
 updateDatabaseScopeControls();
 updateDatabaseFieldMenuButton();
@@ -13295,7 +13517,7 @@ Promise.all([loadLibrary(), loadSettings(), loadMessageHistory()])
     requestAnimationFrame(applyGridSize);
     void loadBackground();
     void loadSession();
-    setTimeout(checkPasDatabaseUpdate, 1200);
+    setTimeout(initializeDatabaseStartupStatus, 1200);
     setTimeout(() => checkForUpdates({ automatic: true }), 2500);
   })
   .catch((e) => toast(e.message));

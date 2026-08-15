@@ -87,6 +87,19 @@
     </form>
   </dialog>
 
+  <dialog id="groupDialog" class="overlay-dialog">
+    <form method="dialog">
+      <h2 id="groupTitle">Group</h2>
+      <p id="groupMessage">Create or edit an overlay group.</p>
+      <label>Name<input id="groupNameInput" type="text" maxlength="80"></label>
+      <label>Description<textarea id="groupDescriptionInput" rows="3" maxlength="220"></textarea></label>
+      <menu>
+        <button id="groupCancelBtn" type="button">Cancel</button>
+        <button id="groupOkBtn" class="primary" type="button">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
   <dialog id="rouletteDialog" class="overlay-dialog">
     <form method="dialog">
       <h2 id="rouletteTitle">Avatar Roulette</h2>
