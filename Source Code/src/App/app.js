@@ -2745,7 +2745,10 @@ function excludedRandomAvatarIds() {
 }
 function filterRandomDatabaseAvatars(results = []) {
   const excluded = excludedRandomAvatarIds();
-  return dedupeAvatarDatabaseResults(results || []).filter((avatar) => databaseAvatarRandomEligible(avatar) && !excluded.has(avatarRandomId(avatar)));
+  return dedupeAvatarDatabaseResults(results || []).filter((avatar) => {
+    if (!databaseAvatarRandomEligible(avatar) || excluded.has(avatarRandomId(avatar))) return false;
+    return !state.avatarDatabaseHideOlderAvatars || !databaseAvatarKnownOlderThan3Era(avatar);
+  });
 }
 function randomFavoriteAvatar() {
   const blockedGroups = new Set(["updated_avatars", "uploaded_avatars"]);
