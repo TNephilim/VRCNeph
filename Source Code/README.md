@@ -56,7 +56,6 @@ The database tab can search:
 
 - VRCNeph's local encounter cache, built from VRChat player and avatar logs.
 - The remote VRCX-compatible avatar database.
-- AVTRZIP.
 - Prismic PAS.
 
 VRCNeph's local encounter cache is stored in its own local database and is refreshed from VRChat logs while VRCNeph is open. The remote VRCX-compatible database is a separate search source and does not require VRCX to be installed.
@@ -73,7 +72,7 @@ Important folders and files:
 
 - `groups\library.json` stores the main local avatar library.
 - `export\` stores exported JSON backups.
-- `database\` can hold local database files.
+- `Database\VRCNeph.sqlite3` stores VRCNeph's local encounter database, alongside downloaded database files.
 - `groups\vrchat-session.json` stores the saved VRChat session.
 
 Deleting the app executable does not delete your library.

@@ -134,7 +134,7 @@
       </section>
       <section id="databasePage" class="workspace-page" hidden>
         <header class="toolbar">
-          <div class="toolbar-title"><h2>Database Search</h2><div class="toolbar-status-row"><p id="avatarDatabaseStatus">Search AVTRZIP, Prismic PAS, and VRCX DB.</p><span id="rouletteCountdownDb" class="roulette-countdown toolbar-countdown" hidden></span></div></div>
+          <div class="toolbar-title"><h2>Database Search</h2><div class="toolbar-status-row"><p id="avatarDatabaseStatus">Search Prismic PAS and VRCX DB.</p><span id="rouletteCountdownDb" class="roulette-countdown toolbar-countdown" hidden></span></div></div>
           <div class="toolbar-actions database-toolbar-actions">
             <div class="database-search-history-wrap">
               <input id="avatarDatabaseSearchInput" type="search" placeholder="Search all databases" autocomplete="off">
@@ -178,7 +178,6 @@
               <div id="avatarDatabaseProviderMenu" class="sort-menu" hidden></div>
               <select id="avatarDatabaseProviderSelect" class="database-provider-select" title="Database source" aria-label="Database source" hidden>
                 <option value="all" selected>All Databases</option>
-                <option value="avtrzip">AVTRZIP</option>
                 <option value="pas">Prismic PAS</option>
                 <option value="vrcx">VRCX DB</option>
               </select>
@@ -570,7 +569,6 @@
   </form></dialog>
 
   <dialog id="imagePreviewDialog" class="image-preview-dialog"><button type="button" class="icon-button image-preview-close" data-close="imagePreviewDialog">x</button><img id="imagePreviewFull" alt=""></dialog>
-  <dialog id="captchaDialog" class="captcha-dialog"><form method="dialog" class="dialog-form"><header><h3>AVTRZIP Verification</h3><button id="closeCaptchaDialogBtn" type="button" class="icon-button">x</button></header><iframe id="captchaFrame" title="AVTRZIP verification"></iframe><menu><button id="captchaDoneBtn" type="button" class="primary">Done</button></menu></form></dialog>
   <dialog id="confirmDeleteDialog" class="confirm-dialog"><form method="dialog" class="dialog-form"><header><h3 id="confirmDialogTitle">Delete</h3><button type="button" class="icon-button" data-close="confirmDeleteDialog">x</button></header><p id="confirmDeleteMessage" class="confirm-message"></p><menu><button id="cancelConfirmBtn" type="button">Cancel</button><button id="runConfirmBtn" type="button" class="danger">Delete</button></menu></form></dialog>
   <dialog id="startupSummaryDialog" class="confirm-dialog startup-summary-dialog"><form method="dialog" class="dialog-form"><header><h3>Startup Summary</h3><button type="button" class="icon-button" data-close="startupSummaryDialog">x</button></header><div id="startupSummaryList" class="startup-summary-list"></div><menu><button id="startupSummaryActionBtn" type="button" class="primary" hidden>Update</button><button type="button" data-close="startupSummaryDialog" class="primary">OK</button></menu></form></dialog>
   <dialog id="avatarUpdateHistoryDialog" class="confirm-dialog"><form method="dialog" class="dialog-form"><header><h3>Update History</h3><button type="button" class="icon-button" data-close="avatarUpdateHistoryDialog">x</button></header><div id="avatarUpdateHistoryList" class="update-history-list"></div><menu><button type="button" data-close="avatarUpdateHistoryDialog" class="primary">OK</button></menu></form></dialog>

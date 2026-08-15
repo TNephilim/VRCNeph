@@ -2030,7 +2030,7 @@ function showAvatarUpdateHistory() {
 function avatarSourceLabels(source) {
   const labels = [];
   for (const part of String(source || "").split(/[,+|;]/).map((x) => x.trim()).filter(Boolean)) {
-    const label = part === "vrchat" ? "VRChat" : part === "avatar-database" ? "VRCX" : part === "avtrzip" ? "AVTRZIP" : part === "pas" ? "Prismic" : part === "vrchat-recent" ? "Recent" : "";
+    const label = part === "vrchat" ? "VRChat" : part === "avatar-database" ? "VRCX" : part === "pas" ? "Prismic" : part === "vrchat-recent" ? "Recent" : "";
     if (label && !labels.includes(label)) labels.push(label);
   }
   return labels;
@@ -2338,21 +2338,19 @@ function avatarDatabaseProvider() {
 }
 function avatarDatabaseProviderLabel(provider = avatarDatabaseProvider()) {
   if (provider === "all") return "all databases";
-  return provider === "avtrzip" ? "AVTRZIP" : provider === "pas" ? "Prismic PAS" : "VRCX DB";
+  return provider === "pas" ? "Prismic PAS" : "VRCX DB";
 }
 function avatarDatabaseProviderDescription(provider = avatarDatabaseProvider()) {
   if (provider === "all") return "Search all databases. Pick one for faster results.";
-  return provider === "avtrzip" ? "Search AVTRZIP avatars." : provider === "pas" ? "Search Prismic PAS avatars." : "Search VRCX avatars.";
+  return provider === "pas" ? "Search Prismic PAS avatars." : "Search VRCX avatars.";
 }
 function updateAvatarDatabaseCopy() {
   const provider = avatarDatabaseProvider();
   state.avatarDatabaseProvider = provider;
   if ($("avatarDatabaseProviderMenuBtn")) updateSortButton("avatarDatabaseProviderSelect", "avatarDatabaseProviderMenuBtn");
-  $("avatarDatabaseSearchInput").placeholder = provider === "all" ? "Search all databases" : provider === "avtrzip" ? "Search AVTRZIP avatars" : provider === "pas" ? "Search Prismic PAS avatars" : "Search VRCX avatars";
+  $("avatarDatabaseSearchInput").placeholder = provider === "all" ? "Search all databases" : provider === "pas" ? "Search Prismic PAS avatars" : "Search VRCX avatars";
   $("avatarDatabaseStatus").textContent = avatarDatabaseProviderDescription(provider);
-  $("avatarDatabaseEmptyState").querySelector("p").textContent = provider === "avtrzip"
-    ? "Start typing at least three characters to search AVTRZIP avatars."
-    : provider === "pas"
+  $("avatarDatabaseEmptyState").querySelector("p").textContent = provider === "pas"
       ? "Enter a search, then press Search or Enter to search Prismic PAS."
     : provider === "all"
       ? "All-database searches take longer. Pick one database for quicker results."
@@ -2400,14 +2398,14 @@ async function checkPasDatabaseUpdate({ deferSummary = false } = {}) {
     if (startupSummary && !startupSummary.shown) {
       startupSummary.pasStatus = status;
       const updateDetail = status.message || `Prismic PAS has an update (${status.localFileDate || "local cache"} -> ${status.remoteFileDate || "remote database"}).`;
-      addStartupSummaryItem("Prismic PAS Update", status.hasLocalFile ? updateDetail : "Prismic PAS is not cached in Documents yet.");
+      addStartupSummaryItem("Prismic PAS Update", status.hasLocalFile ? updateDetail : "Prismic PAS is not cached in VRCNeph's Database folder yet.");
       if (!deferSummary) scheduleStartupSummary();
       return;
     }
     const updateDetail = status.message || `Prismic PAS has an update (${status.localFileDate || "local cache"} -> ${status.remoteFileDate || "remote database"}).`;
     const message = status.hasLocalFile
       ? `${updateDetail} Update now?`
-      : "Prismic PAS is not cached in Documents yet. Download it now?";
+      : "Prismic PAS is not cached in VRCNeph's Database folder yet. Download it now?";
     const shouldUpdate = await confirmAction({
       title: "Update Prismic PAS",
       message,
@@ -3051,16 +3049,6 @@ function handleAvatarDatabaseError(error, token) {
   const message = error?.message || String(error || "Database search failed.");
   $("avatarDatabaseStatus").textContent = message;
   toast(message);
-  const captchaUrl = avtrZipCaptchaUrl(message);
-  if (captchaUrl) openAvtrZipCaptcha(captchaUrl);
-}
-function avtrZipCaptchaUrl(message) {
-  const match = String(message || "").match(/https:\/\/g\.avtr\.zip\/[^\s"'<>]+/i);
-  return match ? match[0] : "";
-}
-function openAvtrZipCaptcha(url) {
-  $("captchaFrame").src = url;
-  $("captchaDialog").showModal();
 }
 function currentAvatarDatabasePageResults() {
   if (state.avatarDatabaseMode !== "random") return state.avatarDatabaseResults;
@@ -3254,7 +3242,7 @@ async function saveDatabaseAvatarToGroup(avatar, groupId, { focusTarget = false,
   if (toastDuplicatePendingFavoriteAction(avatarId, groupId, "add")) return;
   if (confirm && !await confirmAction({ title: "Save Avatar", message: `Save "${avatar.name || avatar.avatarId || "this avatar"}" to "${group.name}"?`, confirmLabel: "Save", confirmClass: "primary" })) return;
   try {
-    state.library = await api("saveAvatar", { ...avatar, id: "", groupId, source: avatar.source || (avatarDatabaseProvider() === "avtrzip" ? "avtrzip" : "avatar-database") });
+    state.library = await api("saveAvatar", { ...avatar, id: "", groupId, source: avatar.source || "avatar-database" });
     const local = findLocalAvatarByFavorite(groupId, avatarId);
     enqueueSyncedAvatarAdd(avatarId, groupId, { localId: local?.id || "", name: avatar.name || avatarId });
     if (focusTarget) {
@@ -13126,8 +13114,6 @@ $("equipRandomFavoriteBtn").addEventListener("click", () => equipRandomFavoriteA
 $("favRouletteBtn").addEventListener("click", () => openAvatarRouletteDialog('favorites'));
 $("startAvatarRouletteBtn").addEventListener("click", startAvatarRoulette);
 $("stopAvatarRouletteBtn").addEventListener("click", () => stopAvatarRoulette());
-$("closeCaptchaDialogBtn").addEventListener("click", () => $("captchaDialog").close());
-$("captchaDoneBtn").addEventListener("click", () => $("captchaDialog").close());
 $("databasePrevPageBtn").addEventListener("click", async () => {
   if (state.avatarDatabaseMode === "random") { state.avatarDatabasePage = Math.max(0, state.avatarDatabasePage - 1); renderAvatarDatabaseResults(); }
   else await runAvatarDatabaseSearch(Math.max(0, state.avatarDatabasePage - 1));

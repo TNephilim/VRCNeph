@@ -9,7 +9,6 @@ const SYNCED_GROUP_AVATAR_LIMIT = 50;
 const PANEL_LABELS = { avatars: "Avatars", worlds: "Worlds", friends: "Friends", database: "Database", recent: "Recent" };
 const DATABASE_PROVIDERS = [
   { value: "all", label: "All Databases" },
-  { value: "avtrzip", label: "AVTRZIP" },
   { value: "pas", label: "Prismic PAS" },
   { value: "vrcx", label: "VRCX DB" }
 ];
@@ -1159,7 +1158,7 @@ function renderGroupDropdown() {
     }
     dropdown.innerHTML = DATABASE_PROVIDERS.map((provider) => `<button class="${provider.value === (state.database.provider || "all") ? "active" : ""}" type="button" data-database-provider="${escapeHtml(provider.value)}">
       <strong>${escapeHtml(provider.label)}</strong>
-      <span>${escapeHtml(provider.value === "all" ? "Search every source" : provider.value === "avtrzip" ? "Avatar ZIP database" : provider.value === "pas" ? "Prismic PAS cache" : "VRCX database")}</span>
+      <span>${escapeHtml(provider.value === "all" ? "Search every source" : provider.value === "pas" ? "Prismic PAS cache" : "VRCX database")}</span>
     </button>`).join("");
     return;
   }
