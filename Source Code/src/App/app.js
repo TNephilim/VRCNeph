@@ -1,4 +1,4 @@
-const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", overlayEnabled: true, overlayHotkey: "F8", databaseRandomHotkey: "Ctrl+Alt+R", overlayDefaultPanel: "avatars", overlayOpacity: 85, overlayScale: 100, overlayX: 8, overlayY: 16, overlayWidth: 360, overlayHeight: 519, schemaVersion: 13 };
+const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", overlayEnabled: true, overlayHotkey: "F8", databaseRandomHotkey: "Ctrl+R", databaseRandomVrBinding: "", overlayDefaultPanel: "avatars", overlayOpacity: 85, overlayScale: 100, overlayX: 8, overlayY: 16, overlayWidth: 360, overlayHeight: 519, schemaVersion: 14 };
 const OVERLAY_TAB_TIP_SEEN_KEY = "vrcneph.overlay.tabTipSeen.v1";
 const DATABASE_HIDE_OLDER_AVATARS_KEY = "vrcneph.database.hideOlderAvatars";
 const DATABASE_OLDER_AVATAR_CUTOFF_MS = Date.parse("2020-08-06T00:00:00Z");
@@ -417,6 +417,7 @@ async function loadSettings() {
       overlayEnabled: saved.overlayEnabled !== false,
       overlayHotkey: String(saved.overlayHotkey || DEFAULT_SETTINGS.overlayHotkey),
       databaseRandomHotkey: String(saved.databaseRandomHotkey || DEFAULT_SETTINGS.databaseRandomHotkey),
+      databaseRandomVrBinding: String(saved.databaseRandomVrBinding || DEFAULT_SETTINGS.databaseRandomVrBinding),
       overlayDefaultPanel: ["avatars", "worlds", "friends", "session", "current", "database", "recent"].includes(String(saved.overlayDefaultPanel || "")) ? (saved.overlayDefaultPanel === "session" || saved.overlayDefaultPanel === "current" ? "database" : saved.overlayDefaultPanel) : DEFAULT_SETTINGS.overlayDefaultPanel,
       overlayOpacity: Number.isFinite(saved.overlayOpacity) ? Math.min(100, Math.max(45, Number(saved.overlayOpacity))) : DEFAULT_SETTINGS.overlayOpacity,
       overlayScale: Number.isFinite(saved.overlayScale) ? Math.min(135, Math.max(80, Number(saved.overlayScale))) : DEFAULT_SETTINGS.overlayScale,
@@ -5364,6 +5365,7 @@ function applyOverlaySettingsControls() {
   $("overlayDefaultPanelSelect").value = state.settings.overlayDefaultPanel || DEFAULT_SETTINGS.overlayDefaultPanel;
   $("overlayHotkeyInput").value = state.settings.overlayHotkey || DEFAULT_SETTINGS.overlayHotkey;
   $("databaseRandomHotkeyInput").value = state.settings.databaseRandomHotkey || DEFAULT_SETTINGS.databaseRandomHotkey;
+  $("databaseRandomVrBindingInput").value = displayVrBinding(state.settings.databaseRandomVrBinding);
   applyOverlayOpacityControls();
   applyOverlayScaleControls();
 }
@@ -5418,6 +5420,13 @@ function overlayHotkeyFromEvent(event) {
   if (!main) return "";
   parts.push(main);
   return parts.join("+");
+}
+function displayVrBinding(binding) {
+  const [side, buttonText] = String(binding || "").split(":");
+  const button = Number(buttonText);
+  if (!Number.isInteger(button) || !["left", "right"].includes(side)) return "Unbound";
+  const labels = { 0: "System", 1: "Application/Menu", 2: "Grip / A", 3: "D-pad Left", 4: "D-pad Up", 5: "D-pad Right", 6: "D-pad Down", 7: "A", 31: "Proximity", 32: "Trackpad", 33: "Trigger", 34: "Axis 2", 35: "Joystick", 36: "Axis 4" };
+  return `${side === "left" ? "Left" : "Right"} Controller • ${labels[button] || `Button ${button}`}`;
 }
 async function openOverlayFromSettings() {
   try {
@@ -12776,6 +12785,27 @@ $("databaseRandomHotkeyInput").addEventListener("keydown", (event) => {
 $("resetDatabaseRandomHotkeyBtn").addEventListener("click", () => {
   state.settings.databaseRandomHotkey = DEFAULT_SETTINGS.databaseRandomHotkey;
   applyOverlaySettingsControls();
+});
+$("bindDatabaseRandomVrBtn").addEventListener("click", async () => {
+  const button = $("bindDatabaseRandomVrBtn");
+  button.disabled = true;
+  $("databaseRandomVrBindingInput").value = "Press a SteamVR controller button...";
+  try {
+    const binding = await api("steamVrControllerBindingCapture", {}, 35000);
+    state.settings.databaseRandomVrBinding = String(binding.binding || "");
+    await saveSettings();
+    toast(`VR random database keybind set to ${displayVrBinding(state.settings.databaseRandomVrBinding)}.`);
+  } catch (e) {
+    applyOverlaySettingsControls();
+    toast(e.message || "SteamVR controller binding failed.");
+  } finally {
+    button.disabled = false;
+  }
+});
+$("clearDatabaseRandomVrBtn").addEventListener("click", async () => {
+  state.settings.databaseRandomVrBinding = "";
+  await saveSettings();
+  toast("VR random database keybind cleared.");
 });
 $("overlayOpacityInput").addEventListener("input", () => { state.settings.overlayOpacity = Number($("overlayOpacityInput").value); applyOverlayOpacityControls(); });
 $("overlayOpacityNumber").addEventListener("input", syncOverlayOpacityFromNumber);

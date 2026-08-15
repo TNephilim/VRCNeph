@@ -948,6 +948,8 @@ dialog::backdrop { background: rgba(0,0,0,.62); transition: background-color 900
 .overlay-settings-grid .overlay-settings-card:only-child span { line-height: 1.2; }
 .overlay-settings-card kbd { justify-self: start; padding: 4px 7px; border: 1px solid color-mix(in srgb, var(--accent) 62%, var(--line)); border-radius: 6px; background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--text); font: 800 12px "Segoe UI", system-ui, sans-serif; }
 .overlay-hotkey-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.overlay-hotkey-row.vr-hotkey-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+.settings-help { display: block; color: var(--muted); line-height: 1.35; margin-top: -4px; }
 .overlay-hotkey-row input { cursor: pointer; text-align: center; font-weight: 900; }
 .overlay-toggle-label { justify-self: start; height: 26px; min-height: 26px; }
 .settings-toggle-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--glass-soft); cursor: pointer; }

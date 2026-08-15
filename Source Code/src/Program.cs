@@ -178,6 +178,7 @@ internal static class Program
     private static Process? OverlayProcess;
     private static OverlayHotkeyPoller? OverlayHotkey;
     private static OverlayHotkeyPoller? DatabaseRandomHotkey;
+    private static SteamVrControllerPoller? DatabaseRandomVrInput;
     private static PhotinoWindow? OverlayWindow;
     private static nint OverlayWindowHandle;
     private static FileSystemWatcher? LibraryWatcher;
@@ -293,6 +294,7 @@ internal static class Program
         {
             OverlayHotkey?.Dispose();
             DatabaseRandomHotkey?.Dispose();
+            DatabaseRandomVrInput?.Dispose();
             StopLibraryChangeWatcher();
             LocalAvatarCacheTimer?.Dispose();
             LocalAvatarCacheTimer = null;
@@ -369,6 +371,8 @@ internal static class Program
         OverlayHotkey = null;
         DatabaseRandomHotkey?.Dispose();
         DatabaseRandomHotkey = null;
+        DatabaseRandomVrInput?.Dispose();
+        DatabaseRandomVrInput = null;
         var settings = Settings.Get();
         OverlayHotkey = new OverlayHotkeyPoller(settings.OverlayHotkey, () =>
         {
@@ -405,6 +409,22 @@ internal static class Program
             });
         });
         DatabaseRandomHotkey.Start();
+        if (!string.IsNullOrWhiteSpace(settings.DatabaseRandomVrBinding))
+        {
+            DatabaseRandomVrInput = new SteamVrControllerPoller(settings.DatabaseRandomVrBinding, () =>
+            {
+                try
+                {
+                    Logs.Info("App", "SteamVR random database binding detected.");
+                    SendAppEvent("randomDatabaseAvatarHotkey", new { });
+                }
+                catch (Exception ex)
+                {
+                    Logs.Error("App", "SteamVR random database binding failed.", ex.ToString());
+                }
+            });
+            DatabaseRandomVrInput.Start();
+        }
     }
 
     private static void StartLocalAvatarCache()
@@ -418,6 +438,13 @@ internal static class Program
         var saved = Settings.Save(settings);
         if (OverlayHotkey is not null || DatabaseRandomHotkey is not null) ConfigureHotkeys();
         return saved;
+    }
+
+    private static async Task<object> CaptureSteamVrControllerBindingAsync()
+    {
+        DatabaseRandomVrInput?.Dispose();
+        DatabaseRandomVrInput = null;
+        return await SteamVrControllerPoller.CaptureAsync(TimeSpan.FromSeconds(30));
     }
 
     private static void TrySetAppUserModelId()
@@ -721,6 +748,7 @@ internal static class Program
                 "vrchatFavoriteRemove" => await VrChat.RemoveFavoriteAvatarAsync(GetPayload<VrChatFavoriteChangeInput>(request)),
                 "settingsGet" => Settings.Get(),
                 "settingsSave" => SaveSettings(GetPayload<AppSettings>(request)),
+                "steamVrControllerBindingCapture" => await CaptureSteamVrControllerBindingAsync(),
                 "backgroundGet" => Background.GetBackground(GetPayload<BackgroundInput>(request).GroupId, Store.GroupName(GetPayload<BackgroundInput>(request).GroupId)),
                 "backgroundFolder" => BackgroundFolder(GetPayload<BackgroundInput>(request)),
                 "backgroundImport" => ImportBackgrounds(GetPayload<BackgroundInput>(request)),
@@ -3788,7 +3816,7 @@ internal sealed class AvatarStore
 
 internal sealed class AppSettingsStore
 {
-    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", true, "F8", "Ctrl+Alt+R", "avatars", 85, 100, 8, 16, 360, 519, 13);
+    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", true, "F8", "Ctrl+R", "", "avatars", 85, 100, 8, 16, 360, 519, 14);
     private readonly string _settingsPath = AppPaths.SettingsPath;
     public AppSettings Get()
     {
@@ -3821,12 +3849,14 @@ internal sealed class AppSettingsStore
         if (s.SchemaVersion < 11 && hotkey.Equals("Ctrl+Shift+O", StringComparison.OrdinalIgnoreCase)) hotkey = DefaultSettings.OverlayHotkey;
         hotkey = OverlayHotkeyPoller.NormalizeDisplayHotkey(hotkey, DefaultSettings.OverlayHotkey);
         var databaseRandomHotkey = string.IsNullOrWhiteSpace(s.DatabaseRandomHotkey) ? DefaultSettings.DatabaseRandomHotkey : s.DatabaseRandomHotkey.Trim();
+        if (s.SchemaVersion < 14 && databaseRandomHotkey.Equals("Ctrl+Alt+R", StringComparison.OrdinalIgnoreCase)) databaseRandomHotkey = DefaultSettings.DatabaseRandomHotkey;
         databaseRandomHotkey = OverlayHotkeyPoller.NormalizeDisplayHotkey(databaseRandomHotkey, DefaultSettings.DatabaseRandomHotkey);
+        var databaseRandomVrBinding = SteamVrControllerPoller.NormalizeBinding(s.DatabaseRandomVrBinding);
         var overlayX = s.SchemaVersion < 11 && s.OverlayX == 0 ? DefaultSettings.OverlayX : Math.Clamp(s.OverlayX, -10000, 10000);
         var overlayY = s.SchemaVersion < 11 && s.OverlayY == 0 ? DefaultSettings.OverlayY : Math.Clamp(s.OverlayY, -10000, 10000);
         var overlayWidth = s.SchemaVersion < 11 && s.OverlayWidth == 0 ? DefaultSettings.OverlayWidth : Math.Clamp(s.OverlayWidth, 360, 900);
         var overlayHeight = s.SchemaVersion < 11 && s.OverlayHeight == 0 ? DefaultSettings.OverlayHeight : Math.Clamp(s.OverlayHeight, 420, 1000);
-        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", s.OverlayEnabled, hotkey, databaseRandomHotkey, overlayPanel, overlayOpacity, overlayScale, overlayX, overlayY, overlayWidth, overlayHeight, 13);
+        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", s.OverlayEnabled, hotkey, databaseRandomHotkey, databaseRandomVrBinding, overlayPanel, overlayOpacity, overlayScale, overlayX, overlayY, overlayWidth, overlayHeight, 14);
     }
 }
 
@@ -9231,6 +9261,305 @@ internal sealed class AvatarDatabaseClient
     }
 }
 
+internal sealed class SteamVrControllerPoller : IDisposable
+{
+    private const uint VrApplicationBackground = 3;
+    private const uint TrackedDeviceClassController = 2;
+    private const uint ControllerRoleLeft = 1;
+    private const uint ControllerRoleRight = 2;
+    private const int ControllerStateMethodIndex = 37;
+    private readonly string _binding;
+    private readonly Action _callback;
+    private readonly CancellationTokenSource _stop = new();
+    private Thread? _thread;
+    private int _disposed;
+
+    public SteamVrControllerPoller(string binding, Action callback)
+    {
+        _binding = NormalizeBinding(binding);
+        _callback = callback;
+    }
+
+    public static string NormalizeBinding(string? binding)
+    {
+        var parts = (binding ?? "").Split(':', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2 || !int.TryParse(parts[1], out var button) || button is < 0 or > 63) return "";
+        var role = parts[0].ToLowerInvariant() switch
+        {
+            "left" or "1" => "left",
+            "right" or "2" => "right",
+            _ => ""
+        };
+        return string.IsNullOrWhiteSpace(role) ? "" : $"{role}:{button}";
+    }
+
+    public static async Task<SteamVrControllerBindingCapture> CaptureAsync(TimeSpan timeout)
+    {
+        return await Task.Run(() => CaptureBlocking(timeout));
+    }
+
+    public void Start()
+    {
+        if (string.IsNullOrWhiteSpace(_binding)) return;
+        _thread = new Thread(PollLoop) { IsBackground = true, Name = "VRCNeph SteamVR Input" };
+        _thread.Start();
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _stop.Cancel();
+        if (_thread is not null && _thread.IsAlive) _thread.Join(TimeSpan.FromMilliseconds(500));
+        _stop.Dispose();
+    }
+
+    private void PollLoop()
+    {
+        try
+        {
+            while (!_stop.IsCancellationRequested)
+            {
+                using var session = SteamVrSession.TryCreate();
+                if (session is null)
+                {
+                    _stop.Token.WaitHandle.WaitOne(TimeSpan.FromSeconds(2));
+                    continue;
+                }
+                var previous = new Dictionary<uint, ulong>();
+                while (!_stop.IsCancellationRequested)
+                {
+                    foreach (var controller in session.ReadControllers())
+                    {
+                        previous.TryGetValue(controller.Index, out var oldPressed);
+                        previous[controller.Index] = controller.Pressed;
+                        if ((controller.Pressed & ~oldPressed) == 0) continue;
+                        if (BindingMatches(_binding, controller.Role, controller.Pressed & ~oldPressed)) _callback();
+                    }
+                    _stop.Token.WaitHandle.WaitOne(20);
+                }
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private static SteamVrControllerBindingCapture CaptureBlocking(TimeSpan timeout)
+    {
+        using var session = SteamVrSession.TryCreate();
+        if (session is null) throw new InvalidOperationException("SteamVR is not running or its controller interface is unavailable.");
+        var previous = new Dictionary<uint, ulong>();
+        foreach (var controller in session.ReadControllers()) previous[controller.Index] = controller.Pressed;
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            foreach (var controller in session.ReadControllers())
+            {
+                previous.TryGetValue(controller.Index, out var oldPressed);
+                previous[controller.Index] = controller.Pressed;
+                var rising = controller.Pressed & ~oldPressed;
+                if (rising == 0) continue;
+                var button = FirstSetBit(rising);
+                if (button < 0) continue;
+                var binding = BindingFor(controller.Role, button);
+                return new(binding, DisplayFor(controller.Role, button));
+            }
+            Thread.Sleep(20);
+        }
+        throw new TimeoutException("No SteamVR controller button was pressed.");
+    }
+
+    private static bool BindingMatches(string binding, uint role, ulong pressed)
+    {
+        var parts = binding.Split(':');
+        if (parts.Length != 2 || !int.TryParse(parts[1], out var button) || button is < 0 or > 63) return false;
+        var roleName = role == ControllerRoleLeft ? "left" : role == ControllerRoleRight ? "right" : "";
+        return roleName == parts[0] && (pressed & (1UL << button)) != 0;
+    }
+
+    private static string BindingFor(uint role, int button) => $"{(role == ControllerRoleLeft ? "left" : "right")}:{button}";
+
+    private static string DisplayFor(uint role, int button) => $"{(role == ControllerRoleLeft ? "Left" : "Right")} Controller • {button switch
+    {
+        0 => "System",
+        1 => "Application/Menu",
+        2 => "Grip / A",
+        3 => "D-pad Left",
+        4 => "D-pad Up",
+        5 => "D-pad Right",
+        6 => "D-pad Down",
+        7 => "A",
+        31 => "Proximity",
+        32 => "Trackpad",
+        33 => "Trigger",
+        34 => "Axis 2",
+        35 => "Joystick",
+        36 => "Axis 4",
+        _ => $"Button {button}"
+    }}";
+
+    private static int FirstSetBit(ulong value)
+    {
+        for (var index = 0; index < 64; index++) if ((value & (1UL << index)) != 0) return index;
+        return -1;
+    }
+
+    internal readonly record struct ControllerSnapshot(uint Index, uint Role, ulong Pressed);
+
+    private sealed class SteamVrSession : IDisposable
+    {
+        private readonly nint _module;
+        private readonly nint _system;
+        private readonly GetControllerStateDelegate _getControllerState;
+        private readonly GetTrackedDeviceClassDelegate _getTrackedDeviceClass;
+        private readonly GetControllerRoleDelegate _getControllerRole;
+        private readonly ShutdownDelegate _shutdown;
+        private bool _disposed;
+
+        private SteamVrSession(nint module, nint system, GetControllerStateDelegate getControllerState, GetTrackedDeviceClassDelegate getTrackedDeviceClass, GetControllerRoleDelegate getControllerRole, ShutdownDelegate shutdown)
+        {
+            _module = module;
+            _system = system;
+            _getControllerState = getControllerState;
+            _getTrackedDeviceClass = getTrackedDeviceClass;
+            _getControllerRole = getControllerRole;
+            _shutdown = shutdown;
+        }
+
+        public static SteamVrSession? TryCreate()
+        {
+            foreach (var path in CandidateDllPaths())
+            {
+                nint module = 0;
+                try
+                {
+                    module = LoadLibraryEx(path, 0, 0x00000008);
+                    if (module == 0) continue;
+                    var init = GetExport<InitDelegate>(module, "VR_InitInternal");
+                    var getInterface = GetExport<GetInterfaceDelegate>(module, "VR_GetGenericInterface");
+                    var shutdown = GetExport<ShutdownDelegate>(module, "VR_ShutdownInternal");
+                    if (init is null || getInterface is null || shutdown is null)
+                    {
+                        FreeLibrary(module);
+                        continue;
+                    }
+                    uint initError = 0;
+                    init(ref initError, VrApplicationBackground);
+                    if (initError != 0)
+                    {
+                        FreeLibrary(module);
+                        continue;
+                    }
+                    nint system = 0;
+                    foreach (var version in new[] { "IVRSystem_026", "IVRSystem_025", "IVRSystem_024", "IVRSystem_023", "IVRSystem_022" })
+                    {
+                        uint interfaceError = 0;
+                        system = getInterface(version, ref interfaceError);
+                        if (system != 0 && interfaceError == 0) break;
+                    }
+                    if (system == 0)
+                    {
+                        shutdown();
+                        FreeLibrary(module);
+                        continue;
+                    }
+                    var vtable = Marshal.ReadIntPtr(system);
+                    var getControllerState = GetVTableDelegate<GetControllerStateDelegate>(vtable, ControllerStateMethodIndex);
+                    var getTrackedDeviceClass = GetVTableDelegate<GetTrackedDeviceClassDelegate>(vtable, 20);
+                    var getControllerRole = GetVTableDelegate<GetControllerRoleDelegate>(vtable, 19);
+                    return new SteamVrSession(module, system, getControllerState, getTrackedDeviceClass, getControllerRole, shutdown);
+                }
+                catch
+                {
+                    if (module != 0) FreeLibrary(module);
+                }
+            }
+            return null;
+        }
+
+        internal List<ControllerSnapshot> ReadControllers()
+        {
+            var result = new List<ControllerSnapshot>();
+            for (uint index = 0; index < 64; index++)
+            {
+                if (_getTrackedDeviceClass(index) != TrackedDeviceClassController) continue;
+                var state = default(VrControllerState);
+                if (!_getControllerState(index, ref state, (uint)Marshal.SizeOf<VrControllerState>())) continue;
+                result.Add(new ControllerSnapshot(index, _getControllerRole(index), state.Pressed));
+            }
+            return result;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            try { _shutdown(); } catch { }
+            if (_module != 0) FreeLibrary(_module);
+        }
+
+        private static T GetVTableDelegate<T>(nint vtable, int index) where T : Delegate
+        {
+            var function = Marshal.ReadIntPtr(vtable, index * IntPtr.Size);
+            if (function == 0) throw new InvalidOperationException("SteamVR interface method is unavailable.");
+            return Marshal.GetDelegateForFunctionPointer<T>(function);
+        }
+
+        private static T? GetExport<T>(nint module, string name) where T : Delegate
+        {
+            var function = GetProcAddress(module, name);
+            return function == 0 ? null : Marshal.GetDelegateForFunctionPointer<T>(function);
+        }
+
+        private static IEnumerable<string> CandidateDllPaths()
+        {
+            var roots = new List<string>
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)
+            };
+            try
+            {
+                var installPath = Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath", null) as string;
+                if (!string.IsNullOrWhiteSpace(installPath)) roots.Add(installPath);
+            }
+            catch { }
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var root in roots.Where(value => !string.IsNullOrWhiteSpace(value)))
+            {
+                var path = Path.Combine(root, "steamapps", "common", "SteamVR", "bin", "win64", "openvr_api.dll");
+                if (seen.Add(path) && File.Exists(path)) yield return path;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 8)]
+        private struct VrControllerState
+        {
+            public uint PacketNumber;
+            public ulong Pressed;
+            public ulong Touched;
+            public ControllerAxis Axis0;
+            public ControllerAxis Axis1;
+            public ControllerAxis Axis2;
+            public ControllerAxis Axis3;
+            public ControllerAxis Axis4;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ControllerAxis { public float X; public float Y; }
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate nint InitDelegate(ref uint error, uint applicationType);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate nint GetInterfaceDelegate([MarshalAs(UnmanagedType.LPStr)] string version, ref uint error);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate void ShutdownDelegate();
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] [return: MarshalAs(UnmanagedType.I1)] private delegate bool GetControllerStateDelegate(uint index, ref VrControllerState state, uint stateSize);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate uint GetTrackedDeviceClassDelegate(uint index);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate uint GetControllerRoleDelegate(uint index);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern nint LoadLibraryEx(string fileName, nint file, uint flags);
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)] private static extern nint GetProcAddress(nint module, string name);
+        [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool FreeLibrary(nint module);
+    }
+}
+
 internal sealed class OverlayHotkeyPoller : IDisposable
 {
     private const int HotkeyId = 0x4F31;
@@ -9473,7 +9802,8 @@ internal sealed record DiagnosticItem(string Name, string Status, string Detail,
 internal sealed record DiagnosticsResult(List<DiagnosticItem> Items);
 internal sealed record ExportResult(string Path);
 internal sealed record GroupClearResult(LibraryData Library, int Removed, string BackupPath);
-internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayHotkey = "F8", string DatabaseRandomHotkey = "Ctrl+Alt+R", string OverlayDefaultPanel = "avatars", int OverlayOpacity = 85, int OverlayScale = 100, int OverlayX = 8, int OverlayY = 16, int OverlayWidth = 360, int OverlayHeight = 519, int SchemaVersion = 13);
+internal sealed record SteamVrControllerBindingCapture(string Binding, string Display);
+internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayHotkey = "F8", string DatabaseRandomHotkey = "Ctrl+R", string DatabaseRandomVrBinding = "", string OverlayDefaultPanel = "avatars", int OverlayOpacity = 85, int OverlayScale = 100, int OverlayX = 8, int OverlayY = 16, int OverlayWidth = 360, int OverlayHeight = 519, int SchemaVersion = 14);
 internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx", string SearchMode = "phrase");
 internal sealed record AvatarListResult(List<AvatarInput> Avatars);
 internal sealed record AvatarImageResolveInput(string AvatarId = "", string ImageUrl = "", string Name = "", string UserId = "", string DisplayName = "");

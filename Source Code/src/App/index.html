@@ -479,8 +479,11 @@
       <label class="sync-toggle-label overlay-toggle-label">Enable overlay hotkey<input id="overlayEnabledToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span></label>
       <label>Overlay keybind</label>
       <div class="overlay-hotkey-row"><input id="overlayHotkeyInput" type="text" value="F8" readonly><button id="resetOverlayHotkeyBtn" type="button">Reset</button></div>
-      <label>Random database keybind</label>
-      <div class="overlay-hotkey-row"><input id="databaseRandomHotkeyInput" type="text" value="Ctrl+Alt+R" readonly><button id="resetDatabaseRandomHotkeyBtn" type="button">Reset</button></div>
+      <label>Desktop random database keybind</label>
+      <div class="overlay-hotkey-row"><input id="databaseRandomHotkeyInput" type="text" value="Ctrl+R" readonly><button id="resetDatabaseRandomHotkeyBtn" type="button">Reset</button></div>
+      <label>VR random database keybind</label>
+      <div class="overlay-hotkey-row vr-hotkey-row"><input id="databaseRandomVrBindingInput" type="text" value="Unbound" readonly><button id="bindDatabaseRandomVrBtn" type="button">Bind</button><button id="clearDatabaseRandomVrBtn" type="button">Clear</button></div>
+      <small class="settings-help">Requires SteamVR to be running. Click Bind, then press the controller button you want.</small>
       <label>Default panel
         <select id="overlayDefaultPanelSelect">
           <option value="avatars">Avatars</option>
