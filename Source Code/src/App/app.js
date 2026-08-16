@@ -381,6 +381,7 @@ async function logoutVrChat() {
 }
 async function checkForUpdates({ automatic = false } = {}) {
   if (automatic && updatePromptShown) return;
+  let installRequested = false;
   try {
     const info = await api("updateCheck", {}, 45000);
     if (!info.updateAvailable) {
@@ -396,10 +397,11 @@ async function checkForUpdates({ automatic = false } = {}) {
       confirmLabel: label,
       confirmClass: "primary"
     })) return;
+    installRequested = true;
     const result = await api("updateInstall", {}, 120000);
     toast(result.message || "Updating VRCNeph.");
   } catch (e) {
-    if (!automatic) toast(e.message);
+    if (!automatic || installRequested) toast(e.message);
   }
 }
 async function checkStartupUpdateStatus() {

@@ -1008,6 +1008,76 @@ internal static class Program
         finally { process.Dispose(); }
     }
 
+    internal static bool CloseOverlaysForUpdate()
+    {
+        var currentProcessId = Environment.ProcessId;
+        var currentExe = Process.GetCurrentProcess().MainModule?.FileName ?? Path.Combine(AppContext.BaseDirectory, "VRCNeph.exe");
+        var overlays = new Dictionary<int, Process>();
+
+        lock (OverlayGate)
+        {
+            if (OverlayProcess is not null && !OverlayProcess.HasExited)
+            {
+                overlays[OverlayProcess.Id] = OverlayProcess;
+            }
+        }
+
+        foreach (var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(currentExe)))
+        {
+            try
+            {
+                if (process.Id == currentProcessId || process.HasExited) { process.Dispose(); continue; }
+                var path = process.MainModule?.FileName ?? "";
+                if (!path.Equals(currentExe, StringComparison.OrdinalIgnoreCase) ||
+                    !process.MainWindowTitle.Equals("VRCNeph Overlay", StringComparison.OrdinalIgnoreCase))
+                {
+                    process.Dispose();
+                    continue;
+                }
+                if (overlays.TryGetValue(process.Id, out var tracked))
+                {
+                    if (!ReferenceEquals(tracked, process)) process.Dispose();
+                }
+                else overlays[process.Id] = process;
+            }
+            catch
+            {
+                process.Dispose();
+            }
+        }
+
+        foreach (var overlay in overlays.Values)
+        {
+            try
+            {
+                if (overlay.HasExited) continue;
+                if (!overlay.CloseMainWindow() || !overlay.WaitForExit(5000))
+                {
+                    Logs.Warn("Updater", $"Overlay process {overlay.Id} did not close before update.");
+                    return false;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (overlay.HasExited) overlay.Dispose();
+            }
+        }
+
+        lock (OverlayGate)
+        {
+            if (OverlayProcess is null || OverlayProcess.HasExited)
+            {
+                OverlayProcess?.Dispose();
+                OverlayProcess = null;
+            }
+        }
+        return true;
+    }
+
     private static object OverlayStatus(bool open) => new
     {
         open,
@@ -1681,6 +1751,10 @@ internal sealed class AppUpdateClient(string owner, string repository)
         var info = await CheckAsync();
         if (!info.UpdateAvailable) return new AppUpdateInstallResult(false, "No update is available.");
         if (string.IsNullOrWhiteSpace(info.AssetUrl)) throw new InvalidOperationException("Latest release does not include VRCNeph.exe.");
+        if (!Program.CloseOverlaysForUpdate())
+        {
+            throw new InvalidOperationException("VRCNeph's overlay is still running. Close the overlay and try the update again.");
+        }
 
         var tempExe = Path.Combine(Path.GetTempPath(), $"VRCNeph-update-{Guid.NewGuid():N}.exe");
         using (var request = new HttpRequestMessage(HttpMethod.Get, info.AssetUrl))
