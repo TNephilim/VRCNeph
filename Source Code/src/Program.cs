@@ -36,6 +36,7 @@ internal static class AppPaths
     public static readonly string CategoriesJsonPath = Path.Combine(RootDirectory, "categories.json");
     public static readonly string MessageHistoryPath = Path.Combine(RootDirectory, "messages.json");
     public static readonly string SettingsPath = Path.Combine(RootDirectory, "settings.json");
+    public static readonly string UpdateFailureStatusPath = Path.Combine(RootDirectory, "update-failure.txt");
     public static readonly string LegacySettingsPath = Path.Combine(GroupsDirectory, "settings.json");
     public static readonly string SessionPath = Path.Combine(GroupsDirectory, "vrchat-session.json");
 
@@ -765,6 +766,7 @@ internal static class Program
                 "avatarDatabasePasUpdate" => await AvatarDatabase.UpdatePasDatabaseAsync(),
                 "appVersion" => AppUpdateClient.CurrentVersionInfo(UpdateRepositoryOwner, UpdateRepositoryName),
                 "updateCheck" => await Updater.CheckAsync(),
+                "updateFailureStatus" => AppUpdateClient.ConsumeFailureStatus(),
                 "updateInstall" => await Updater.InstallAsync(),
                 "appCloseConfirmed" => CloseApp(),
                 _ => throw new InvalidOperationException($"Unknown command '{request.Command}'.")
@@ -1617,6 +1619,22 @@ internal sealed class AppUpdateClient(string owner, string repository)
     public static AppVersionInfo CurrentVersionInfo(string owner, string repository) =>
         new(CurrentVersion, $"https://github.com/{owner}/{repository}/releases/latest");
 
+    public static AppUpdateFailureStatus ConsumeFailureStatus()
+    {
+        var path = AppPaths.UpdateFailureStatusPath;
+        if (!File.Exists(path)) return new AppUpdateFailureStatus(false, "");
+        try
+        {
+            var message = File.ReadAllText(path).Trim();
+            File.Delete(path);
+            return new AppUpdateFailureStatus(!string.IsNullOrWhiteSpace(message), message);
+        }
+        catch
+        {
+            return new AppUpdateFailureStatus(false, "");
+        }
+    }
+
     public async Task<AppUpdateInfo> CheckAsync()
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{_owner}/{_repository}/releases/latest");
@@ -1677,15 +1695,40 @@ internal sealed class AppUpdateClient(string owner, string repository)
 
         var currentExe = Process.GetCurrentProcess().MainModule?.FileName ?? Path.Combine(AppContext.BaseDirectory, "VRCNeph.exe");
         var scriptPath = Path.Combine(Path.GetTempPath(), $"VRCNeph-update-{Guid.NewGuid():N}.ps1");
+        var expectedHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(tempExe)));
         var script = $$"""
-            $ErrorActionPreference = 'Stop'
+            $ErrorActionPreference = 'Continue'
             $pidToWait = {{Environment.ProcessId}}
             $newExe = {{PowerShellString(tempExe)}}
             $targetExe = {{PowerShellString(currentExe)}}
+            $expectedHash = {{PowerShellString(expectedHash)}}
+            $statusPath = {{PowerShellString(AppPaths.UpdateFailureStatusPath)}}
+            $attemptCount = 12
+            $updated = $false
+            $lastError = ''
             Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue
-            Copy-Item -LiteralPath $newExe -Destination $targetExe -Force
+            for ($attempt = 1; $attempt -le $attemptCount; $attempt++) {
+                try {
+                    Copy-Item -LiteralPath $newExe -Destination $targetExe -Force -ErrorAction Stop
+                    $actualHash = (Get-FileHash -LiteralPath $targetExe -Algorithm SHA256 -ErrorAction Stop).Hash
+                    if ($actualHash -eq $expectedHash) {
+                        $updated = $true
+                        break
+                    }
+                    $lastError = 'The copied file did not match the downloaded update.'
+                } catch {
+                    $lastError = $_.Exception.Message
+                }
+                Start-Sleep -Seconds 1
+            }
             Remove-Item -LiteralPath $newExe -Force -ErrorAction SilentlyContinue
-            Start-Process -FilePath $targetExe -WorkingDirectory (Split-Path -Parent $targetExe)
+            if ($updated) {
+                Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
+            } else {
+                $message = "VRCNeph could not finish its update after $attemptCount attempts. Close any VRCNeph windows and install the latest VRCNeph.exe from GitHub manually. Details: $lastError"
+                Set-Content -LiteralPath $statusPath -Value $message -Encoding UTF8 -ErrorAction SilentlyContinue
+            }
+            Start-Process -FilePath $targetExe -WorkingDirectory (Split-Path -Parent $targetExe) -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
             """;
         await File.WriteAllTextAsync(scriptPath, script);
@@ -1740,6 +1783,7 @@ internal sealed class AppUpdateClient(string owner, string repository)
 internal sealed record AppVersionInfo(string CurrentVersion, string ReleaseUrl);
 internal sealed record AppUpdateInfo(bool UpdateAvailable, string CurrentVersion, string LatestVersion, string ReleaseUrl, string AssetUrl, string Notes);
 internal sealed record AppUpdateInstallResult(bool Restarting, string Message);
+internal sealed record AppUpdateFailureStatus(bool HasFailure, string Message);
 internal sealed record BackupFileInfo(string Name, string DisplayName, string Path, long Size, DateTime LastModified, string Reason, string GroupId, string BackupType);
 internal sealed record BackupListResult(string Folder, List<BackupFileInfo> Files);
 internal sealed record AccountBackupFileInfo(string Name, string Path, long Size, DateTime LastModified, DateTimeOffset CreatedAt, string Reason, int GroupCount, int AvatarCount, int FriendCount = 0, int FavoriteFriendCount = 0, int WorldCount = 0, int UploadedWorldCount = 0);

@@ -402,6 +402,25 @@ async function checkForUpdates({ automatic = false } = {}) {
     if (!automatic) toast(e.message);
   }
 }
+async function checkStartupUpdateStatus() {
+  try {
+    const status = await api("updateFailureStatus");
+    if (status.hasFailure) {
+      updatePromptShown = true;
+      await confirmAction({
+        title: "Update Could Not Finish",
+        message: status.message || "VRCNeph could not finish its update. Download the latest VRCNeph.exe from GitHub and replace the old file.",
+        confirmLabel: "OK",
+        confirmClass: "primary",
+        hideCancel: true
+      });
+      return;
+    }
+  } catch {
+    // The normal update check remains available if this status cannot be read.
+  }
+  await checkForUpdates({ automatic: true });
+}
 async function loadSettings() {
   try {
     const saved = await api("settingsGet");
@@ -13537,6 +13556,6 @@ Promise.all([loadLibrary(), loadSettings(), loadMessageHistory()])
     void loadBackground();
     void loadSession();
     setTimeout(initializeDatabaseStartupStatus, 1200);
-    setTimeout(() => checkForUpdates({ automatic: true }), 2500);
+    setTimeout(checkStartupUpdateStatus, 2500);
   })
   .catch((e) => toast(e.message));
