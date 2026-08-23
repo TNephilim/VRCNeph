@@ -14,10 +14,10 @@
     <Company>VRCNeph</Company>
     <Authors>VRCNeph</Authors>
     <Copyright></Copyright>
-    <Version>1.0.30</Version>
-    <AssemblyVersion>1.0.30.0</AssemblyVersion>
-    <FileVersion>1.0.30.0</FileVersion>
-    <InformationalVersion>1.0.29</InformationalVersion>
+    <Version>1.0.31</Version>
+    <AssemblyVersion>$(Version).0</AssemblyVersion>
+    <FileVersion>$(Version).0</FileVersion>
+    <InformationalVersion>$(Version)</InformationalVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <UseWindowsForms>true</UseWindowsForms>
@@ -53,6 +53,12 @@
   <Target Name="PublishRootExecutable" AfterTargets="Build">
     <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="Publish" Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);PublishDir=$(MSBuildProjectDirectory)\artifacts\publish\;NoBuild=true" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)\artifacts\publish\VRCNeph.exe" DestinationFiles="$(RootExecutablePath)" />
+  </Target>
+
+  <Target Name="ValidateVersionContract" BeforeTargets="BeforeBuild">
+    <Error Condition="'$(InformationalVersion)' != '$(Version)'" Text="InformationalVersion must match Version so the in-app updater reports the installed build correctly." />
+    <Error Condition="'$(AssemblyVersion)' != '$(Version).0'" Text="AssemblyVersion must match Version with a trailing revision component." />
+    <Error Condition="'$(FileVersion)' != '$(Version).0'" Text="FileVersion must match Version with a trailing revision component." />
   </Target>
 
 </Project>
