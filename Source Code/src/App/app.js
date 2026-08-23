@@ -2052,7 +2052,7 @@ function showAvatarUpdateHistory() {
 function avatarSourceLabels(source) {
   const labels = [];
   for (const part of String(source || "").split(/[,+|;]/).map((x) => x.trim()).filter(Boolean)) {
-    const label = part === "vrchat" ? "VRChat" : part === "avatar-database" ? "VRCX" : part === "pas" ? "Prismic" : part === "vrchat-recent" ? "Recent" : "";
+    const label = part === "vrchat" ? "VRChat" : part === "avatar-database" ? "VRCX" : part === "avtrzip" ? "AVTR.zip" : part === "pas" ? "Prismic" : part === "vrchat-recent" ? "Recent" : "";
     if (label && !labels.includes(label)) labels.push(label);
   }
   return labels;
@@ -2360,19 +2360,21 @@ function avatarDatabaseProvider() {
 }
 function avatarDatabaseProviderLabel(provider = avatarDatabaseProvider()) {
   if (provider === "all") return "all databases";
-  return provider === "pas" ? "Prismic PAS" : "VRCX DB";
+  return provider === "avtrzip" ? "AVTR.zip" : provider === "pas" ? "Prismic PAS" : "VRCX DB";
 }
 function avatarDatabaseProviderDescription(provider = avatarDatabaseProvider()) {
   if (provider === "all") return "Search all databases. Pick one for faster results.";
-  return provider === "pas" ? "Search Prismic PAS avatars." : "Search VRCX avatars.";
+  return provider === "avtrzip" ? "Search AVTR.zip avatars." : provider === "pas" ? "Search Prismic PAS avatars." : "Search VRCX avatars.";
 }
 function updateAvatarDatabaseCopy() {
   const provider = avatarDatabaseProvider();
   state.avatarDatabaseProvider = provider;
   if ($("avatarDatabaseProviderMenuBtn")) updateSortButton("avatarDatabaseProviderSelect", "avatarDatabaseProviderMenuBtn");
-  $("avatarDatabaseSearchInput").placeholder = provider === "all" ? "Search all databases" : provider === "pas" ? "Search Prismic PAS avatars" : "Search VRCX avatars";
+  $("avatarDatabaseSearchInput").placeholder = provider === "all" ? "Search all databases" : provider === "avtrzip" ? "Search AVTR.zip avatars" : provider === "pas" ? "Search Prismic PAS avatars" : "Search VRCX avatars";
   $("avatarDatabaseStatus").textContent = avatarDatabaseProviderDescription(provider);
-  $("avatarDatabaseEmptyState").querySelector("p").textContent = provider === "pas"
+  $("avatarDatabaseEmptyState").querySelector("p").textContent = provider === "avtrzip"
+      ? "Enter a search, then press Search or Enter to search AVTR.zip."
+    : provider === "pas"
       ? "Enter a search, then press Search or Enter to search Prismic PAS."
     : provider === "all"
       ? "All-database searches take longer. Pick one database for quicker results."
@@ -3267,7 +3269,7 @@ async function saveDatabaseAvatarToGroup(avatar, groupId, { focusTarget = false,
   if (toastDuplicatePendingFavoriteAction(avatarId, groupId, "add")) return;
   if (confirm && !await confirmAction({ title: "Save Avatar", message: `Save "${avatar.name || avatar.avatarId || "this avatar"}" to "${group.name}"?`, confirmLabel: "Save", confirmClass: "primary" })) return;
   try {
-    state.library = await api("saveAvatar", { ...avatar, id: "", groupId, source: avatar.source || "avatar-database" });
+    state.library = await api("saveAvatar", { ...avatar, id: "", groupId, source: avatar.source || (avatarDatabaseProvider() === "avtrzip" ? "avtrzip" : "avatar-database") });
     const local = findLocalAvatarByFavorite(groupId, avatarId);
     enqueueSyncedAvatarAdd(avatarId, groupId, { localId: local?.id || "", name: avatar.name || avatarId });
     if (focusTarget) {

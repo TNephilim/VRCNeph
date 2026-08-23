@@ -7581,6 +7581,7 @@ internal sealed class AvatarDatabaseClient
     private const int VrcxRemotePageSize = 50;
     private const int VrcxRemoteRandomPageCeiling = 1000;
     private const int DatabaseFullSearchPageLimit = 1000;
+    private const string AvtrZipGatewayBaseUrl = "https://api.crecross.com/avatrzip/v1/";
     private const string PasDatabaseFileName = "pasavtrdb_pc.bin";
     private const string PasDatabasePrimaryUrl = "https://gist.githubusercontent.com/Prismic247/930d08f34c61e4282992cdb3afbafca0/raw/pasavtrdb.txt";
     private const string PasDatabaseBackupUrl = "https://prismic.net/vrc/pasavtrdb.txt";
@@ -7591,12 +7592,14 @@ internal sealed class AvatarDatabaseClient
     private static readonly Dictionary<string, AvatarInput> VrChatAvatarDetailCache = new(StringComparer.OrdinalIgnoreCase);
     private static PasDatabaseData? PasCache;
     private static readonly SemaphoreSlim QueryGate = new(1, 1);
+    private static readonly HttpClient AvtrZipHttp = CreateAvtrZipHttpClient();
     private static readonly HttpClient PasHttp = CreatePasHttpClient();
     private static readonly HttpClient VrcxRemoteHttp = CreateVrcxRemoteHttpClient();
 
     public async Task<AvatarDatabaseSearchResult> SearchAsync(AvatarSearchInput input, VrChatClient? vrchat = null)
     {
         if (IsAllProvider(input)) return await SearchAllAsync(input, vrchat);
+        if (IsAvtrZipProvider(input)) return await SearchAvtrZipAsync(input, vrchat);
         if (IsPasProvider(input)) return await SearchPasAsync(input, vrchat);
 
         var query = input.Query?.Trim() ?? "";
@@ -7608,6 +7611,7 @@ internal sealed class AvatarDatabaseClient
     public async Task<AvatarDatabaseCountResult> CountAsync(AvatarSearchInput input, VrChatClient? vrchat = null)
     {
         if (IsAllProvider(input)) return await CountAllAsync(input, vrchat);
+        if (IsAvtrZipProvider(input)) return await CountAvtrZipAsync(input);
         if (IsPasProvider(input)) return await CountPasAsync(input);
 
         var query = input.Query?.Trim() ?? "";
@@ -7630,6 +7634,7 @@ internal sealed class AvatarDatabaseClient
     public async Task<AvatarDatabaseSearchResult> RandomAsync(AvatarSearchInput input, VrChatClient? vrchat = null)
     {
         if (IsAllProvider(input)) return await RandomAllAsync(input, vrchat);
+        if (IsAvtrZipProvider(input)) return await RandomAvtrZipAsync(input, vrchat);
         if (IsPasProvider(input)) return await RandomPasAsync(input, vrchat);
 
         var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
@@ -7644,6 +7649,12 @@ internal sealed class AvatarDatabaseClient
 
     public List<DiagnosticItem> SourceDiagnostics() =>
     [
+        new DiagnosticItem(
+            "AVTR.zip source",
+            "Remote service",
+            $"Gateway: {AvtrZipGatewayBaseUrl} (verification and renewal stay server-side)",
+            "info",
+            true),
         new DiagnosticItem(
             "Prismic PAS source",
             "Downloaded file",
@@ -7668,6 +7679,7 @@ internal sealed class AvatarDatabaseClient
     {
         var checks = new[]
         {
+            CheckDatabaseSourceAsync("avtrzip", "AVTR.zip", async () => { await QueryAvtrZipAvatarsAsync("avatar", 1); }),
             CheckDatabaseSourceAsync("pas", "Prismic PAS", async () => { await GetRemotePasDatabaseInfoAsync(); }),
             CheckDatabaseSourceAsync("vrcx", "VRCX Remote DB", async () => { await GetRemoteVrcxStringAsync(RemoteVrcxUrl(new AvatarSearchInput("avatar", Limit: 1, Provider: "vrcx"), 1, 1)); })
         };
@@ -7739,12 +7751,13 @@ internal sealed class AvatarDatabaseClient
         userId = userId.Trim();
         if (!userId.StartsWith("usr_", StringComparison.OrdinalIgnoreCase)) return null;
         var input = new AvatarSearchInput("", Limit: 50, Page: 1, AuthorId: userId, SearchAvatar: false, SearchAuthor: true, SearchDescription: false, SearchTags: false, Provider: "vrcx");
-        foreach (var provider in new[] { "vrcx", "pas" })
+        foreach (var provider in new[] { "vrcx", "avtrzip", "pas" })
         {
             try
             {
                 var result = provider switch
                 {
+                    "avtrzip" => await SearchAvtrZipAsync(input with { Provider = provider }, vrchat),
                     "pas" => await SearchPasAsync(input with { Provider = provider }, vrchat),
                     _ => await SearchRemoteVrcxAsync(input with { Provider = provider }, vrchat)
                 };
@@ -7769,12 +7782,13 @@ internal sealed class AvatarDatabaseClient
     {
         if (string.IsNullOrWhiteSpace(avatarId)) return null;
         var input = new AvatarSearchInput(avatarId.Trim(), Limit: 5, Page: 1, Provider: "vrcx");
-        foreach (var provider in new[] { "vrcx", "pas" })
+        foreach (var provider in new[] { "vrcx", "avtrzip", "pas" })
         {
             try
             {
                 var result = provider switch
                 {
+                    "avtrzip" => await SearchAvtrZipAsync(input with { Provider = provider }, vrchat),
                     "pas" => await SearchPasAsync(input with { Provider = provider }, vrchat),
                     _ => await SearchRemoteVrcxAsync(input with { Provider = provider }, vrchat)
                 };
@@ -7835,6 +7849,7 @@ internal sealed class AvatarDatabaseClient
         var byDuplicateKey = new Dictionary<string, AvatarInput>(StringComparer.OrdinalIgnoreCase);
         var providerHasMore = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
         {
+            ["avtrzip"] = true,
             ["pas"] = true,
             ["vrcx"] = true
         };
@@ -7843,6 +7858,21 @@ internal sealed class AvatarDatabaseClient
         for (var providerPage = 1; unique.Count < targetCount && providerHasMore.Values.Any(BooleanIdentity); providerPage++)
         {
             var pageResults = new List<(string Provider, AvatarDatabaseSearchResult Result)>();
+
+            if (providerHasMore["avtrzip"])
+            {
+                try
+                {
+                    var result = await SearchAvtrZipAsync(input with { Provider = "avtrzip", Page = providerPage, Limit = limit }, vrchat);
+                    pageResults.Add(("avtrzip", result));
+                    providerHasMore["avtrzip"] = result.HasMore;
+                }
+                catch (Exception ex)
+                {
+                    providerHasMore["avtrzip"] = false;
+                    if (providerErrors.Add("avtrzip")) errors.Add($"AVTR.zip: {ex.Message}");
+                }
+            }
 
             if (providerHasMore["pas"])
             {
@@ -7883,7 +7913,7 @@ internal sealed class AvatarDatabaseClient
         var skip = (page - 1) * limit;
         var visiblePage = unique.Skip(skip).Take(limit).ToList();
         var hasMore = unique.Count > skip + limit || providerHasMore.Values.Any(BooleanIdentity);
-        if (visiblePage.Count == 0 && errors.Count == 2) throw new InvalidOperationException(string.Join(" | ", errors));
+        if (visiblePage.Count == 0 && errors.Count == providerHasMore.Count) throw new InvalidOperationException(string.Join(" | ", errors));
         return new AvatarDatabaseSearchResult(visiblePage, page, hasMore, DateTimeOffset.UtcNow);
     }
 
@@ -7894,6 +7924,7 @@ internal sealed class AvatarDatabaseClient
         var byDuplicateKey = new Dictionary<string, AvatarInput>(StringComparer.OrdinalIgnoreCase);
         var providerHasMore = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
         {
+            ["avtrzip"] = true,
             ["pas"] = true,
             ["vrcx"] = true
         };
@@ -7905,6 +7936,21 @@ internal sealed class AvatarDatabaseClient
         for (var providerPage = 1; providerHasMore.Values.Any(BooleanIdentity); providerPage++)
         {
             var pageResults = new List<AvatarDatabaseSearchResult>();
+            if (providerHasMore["avtrzip"])
+            {
+                try
+                {
+                    var result = await SearchAvtrZipAsync(input with { Provider = "avtrzip", Page = providerPage, Limit = limit }, null);
+                    pageResults.Add(result);
+                    providerHasMore["avtrzip"] = result.HasMore;
+                }
+                catch (Exception ex)
+                {
+                    providerHasMore["avtrzip"] = false;
+                    if (providerErrors.Add("avtrzip")) errors.Add($"AVTR.zip: {ex.Message}");
+                }
+            }
+
             if (providerHasMore["pas"])
             {
                 try
@@ -7941,7 +7987,7 @@ internal sealed class AvatarDatabaseClient
             if (pageResults.All(x => x.Results.Count == 0 && !x.HasMore)) break;
         }
 
-        if (unique.Count == 0 && errors.Count == 2)
+        if (unique.Count == 0 && errors.Count == providerHasMore.Count)
         {
             SetCountProgress(progressKey, 0, false, true);
             throw new InvalidOperationException(string.Join(" | ", errors));
@@ -8026,6 +8072,7 @@ internal sealed class AvatarDatabaseClient
         return
         [
             new("vrcx", "VRCX DB", VrcxRemoteRandomPageCeiling * VrcxRemotePageSize),
+            new("avtrzip", "AVTR.zip", VrcxRemoteRandomPageCeiling * VrcxRemotePageSize),
             new("pas", "Prismic PAS", pasWeight)
         ];
     }
@@ -8705,6 +8752,181 @@ internal sealed class AvatarDatabaseClient
             .SelectMany(x => (x ?? "").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
             .Distinct(StringComparer.OrdinalIgnoreCase));
 
+    private static async Task<AvatarDatabaseSearchResult> SearchAvtrZipAsync(AvatarSearchInput input, VrChatClient? vrchat)
+    {
+        var query = input.Query?.Trim() ?? "";
+        if (query.Length > 0 && query.Length < 3 && !IsAuthorNameOnlySearch(input) && !HasOptionFilter(input))
+            throw new InvalidOperationException("Enter at least 3 characters to search AVTR.zip.");
+        if (!HasSearchField(input)) throw new InvalidOperationException("Enable at least one search field.");
+
+        var page = Math.Max(1, input.Page);
+        var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
+        var cacheKey = AvtrZipCacheKey(input, page, limit);
+        if (Cache.TryGetValue(cacheKey, out var cached) && DateTimeOffset.UtcNow - cached.CachedAt < TimeSpan.FromMinutes(3))
+        {
+            if (vrchat is not null) await HydrateVrChatResultsAsync(cached.Results, vrchat);
+            return cached with { CachedAt = DateTimeOffset.UtcNow };
+        }
+
+        await QueryGate.WaitAsync();
+        try
+        {
+            var gatewayPage = await QueryAvtrZipAvatarsAsync(query, page);
+            if (vrchat is not null) await HydrateVrChatResultsAsync(gatewayPage.Result.Results, vrchat);
+            var results = gatewayPage.Result.Results.Where(x => AvatarMatchesSearch(x, input)).Take(limit).ToList();
+            var result = gatewayPage.Result with { Results = results };
+            Cache[cacheKey] = result;
+            return result;
+        }
+        finally
+        {
+            QueryGate.Release();
+        }
+    }
+
+    private static async Task<AvatarDatabaseCountResult> CountAvtrZipAsync(AvatarSearchInput input)
+    {
+        var query = input.Query?.Trim() ?? "";
+        if (query.Length > 0 && query.Length < 3 && !IsAuthorNameOnlySearch(input) && !HasOptionFilter(input))
+            throw new InvalidOperationException("Enter at least 3 characters to search AVTR.zip.");
+        if (!HasSearchField(input)) throw new InvalidOperationException("Enable at least one search field.");
+
+        var countKey = AvtrZipCacheKey(input, 1, 50);
+        if (CountCache.TryGetValue(countKey, out var cached) && DateTimeOffset.UtcNow - cached.CachedAt < TimeSpan.FromMinutes(3)) return cached;
+
+        await QueryGate.WaitAsync();
+        try
+        {
+            var gatewayPage = await QueryAvtrZipAvatarsAsync(query, 1);
+            var count = new AvatarDatabaseCountResult(query, gatewayPage.TotalCount, DateTimeOffset.UtcNow);
+            CountCache[countKey] = count;
+            return count;
+        }
+        finally
+        {
+            QueryGate.Release();
+        }
+    }
+
+    private static async Task<AvatarDatabaseSearchResult> RandomAvtrZipAsync(AvatarSearchInput input, VrChatClient? vrchat)
+    {
+        var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
+        await QueryGate.WaitAsync();
+        try
+        {
+            var results = new List<AvatarInput>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var attempts = Math.Max(10, limit / 4 + 6);
+
+            for (var attempt = 0; results.Count < limit && attempt < attempts; attempt++)
+            {
+                var pageResults = (await QueryAvtrZipAvatarsAsync(input.Query?.Trim() ?? "", 1)).Result.Results;
+                Shuffle(pageResults);
+                foreach (var avatar in pageResults.Take(5))
+                {
+                    if (!IsRandomDatabaseAvatarEligible(avatar)) continue;
+                    var key = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
+                    if (string.IsNullOrWhiteSpace(key) || !seen.Add(key)) continue;
+                    results.Add(avatar);
+                    if (results.Count >= limit) break;
+                }
+            }
+
+            Shuffle(results);
+            var finalResults = results.Take(limit).ToList();
+            if (vrchat is not null) await HydrateVrChatResultsAsync(finalResults, vrchat);
+            return new AvatarDatabaseSearchResult(finalResults.Where(IsRandomDatabaseAvatarEligible).Take(limit).ToList(), 1, false, DateTimeOffset.UtcNow);
+        }
+        finally
+        {
+            QueryGate.Release();
+        }
+    }
+
+    private static async Task<AvtrZipSearchPage> QueryAvtrZipAvatarsAsync(string query, int page)
+    {
+        var safePage = Math.Max(1, page);
+        var url = $"search?q={Uri.EscapeDataString(query)}&page={safePage}&limit=50";
+        var body = await GetAvtrZipGatewayStringAsync(url);
+        using var document = JsonDocument.Parse(body);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("ok", out var ok) || ok.ValueKind != JsonValueKind.True)
+            throw new InvalidOperationException("AVTR.zip gateway returned an unexpected response.");
+
+        var results = new List<AvatarInput>();
+        if (root.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in items.EnumerateArray())
+            {
+                var avatar = ReadAvtrZipAvatar(item);
+                if (!string.IsNullOrWhiteSpace(avatar.AvatarId)) results.Add(avatar);
+            }
+        }
+
+        var totalCount = ReadInt(root, "total", results.Count);
+        var hasMore = root.TryGetProperty("hasMore", out var more) && more.ValueKind == JsonValueKind.True;
+        return new AvtrZipSearchPage(
+            new AvatarDatabaseSearchResult(results, safePage, hasMore, DateTimeOffset.UtcNow, totalCount),
+            totalCount);
+    }
+
+    private static AvatarInput ReadAvtrZipAvatar(JsonElement item)
+    {
+        var id = ReadString(item, "id");
+        var name = ReadString(item, "name");
+        var useCount = ReadInt(item, "useCount");
+        return new AvatarInput
+        {
+            AvatarId = id,
+            Name = string.IsNullOrWhiteSpace(name) ? id : name,
+            AuthorName = ReadString(item, "authorName"),
+            AuthorId = ReadString(item, "authorId"),
+            ReleaseStatus = "public",
+            Tags = ReadString(item, "tags"),
+            SourceUrl = string.IsNullOrWhiteSpace(id) ? AvtrZipGatewayBaseUrl : $"https://vrchat.com/home/avatar/{id}",
+            Notes = useCount > 0 ? $"Found through AVTR.zip. Used {useCount} times." : "Found through AVTR.zip.",
+            RawJson = item.GetRawText(),
+            Source = "avtrzip"
+        };
+    }
+
+    private static async Task<string> GetAvtrZipGatewayStringAsync(string relativeUrl)
+    {
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            try
+            {
+                using var response = await AvtrZipHttp.GetAsync(relativeUrl);
+                var body = await response.Content.ReadAsStringAsync();
+                if (response.IsSuccessStatusCode) return body;
+                if (attempt < 3 && IsTransientAvtrZipGatewayStatus(response.StatusCode))
+                {
+                    await Task.Delay(AvtrZipRetryDelay(response, attempt));
+                    continue;
+                }
+                throw new InvalidOperationException($"AVTR.zip gateway request failed ({(int)response.StatusCode}).");
+            }
+            catch (Exception ex) when (attempt < 3 && ex is HttpRequestException or TaskCanceledException)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(500 * attempt));
+            }
+        }
+
+        throw new InvalidOperationException("AVTR.zip gateway request could not be completed after retries.");
+    }
+
+    private static bool IsTransientAvtrZipGatewayStatus(HttpStatusCode statusCode) =>
+        statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests or HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout
+        || (int)statusCode == 500;
+
+    private static TimeSpan AvtrZipRetryDelay(HttpResponseMessage response, int attempt)
+    {
+        var retryAfter = response.Headers.RetryAfter?.Delta;
+        if (retryAfter is not null && retryAfter > TimeSpan.Zero)
+            return retryAfter > TimeSpan.FromSeconds(10) ? TimeSpan.FromSeconds(10) : retryAfter.Value;
+        return TimeSpan.FromMilliseconds(500 * attempt);
+    }
+
     private static async Task HydrateVrChatResultsAsync(List<AvatarInput> avatars, VrChatClient vrchat)
     {
         if (avatars.Count == 0) return;
@@ -8770,9 +8992,12 @@ internal sealed class AvatarDatabaseClient
     }
 
     private static bool IsAllProvider(AvatarSearchInput input) => string.Equals(input.Provider, "all", StringComparison.OrdinalIgnoreCase);
+    private static bool IsAvtrZipProvider(AvatarSearchInput input) => string.Equals(input.Provider, "avtrzip", StringComparison.OrdinalIgnoreCase);
     private static bool IsPasProvider(AvatarSearchInput input) => string.Equals(input.Provider, "pas", StringComparison.OrdinalIgnoreCase);
     private static bool IsAuthorNameOnlySearch(AvatarSearchInput input) =>
         input.SearchAuthor && !input.SearchAvatar && !input.SearchDescription && !input.SearchTags && !HasOptionFilter(input) && !string.IsNullOrWhiteSpace(input.Query);
+    private static string AvtrZipCacheKey(AvatarSearchInput input, int page, int limit) =>
+        $"avtrzip\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}\n{page}\n{limit}";
     private static async Task<AvatarDatabaseSearchResult> SearchRemoteVrcxAsync(AvatarSearchInput input, VrChatClient? vrchat)
     {
         var query = input.Query?.Trim() ?? "";
@@ -8916,6 +9141,18 @@ internal sealed class AvatarDatabaseClient
         }
         if (ReadString(performance, "has_impostor").Equals("true", StringComparison.OrdinalIgnoreCase)) tags.Add("Impostor");
         return string.Join(", ", tags.Distinct(StringComparer.OrdinalIgnoreCase));
+    }
+
+    private static HttpClient CreateAvtrZipHttpClient()
+    {
+        var client = new HttpClient
+        {
+            BaseAddress = new Uri(AvtrZipGatewayBaseUrl),
+            Timeout = TimeSpan.FromSeconds(25)
+        };
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("VRCNeph/1.0");
+        client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+        return client;
     }
 
     private static HttpClient CreatePasHttpClient()
@@ -9958,6 +10195,7 @@ internal sealed record VrcxDatabaseStatus(bool HasLocalDatabase, string Path, st
 internal sealed record DatabaseSourceStatus(string Provider, string Name, bool Available, string Message);
 internal sealed record DatabaseSourceStatusResult(DatabaseSourceStatus[] Sources);
 internal sealed record PasUpdateStatus(bool HasLocalFile, bool HasUpdate, string LocalFileDate, string RemoteFileDate, long LocalBytes, long RemoteBytes, string Url, string Message);
+internal sealed record AvtrZipSearchPage(AvatarDatabaseSearchResult Result, int TotalCount);
 internal sealed record PasDatabaseData(string Path, string PlatformLabel, string FileDate, int AvatarCount, int AuthorCount, int FileAvatarCount, int FileAuthorCount, byte[] DynamicBytes, byte[] AvatarIds, uint[] AuthorIds, string[] AvatarNames, string[] AuthorNames);
 internal sealed record VrcxFeedAvatarRow(string CreatedAt, string UserId, string DisplayName, string OwnerId, string AvatarName, string CurrentImageUrl, string CurrentThumbnailImageUrl);
 internal sealed record PasDatabaseInfo(string Location, string FileDate, long ContentLength, DateTimeOffset? LastModifiedUtc, string ETag, int AvatarCount, int AuthorCount, int FileAvatarCount, int FileAuthorCount, bool HeaderVerified);
