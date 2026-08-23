@@ -161,6 +161,7 @@ internal static class Program
     private const string UpdateRepositoryOwner = "TNephilim";
     private const string UpdateRepositoryName = "VRCNeph";
     private const string OverlayDisplayHotkey = "F8";
+    private const string LaunchHandoffMutexName = "Local\\VRCNeph.LaunchHandoff";
     private static readonly AvatarStore Store = new();
     private static readonly AppSettingsStore Settings = new();
     private static readonly MessageHistoryStore MessageHistory = new();
@@ -201,6 +202,7 @@ internal static class Program
             return;
         }
 
+        CloseEarlierInstancesForNewLaunch();
         TrySetAppUserModelId();
         ConfigureWebViewUserDataFolder("main");
         if (!VrChat.HasSavedSession)
@@ -924,6 +926,79 @@ internal static class Program
         return new ExportResult(path);
     }
 
+    private static void CloseEarlierInstancesForNewLaunch()
+    {
+        using var launchMutex = new Mutex(false, LaunchHandoffMutexName);
+        var mutexAcquired = false;
+        List<Process> earlierInstances = [];
+        try
+        {
+            mutexAcquired = launchMutex.WaitOne(TimeSpan.FromSeconds(10));
+            if (!mutexAcquired) throw new InvalidOperationException("Another VRCNeph launch is already in progress. Wait a moment, then open VRCNeph again.");
+        }
+        catch (AbandonedMutexException)
+        {
+            // The prior launcher ended unexpectedly; this launch can safely take over.
+            mutexAcquired = true;
+        }
+
+        try
+        {
+            var currentProcessId = Environment.ProcessId;
+            var currentExe = Process.GetCurrentProcess().MainModule?.FileName;
+            if (string.IsNullOrWhiteSpace(currentExe) || !File.Exists(currentExe)) return;
+
+            earlierInstances = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(currentExe))
+                .Where(process => process.Id != currentProcessId)
+                .Where(process =>
+                {
+                    try
+                    {
+                        return !process.HasExited && string.Equals(process.MainModule?.FileName, currentExe, StringComparison.OrdinalIgnoreCase);
+                    }
+                    catch
+                    {
+                        return false;
+                    }
+                })
+                .ToList();
+
+            foreach (var process in earlierInstances)
+            {
+                try
+                {
+                    process.CloseMainWindow();
+                }
+                catch { }
+            }
+
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(8);
+            while (earlierInstances.Any(process =>
+            {
+                try { return !process.HasExited; }
+                catch { return false; }
+            }) && DateTimeOffset.UtcNow < deadline)
+            {
+                Thread.Sleep(100);
+            }
+
+            var stillRunning = earlierInstances.Any(process =>
+            {
+                try { return !process.HasExited; }
+                catch { return false; }
+            });
+            if (stillRunning)
+            {
+                throw new InvalidOperationException("Another VRCNeph window is still closing. Wait for it to finish, then open VRCNeph again.");
+            }
+        }
+        finally
+        {
+            foreach (var process in earlierInstances) process.Dispose();
+            if (mutexAcquired) launchMutex.ReleaseMutex();
+        }
+    }
+
     private static object OpenGame()
     {
         Process.Start(new ProcessStartInfo("steam://run/438100//--no-vr") { UseShellExecute = true });
@@ -1082,7 +1157,7 @@ internal static class Program
     {
         open,
         hotkey = Settings.Get().OverlayHotkey,
-        panels = new[] { "avatars", "worlds", "friends", "database", "recent" }
+        panels = new[] { "avatars", "worlds", "friends" }
     };
 
     private static async Task<object> BuildOverlaySnapshotAsync()
@@ -1154,9 +1229,7 @@ internal static class Program
             friendGroups,
             friends = friendGroups.SelectMany(GroupItems).Take(80).ToList(),
             current,
-            session = current.Location,
-            recent = BuildRecentOverlayItems(lib),
-            recentWorlds = BuildRecentOverlayWorldItems()
+            session = current.Location
         };
     }
 
@@ -1502,52 +1575,6 @@ internal static class Program
             return new OverlayLocation(false, "", "", "", "", "", "No session data available.");
         }
     }
-
-    private static List<object> BuildRecentOverlayItems(LibraryData lib)
-    {
-        var recentGroup = lib.Groups.FirstOrDefault(group => group.Id.Equals("recent", StringComparison.OrdinalIgnoreCase)
-            || group.Name.Contains("recent", StringComparison.OrdinalIgnoreCase));
-        if (recentGroup is null) return [];
-        return lib.Avatars
-            .Where(avatar => avatar.GroupId == recentGroup.Id)
-            .OrderBy(avatar => avatar.Order)
-            .Take(20)
-            .Select(avatar => (object)new
-            {
-                type = "avatar",
-                id = avatar.AvatarId,
-                localId = avatar.Id,
-                groupId = avatar.GroupId,
-                title = avatar.NameOrId(),
-                name = avatar.NameOrId(),
-                subtitle = string.IsNullOrWhiteSpace(avatar.AuthorName) ? "Recent avatar" : avatar.AuthorName,
-                authorName = avatar.AuthorName,
-                imageUrl = string.IsNullOrWhiteSpace(avatar.ThumbnailImageUrl) ? avatar.ImageUrl : avatar.ThumbnailImageUrl,
-                fullImageUrl = avatar.ImageUrl,
-                releaseStatus = avatar.ReleaseStatus,
-                platforms = avatar.Platforms,
-                source = avatar.Source,
-                updatedAt = avatar.UpdatedAt
-            })
-            .ToList();
-    }
-
-    private static List<object> BuildRecentOverlayWorldItems() =>
-        VrChatLogWatcher.RecentWorldLocations(30)
-            .Select(item => new
-            {
-                id = item.WorldId,
-                name = string.IsNullOrWhiteSpace(item.WorldName) ? item.WorldId : item.WorldName,
-                room = item.WorldName,
-                location = item.Location,
-                timestamp = item.Timestamp,
-                releaseStatus = "public",
-                imageUrl = "",
-                occupants = 0,
-                capacity = 0
-            })
-            .Cast<object>()
-            .ToList();
 
     private static void ApplyOverlayWindowStyle(PhotinoWindow window)
     {
@@ -3959,8 +3986,7 @@ internal sealed class AppSettingsStore
         var panelColor = string.IsNullOrWhiteSpace(s.PanelColor) || !System.Text.RegularExpressions.Regex.IsMatch(s.PanelColor, "^#[0-9a-fA-F]{6}$") ? color : s.PanelColor;
         var panelSynced = s.SchemaVersion < 6 || s.PanelColorSynced;
         var overlayPanel = string.IsNullOrWhiteSpace(s.OverlayDefaultPanel) ? DefaultSettings.OverlayDefaultPanel : s.OverlayDefaultPanel.Trim().ToLowerInvariant();
-        if (overlayPanel == "session" || overlayPanel == "current") overlayPanel = "database";
-        if (!new[] { "avatars", "worlds", "friends", "database", "recent" }.Contains(overlayPanel)) overlayPanel = DefaultSettings.OverlayDefaultPanel;
+        if (!new[] { "avatars", "worlds", "friends" }.Contains(overlayPanel)) overlayPanel = DefaultSettings.OverlayDefaultPanel;
         var overlayOpacity = s.SchemaVersion < 10 && s.OverlayOpacity == 0 ? DefaultSettings.OverlayOpacity : Math.Clamp(s.SchemaVersion < 12 && s.OverlayOpacity == 86 ? DefaultSettings.OverlayOpacity : s.OverlayOpacity, 45, 100);
         var overlayScale = s.SchemaVersion < 10 && s.OverlayScale == 0 ? DefaultSettings.OverlayScale : Math.Clamp(s.OverlayScale, 80, 135);
         var hotkey = string.IsNullOrWhiteSpace(s.OverlayHotkey) ? DefaultSettings.OverlayHotkey : s.OverlayHotkey.Trim();

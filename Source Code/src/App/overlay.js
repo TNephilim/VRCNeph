@@ -6,26 +6,8 @@ const OVERLAY_DETAIL_POSITIONS_KEY = "vrcneph.overlay.detailPositions.v1";
 const LOCAL_WORLD_GROUPS_KEY = "vrcneph.worldGroups";
 const DEFAULT_WORLD_GROUP_KEY = "local_world_favorites";
 const SYNCED_GROUP_AVATAR_LIMIT = 50;
-const PANEL_LABELS = { avatars: "Avatars", worlds: "Worlds", friends: "Friends", database: "Database", recent: "Recent" };
-const DATABASE_PROVIDERS = [
-  { value: "all", label: "All Databases" },
-  { value: "pas", label: "Prismic PAS" },
-  { value: "vrcx", label: "VRCX DB" }
-];
-const DATABASE_SEARCH_MODES = [
-  { value: "phrase", label: "Match Phrase" },
-  { value: "exact", label: "Exact Phrase" },
-  { value: "startsWith", label: "Starts With" },
-  { value: "endsWith", label: "Ends With" },
-  { value: "allWords", label: "All Words" }
-];
-const DATABASE_SORT_OPTIONS = [
-  { value: "relevance", label: "Relevance" },
-  { value: "updatedDesc", label: "Recently updated" },
-  { value: "createdDesc", label: "Recently added" },
-  { value: "nameAsc", label: "Name A-Z" },
-  { value: "authorAsc", label: "Author A-Z" }
-];
+const OVERLAY_PANELS = ["avatars", "worlds", "friends"];
+const PANEL_LABELS = { avatars: "Avatars", worlds: "Worlds", friends: "Friends" };
 const PANEL_SORT_OPTIONS = {
   avatars: [
     { value: "updatedDesc", label: "Recently updated" },
@@ -80,10 +62,8 @@ const state = {
   selectedAvatarId: "",
   selectedWorldId: "",
   selectedFriendId: "",
-  recentMode: "avatars",
-  filters: { avatars: "", worlds: "", friends: "", database: "", recent: "" },
+  filters: { avatars: "", worlds: "", friends: "" },
   sort: { avatars: "updatedDesc", worlds: "updatedDesc", friends: "presence" },
-  database: { query: "", key: "", results: [], loading: false, error: "", timer: 0, provider: "all", searchMode: "phrase", sort: "relevance", scope: "avatar", searchDescriptionTags: true, platforms: { pc: false, android: false, ios: false } },
   detachedPanels: loadOverlayJson(OVERLAY_DETACHED_PANELS_KEY, {}),
   detailPositions: loadOverlayJson(OVERLAY_DETAIL_POSITIONS_KEY, {}),
   detailPanels: {
@@ -91,7 +71,7 @@ const state = {
     world: { open: false, item: null, loading: false, error: "", token: 0 },
     user: { open: false, item: null, loading: false, error: "", token: 0 }
   },
-  roulette: { avatars: 0, database: 0, intervals: { avatars: 60000, database: 60000 }, running: { avatars: false, database: false } },
+  roulette: { avatars: 0, intervals: { avatars: 60000 }, running: { avatars: false } },
   groupDropdownOpen: false,
   data: {
     settings: loadOverlayJson(OVERLAY_SETTINGS_CACHE_KEY, {}),
@@ -101,12 +81,18 @@ const state = {
     worlds: [],
     friends: [],
     current: null,
-    recent: [],
-    recentWorlds: [],
     session: null
   },
   pending: new Map()
 };
+
+let removedDetachedPanels = false;
+for (const panel of Object.keys(state.detachedPanels || {})) {
+  if (OVERLAY_PANELS.includes(panel)) continue;
+  delete state.detachedPanels[panel];
+  removedDetachedPanels = true;
+}
+if (removedDetachedPanels) saveOverlayJson(OVERLAY_DETACHED_PANELS_KEY, state.detachedPanels);
 
 const $ = (id) => document.getElementById(id);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[c]));
@@ -234,49 +220,14 @@ function groupCountLabel(group, visibleCount, itemLabel) {
 }
 
 function setPanel(panel) {
-  state.panel = panel;
+  state.panel = OVERLAY_PANELS.includes(panel) ? panel : "avatars";
   state.groupDropdownOpen = false;
-  document.querySelectorAll(".overlay-tabs button").forEach((button) => button.classList.toggle("active", button.dataset.panel === panel));
+  document.querySelectorAll(".overlay-tabs button").forEach((button) => button.classList.toggle("active", button.dataset.panel === state.panel));
   render();
 }
 
 function normalizedPanel(panel = "") {
-  return panel === "session" || panel === "current" ? "database" : panel;
-}
-
-function databaseProviderLabel(value = state.database.provider) {
-  return DATABASE_PROVIDERS.find((item) => item.value === value)?.label || "All Databases";
-}
-
-function databaseSearchModeLabel(value = state.database.searchMode) {
-  return DATABASE_SEARCH_MODES.find((item) => item.value === value)?.label || "Match Phrase";
-}
-
-function databaseSortLabel(value = state.database.sort) {
-  return DATABASE_SORT_OPTIONS.find((item) => item.value === value)?.label || "Relevance";
-}
-
-function databaseSearchKey(query = state.filters.database) {
-  const platforms = state.database.platforms || {};
-  return [
-    String(query || "").trim(),
-    state.database.provider || "all",
-    state.database.searchMode || "phrase",
-    state.database.scope || "avatar",
-    state.database.searchDescriptionTags ? "details" : "names",
-    platforms.pc ? "pc" : "",
-    platforms.android ? "android" : "",
-    platforms.ios ? "ios" : ""
-  ].join("\n");
-}
-
-function resetDatabaseSearch() {
-  clearTimeout(state.database.timer);
-  state.database.query = "";
-  state.database.key = "";
-  state.database.results = [];
-  state.database.loading = false;
-  state.database.error = "";
+  return OVERLAY_PANELS.includes(panel) ? panel : "avatars";
 }
 
 function menuOptionsHtml(options, selectedValue, dataName) {
@@ -288,7 +239,6 @@ function panelSortLabel(panel = state.panel) {
 }
 
 function panelControlsHtml(panel = state.panel, expanded = false) {
-  if (panel === "database") return databaseControlsHtml(expanded);
   const options = PANEL_SORT_OPTIONS[panel];
   if (!options) return "";
   const editIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m14 6 4 4"></path></svg>`;
@@ -310,67 +260,12 @@ function panelControlsHtml(panel = state.panel, expanded = false) {
   </div>`;
 }
 
-function databaseFilterLabel() {
-  const count = Number(state.database.scope === "author")
-    + Number(!state.database.searchDescriptionTags)
-    + Object.values(state.database.platforms || {}).filter(Boolean).length;
-  return count ? `Filters ${count}` : "Filters";
-}
-
-function databaseControlsHtml(expanded = false) {
-  return `<div class="overlay-database-controls ${expanded ? "expanded" : ""}">
-    ${expanded ? `<div class="overlay-select-control">
-      <button type="button" data-database-menu-toggle="provider">${escapeHtml(databaseProviderLabel())}</button>
-      <div class="overlay-select-menu" data-database-menu="provider" hidden>${menuOptionsHtml(DATABASE_PROVIDERS, state.database.provider || "all", "database-provider")}</div>
-    </div>` : ""}
-    <div class="overlay-select-control">
-      <button type="button" data-database-menu-toggle="mode">${escapeHtml(databaseSearchModeLabel())}</button>
-      <div class="overlay-select-menu" data-database-menu="mode" hidden>${menuOptionsHtml(DATABASE_SEARCH_MODES, state.database.searchMode || "phrase", "database-mode")}</div>
-    </div>
-    <div class="overlay-select-control">
-      <button type="button" data-database-menu-toggle="sort">${escapeHtml(databaseSortLabel())}</button>
-      <div class="overlay-select-menu" data-database-menu="sort" hidden>${menuOptionsHtml(DATABASE_SORT_OPTIONS, state.database.sort || "relevance", "database-sort")}</div>
-    </div>
-    <div class="overlay-select-control">
-      <button type="button" data-database-menu-toggle="filters">${escapeHtml(databaseFilterLabel())}</button>
-      <div class="overlay-select-menu overlay-filter-menu" data-database-menu="filters" hidden>
-        <button type="button" class="${state.database.scope !== "author" ? "active" : ""}" data-database-scope="avatar">Search avatars</button>
-        <button type="button" class="${state.database.scope === "author" ? "active" : ""}" data-database-scope="author">Search authors</button>
-        <label><input type="checkbox" data-database-details-toggle ${state.database.searchDescriptionTags ? "checked" : ""}>Description & tags</label>
-        <label><input type="checkbox" data-database-platform="pc" ${state.database.platforms?.pc ? "checked" : ""}>PC</label>
-        <label><input type="checkbox" data-database-platform="android" ${state.database.platforms?.android ? "checked" : ""}>Android</label>
-        <label><input type="checkbox" data-database-platform="ios" ${state.database.platforms?.ios ? "checked" : ""}>iOS</label>
-      </div>
-    </div>
-    ${expanded ? `<div class="overlay-segmented-control" role="group" aria-label="Search scope">
-      <button type="button" class="${state.database.scope !== "author" ? "active" : ""}" data-database-scope="avatar">Avatars</button>
-      <button type="button" class="${state.database.scope === "author" ? "active" : ""}" data-database-scope="author">Authors</button>
-    </div>
-    <label class="overlay-toggle"><input type="checkbox" data-database-details-toggle ${state.database.searchDescriptionTags ? "checked" : ""}>Details</label>` : ""}
-    <div class="overlay-quick-actions">
-      <button type="button" data-random-database-page>Random Page</button>
-      <button type="button" data-random-database-avatar>Random Avatar</button>
-      <button type="button" data-database-roulette>${state.roulette.running.database ? "Running" : "Roulette"}</button>
-    </div>
-  </div>`;
-}
-
 function dateSortValue(item, ...keys) {
   for (const key of keys) {
     const value = Date.parse(item?.[key] || "");
     if (Number.isFinite(value)) return value;
   }
   return 0;
-}
-
-function sortedDatabaseResults(results = state.database.results) {
-  const items = [...(results || [])];
-  const sort = state.database.sort || "relevance";
-  if (sort === "updatedDesc") return items.sort((a, b) => dateSortValue(b, "remoteUpdatedAt", "updatedAt") - dateSortValue(a, "remoteUpdatedAt", "updatedAt"));
-  if (sort === "createdDesc") return items.sort((a, b) => dateSortValue(b, "remoteCreatedAt", "createdAt") - dateSortValue(a, "remoteCreatedAt", "createdAt"));
-  if (sort === "nameAsc") return items.sort((a, b) => String(a?.name || a?.avatarName || a?.avatarId || "").localeCompare(String(b?.name || b?.avatarName || b?.avatarId || "")));
-  if (sort === "authorAsc") return items.sort((a, b) => String(a?.authorName || "").localeCompare(String(b?.authorName || "")) || String(a?.name || a?.avatarId || "").localeCompare(String(b?.name || b?.avatarId || "")));
-  return items;
 }
 
 function sortedPanelItems(panel, items = []) {
@@ -422,9 +317,7 @@ function isDetached(panel = state.panel) {
 
 function defaultDetachedPanel(panel) {
   const index = Object.keys(state.detachedPanels || {}).length;
-  return panel === "database"
-    ? { x: 18 + (index * 18), y: 72 + (index * 18), width: 520, height: 620 }
-    : { x: 28 + (index * 18), y: 86 + (index * 18), width: 340, height: 460 };
+  return { x: 28 + (index * 18), y: 86 + (index * 18), width: 340, height: 460 };
 }
 
 function detachPanel(panel = state.panel) {
@@ -663,15 +556,6 @@ function randomFavoriteAvatar() {
   })));
 }
 
-function filterRandomDatabaseAvatars(results = []) {
-  const excluded = excludedRandomAvatarIds();
-  return dedupeRandomAvatars(results || []).filter((avatar) => {
-    const id = avatarRandomId(avatar);
-    const status = String(avatar?.releaseStatus || "").trim().toLowerCase();
-    return /^avtr_[0-9a-f-]+$/i.test(id) && !["private", "deleted", "hidden", "unavailable"].includes(status) && !excluded.has(id);
-  });
-}
-
 async function waitForOverlayAvatarEquipped(id, kind = "") {
   const target = avatarRandomId({ avatarId: id });
   const started = Date.now();
@@ -721,64 +605,6 @@ async function randomAvatarFromOverlay(button, options = {}) {
   return equipAvatarIdFromOverlay(id, button, "Random", options);
 }
 
-async function randomDatabasePageFromOverlay(button) {
-  const restore = setBusy(button, "...");
-  try {
-    let avatars = [];
-    for (let attempt = 0; avatars.length < 50 && attempt < 5; attempt++) {
-      const result = await api("avatarDatabaseRandom", { provider: state.database.provider || "all", query: "", limit: 50, page: 1 }, 120000);
-      const page = Array.isArray(result?.results) ? result.results : Array.isArray(result?.avatars) ? result.avatars : [];
-      avatars = filterRandomDatabaseAvatars([...avatars, ...page]).slice(0, 50);
-    }
-    if (!avatars.length) throw new Error(`No safe random ${databaseProviderLabel().toLowerCase()} avatars found outside Recent, Deleted, Private, or invalid entries.`);
-    state.filters.database = "";
-    state.database.key = `random\n${Date.now()}`;
-    state.database.query = "";
-    state.database.results = avatars;
-    state.database.loading = false;
-    state.database.error = "";
-    restore("Loaded");
-    render();
-    setTimeout(() => { if (button.isConnected) button.textContent = "Random Page"; }, 900);
-    return true;
-  } catch (error) {
-    button.title = error.message;
-    restore("Random Page");
-    return false;
-  }
-}
-
-async function randomDatabaseAvatarFromOverlay(button = null, restoreLabel = "Roulette", options = {}) {
-  const restore = button ? setBusy(button, "...") : null;
-  try {
-    let avatars = [];
-    for (let attempt = 0; !avatars.length && attempt < 5; attempt++) {
-      const result = await api("avatarDatabaseRandom", { provider: state.database.provider || "all", query: "", limit: 50, page: 1 }, 120000);
-      const page = Array.isArray(result?.results) ? result.results : Array.isArray(result?.avatars) ? result.avatars : [];
-      avatars = filterRandomDatabaseAvatars(page);
-    }
-    const avatar = randomFrom(avatars);
-    const id = avatar?.avatarId || avatar?.id || "";
-    if (!id) throw new Error("No random database avatar was returned.");
-    await api("overlayEquipAvatar", { id }, 120000);
-    if (options.waitForConfirm) await waitForOverlayAvatarEquipped(id, options.rouletteKind || "");
-    if (restore) {
-      restore("Sent");
-      setTimeout(() => { if (button.isConnected) button.textContent = restoreLabel; }, 900);
-    }
-    return true;
-  } catch (error) {
-    if (button) {
-      button.title = error.message;
-      restore?.(restoreLabel);
-      await confirmOverlay({ title: restoreLabel, message: error.message, confirmLabel: "OK", danger: false });
-    } else {
-      await confirmOverlay({ title: "Database Roulette", message: error.message, confirmLabel: "OK", danger: false });
-    }
-    return false;
-  }
-}
-
 function stopRoulette(kind) {
   clearTimeout(state.roulette[kind]);
   state.roulette[kind] = 0;
@@ -795,9 +621,8 @@ function rouletteIntervalMs() {
 }
 
 async function openRouletteDialog(kind) {
-  const isDatabase = kind === "database";
-  $("rouletteTitle").textContent = isDatabase ? "Database Roulette" : "Avatar Roulette";
-  $("rouletteMessage").textContent = isDatabase ? "Equip random database avatars on a timer." : "Equip random favorite avatars on a timer.";
+  $("rouletteTitle").textContent = "Avatar Roulette";
+  $("rouletteMessage").textContent = "Equip random favorite avatars on a timer.";
   const interval = state.roulette.intervals[kind] || 60000;
   $("rouletteMinutesInput").value = String(Math.floor(interval / 60000));
   $("rouletteSecondsInput").value = String(Math.floor((interval % 60000) / 1000));
@@ -828,9 +653,7 @@ async function openRouletteDialog(kind) {
 
 async function rouletteTick(kind) {
   if (!state.roulette.running[kind]) return;
-  const ok = kind === "database"
-    ? await randomDatabaseAvatarFromOverlay(null, "Roulette", { waitForConfirm: true, rouletteKind: kind })
-    : await randomAvatarFromOverlay(null, { waitForConfirm: true, rouletteKind: kind });
+  const ok = await randomAvatarFromOverlay(null, { waitForConfirm: true, rouletteKind: kind });
   if (!ok || !state.roulette.running[kind]) {
     stopRoulette(kind);
     return;
@@ -849,19 +672,6 @@ async function toggleAvatarRoulette(button) {
   const ok = await randomAvatarFromOverlay(button, { waitForConfirm: true, rouletteKind: "avatars" });
   if (!ok) return stopRoulette("avatars");
   state.roulette.avatars = setTimeout(() => { void rouletteTick("avatars"); }, state.roulette.intervals.avatars);
-  render();
-}
-
-async function toggleDatabaseRoulette(button) {
-  const choice = await openRouletteDialog("database");
-  if (choice === "stop") return stopRoulette("database");
-  if (choice !== "start") return;
-  stopRoulette("database");
-  state.roulette.intervals.database = rouletteIntervalMs();
-  state.roulette.running.database = true;
-  const ok = await randomDatabaseAvatarFromOverlay(button, "Roulette", { waitForConfirm: true, rouletteKind: "database" });
-  if (!ok) return stopRoulette("database");
-  state.roulette.database = setTimeout(() => { void rouletteTick("database"); }, state.roulette.intervals.database);
   render();
 }
 
@@ -942,28 +752,6 @@ function worldRow(world) {
       <div class="row-title">${escapeHtml(title)}</div>
       <div class="row-subtitle">${escapeHtml(world.authorName ? `by ${world.authorName}` : "Favorite world")}</div>
       <div class="chips">${chip(occupancy, "location")}${chip(world.releaseStatus || "public", world.releaseStatus || "public")}${tags.map((tag) => chip(tag.replace(/^worlds/i, ""), "ready")).join("")}</div>
-    </div>
-    <div class="row-actions">
-      <button class="row-action" type="button" data-open-world="${escapeHtml(world.id || "")}">Join</button>
-      ${favoriteAction}
-    </div>
-  </article>`;
-}
-
-function recentWorldRow(world) {
-  const title = world.name || world.room || world.id || "Recent world";
-  const location = world.location || world.instanceId || "";
-  const selected = detailPanelMatches("world", world.id);
-  const favoriteEntry = favoriteWorldEntry(world.id || world.worldId || "");
-  const favoriteAction = favoriteEntry
-    ? favoriteStarButton({ active: true, action: "data-unfavorite-world", id: world.id || "", title: "Unfavorite world" })
-    : favoriteStarButton({ active: false, action: "data-save-world", id: world.id || "", title: "Favorite world" });
-  return `<article class="overlay-row ${selected ? "selected" : ""}" data-world-id="${escapeHtml(world.id || "")}">
-    ${imageHtml(world, title)}
-    <div class="row-main">
-      <div class="row-title">${escapeHtml(title)}</div>
-      <div class="row-subtitle">${escapeHtml(location || "Recent world")}</div>
-      <div class="chips">${chip("Recent", "ready")}${world.timestamp ? chip(world.timestamp, "location") : ""}</div>
     </div>
     <div class="row-actions">
       <button class="row-action" type="button" data-open-world="${escapeHtml(world.id || "")}">Join</button>
@@ -1150,34 +938,6 @@ function placeholderRow(title, subtitle, chipsHtml, initial = "") {
 function renderGroupDropdown() {
   const dropdown = $("groupDropdown");
   dropdown.classList.toggle("tall", state.panel === "avatars" || state.panel === "worlds");
-  if (state.panel === "database") {
-    dropdown.hidden = !state.groupDropdownOpen;
-    if (dropdown.hidden) {
-      dropdown.innerHTML = "";
-      return;
-    }
-    dropdown.innerHTML = DATABASE_PROVIDERS.map((provider) => `<button class="${provider.value === (state.database.provider || "all") ? "active" : ""}" type="button" data-database-provider="${escapeHtml(provider.value)}">
-      <strong>${escapeHtml(provider.label)}</strong>
-      <span>${escapeHtml(provider.value === "all" ? "Search every source" : provider.value === "pas" ? "Prismic PAS cache" : "VRCX database")}</span>
-    </button>`).join("");
-    return;
-  }
-  if (state.panel === "recent") {
-    dropdown.hidden = !state.groupDropdownOpen;
-    if (dropdown.hidden) {
-      dropdown.innerHTML = "";
-      return;
-    }
-    const options = [
-      { value: "avatars", label: "Recent Avatars", count: `${(state.data.recent || []).length} avatars` },
-      { value: "worlds", label: "Recent Worlds", count: `${(state.data.recentWorlds || []).length} worlds` }
-    ];
-    dropdown.innerHTML = options.map((option) => `<button class="${option.value === state.recentMode ? "active" : ""}" type="button" data-recent-mode="${escapeHtml(option.value)}">
-      <strong>${escapeHtml(option.label)}</strong>
-      <span>${escapeHtml(option.count)}</span>
-    </button>`).join("");
-    return;
-  }
   const groups = activeGroups();
   const itemKey = panelItemKey();
   dropdown.hidden = !["avatars", "worlds", "friends"].includes(state.panel) || !state.groupDropdownOpen || groups.length <= 1;
@@ -1245,69 +1005,11 @@ function panelView(panel, { detached = false } = {}) {
       content: friends.length ? friendsGroupedHtml(friends) : emptyHtml("No friends loaded", "Refresh the overlay after logging in, or check the main app connection.")
     };
   }
-  if (panel === "database") {
-    const query = String(state.filters.database || "").trim();
-    const key = databaseSearchKey(query);
-    const randomPageReady = String(state.database.key || "").startsWith("random\n") && (state.database.results || []).length;
-    let content = "";
-    if (randomPageReady) {
-      const results = sortedDatabaseResults();
-      content = withPanel("database", () => results.map((item, index) => avatarRow({
-        id: item.avatarId || item.id || "",
-        name: item.name || item.avatarId || item.id || "Database avatar",
-        authorName: item.authorName || "Unknown author",
-        imageUrl: item.thumbnailImageUrl || item.imageUrl || "",
-        fullImageUrl: item.imageUrl || "",
-        releaseStatus: item.releaseStatus || "public",
-        platforms: item.platforms || "",
-        source: item.source || "avatar-database"
-      }, index)).join(""));
-    } else if (!query) content = emptyHtml("Search avatar database", "Choose a database source and type at least 3 characters.");
-    else if (query.length < 3) content = emptyHtml("Keep typing", "Database search starts at 3 characters.");
-    else if (state.database.loading && state.database.key === key) content = emptyHtml("Searching", `Looking through ${databaseProviderLabel().toLowerCase()}...`);
-    else if (state.database.error && state.database.key === key) content = emptyHtml("Search failed", state.database.error);
-    else if (state.database.key !== key) {
-      scheduleDatabaseSearch(query);
-      content = emptyHtml("Searching", `Looking through ${databaseProviderLabel().toLowerCase()}...`);
-    } else {
-      const results = sortedDatabaseResults();
-      content = results.length
-        ? withPanel("database", () => results.map((item, index) => avatarRow({
-          id: item.avatarId || item.id || "",
-          name: item.name || item.avatarId || item.id || "Database avatar",
-          authorName: item.authorName || "Unknown author",
-          imageUrl: item.thumbnailImageUrl || item.imageUrl || "",
-          fullImageUrl: item.imageUrl || "",
-          releaseStatus: item.releaseStatus || "public",
-          platforms: item.platforms || "",
-          source: item.source || "avatar-database"
-        }, index)).join(""))
-        : emptyHtml("No database results", "Try a different avatar name, author, or id.");
-    }
-    return {
-      title: "Database Search",
-      count: databaseProviderLabel(),
-      full: true,
-      tools: databaseControlsHtml(detached),
-      content
-    };
-  }
-  const showingWorlds = state.recentMode === "worlds";
-  const items = showingWorlds ? (state.data.recentWorlds || []) : (state.data.recent || []);
-  const visibleItems = items.filter((item) => itemMatchesFilter(item, showingWorlds ? ["name", "room", "location", "id"] : ["title", "subtitle", "id"], "recent"));
   return {
-    title: showingWorlds ? "Recent Worlds" : "Recent Avatars",
-    count: `${visibleItems.length} ${showingWorlds ? "worlds" : "avatars"}`,
-    content: visibleItems.length
-      ? withPanel("recent", () => showingWorlds ? visibleItems.map(recentWorldRow).join("") : visibleItems.map((item, index) => avatarRow({
-        ...item,
-        id: item.id || item.avatarId || "",
-        name: item.name || item.title || item.id || "Recent avatar",
-        authorName: item.authorName || item.subtitle || "Recent avatar",
-        releaseStatus: item.releaseStatus || "public",
-        platforms: item.platforms || "standalonewindows"
-      }, index)).join(""))
-      : emptyHtml(showingWorlds ? "No recent worlds yet" : "No recent avatars yet", showingWorlds ? "Join worlds in VRChat and they will appear here from your recent logs." : "Equip avatars and they will appear here.")
+    title: "Unavailable",
+    count: "",
+    hasGroups: false,
+    content: emptyHtml("Panel unavailable", "Choose Avatars, Worlds, or Friends.")
   };
 }
 
@@ -1399,75 +1101,6 @@ function renderCurrent() {
   $("content").innerHTML = `${avatarCard}${worldCard}`;
 }
 
-function renderDatabase() {
-  state.groupDropdownOpen = false;
-  $("panelHead").classList.add("full");
-  $("prevGroupBtn").hidden = true;
-  $("nextGroupBtn").hidden = true;
-  $("groupSelectBtn").disabled = true;
-  $("panelTitle").textContent = "Database Search";
-  $("panelCount").textContent = "Avatars";
-  renderGroupDropdown();
-  const query = String(state.filters.database || "").trim();
-  if (!query) {
-    $("content").innerHTML = emptyHtml("Search avatar database", "Type at least 3 characters to search.");
-    return;
-  }
-  if (query.length < 3) {
-    $("content").innerHTML = emptyHtml("Keep typing", "Database search starts at 3 characters.");
-    return;
-  }
-  if (state.database.loading && state.database.query === query) {
-    $("content").innerHTML = emptyHtml("Searching", "Looking through the avatar database...");
-    return;
-  }
-  if (state.database.error && state.database.query === query) {
-    $("content").innerHTML = emptyHtml("Search failed", state.database.error);
-    return;
-  }
-  if (state.database.query !== query) {
-    scheduleDatabaseSearch(query);
-    $("content").innerHTML = emptyHtml("Searching", "Looking through the avatar database...");
-    return;
-  }
-  const results = sortedDatabaseResults();
-  $("content").innerHTML = results.length
-    ? results.map((item, index) => avatarRow({
-      id: item.avatarId || item.id || "",
-      name: item.name || item.avatarId || item.id || "Database avatar",
-      authorName: item.authorName || "Unknown author",
-      imageUrl: item.thumbnailImageUrl || item.imageUrl || "",
-      fullImageUrl: item.imageUrl || "",
-      releaseStatus: item.releaseStatus || "public",
-      platforms: item.platforms || "",
-      source: item.source || "avatar-database"
-    }, index)).join("")
-    : emptyHtml("No database results", "Try a different avatar name, author, or id.");
-}
-
-function renderRecent() {
-  state.groupDropdownOpen = false;
-  $("panelHead").classList.add("full");
-  $("prevGroupBtn").hidden = true;
-  $("nextGroupBtn").hidden = true;
-  $("groupSelectBtn").disabled = true;
-  $("panelTitle").textContent = "Recent";
-  $("panelCount").textContent = "History";
-  renderGroupDropdown();
-  const items = state.data.recent || [];
-  const visibleItems = items.filter((item) => itemMatchesFilter(item, ["title", "subtitle", "id"], "recent"));
-  $("content").innerHTML = visibleItems.length
-    ? visibleItems.map((item, index) => avatarRow({
-      ...item,
-      id: item.id || item.avatarId || "",
-      name: item.name || item.title || item.id || "Recent avatar",
-      authorName: item.authorName || item.subtitle || "Recent avatar",
-      releaseStatus: item.releaseStatus || "public",
-      platforms: item.platforms || "standalonewindows"
-    }, index)).join("")
-    : emptyHtml("No recent items yet", "Recent avatars, worlds, and players will appear here as the overlay integration grows.");
-}
-
 function emptyHtml(title, message) {
   return `<section class="empty-panel"><h2>${escapeHtml(title)}</h2><p>${escapeHtml(message)}</p></section>`;
 }
@@ -1475,11 +1108,10 @@ function emptyHtml(title, message) {
 function applyMainPanelView() {
   const split = isDetached(state.panel);
   const hasGroupHeader = ["avatars", "worlds", "friends"].includes(state.panel);
-  const hasDatabaseHeader = state.panel === "database";
   $("panelHead").classList.toggle("full", split || !hasGroupHeader);
   $("prevGroupBtn").hidden = split || !["avatars", "worlds", "friends"].includes(state.panel);
   $("nextGroupBtn").hidden = split || !["avatars", "worlds", "friends"].includes(state.panel);
-  $("groupSelectBtn").disabled = split || (!hasGroupHeader && !hasDatabaseHeader);
+  $("groupSelectBtn").disabled = split || !hasGroupHeader;
   $("splitPanelBtn").textContent = split ? "Dock" : "Split";
   $("splitPanelBtn").title = split ? "Dock this panel back into the main overlay" : "Split this tab into its own overlay panel";
 
@@ -1498,10 +1130,10 @@ function applyMainPanelView() {
   $("nextGroupBtn").hidden = !view.hasGroups;
   $("prevGroupBtn").disabled = !view.canPrev;
   $("nextGroupBtn").disabled = !view.canNext;
-  $("groupSelectBtn").disabled = !view.hasGroups && !["database", "recent"].includes(state.panel);
-  $("panelTitle").textContent = state.panel === "database" ? databaseProviderLabel() : view.title;
-  $("panelCount").textContent = state.panel === "database" ? "Database Search" : view.count;
-  if (view.hasGroups || ["database", "recent"].includes(state.panel)) renderGroupDropdown();
+  $("groupSelectBtn").disabled = !view.hasGroups;
+  $("panelTitle").textContent = view.title;
+  $("panelCount").textContent = view.count;
+  if (view.hasGroups) renderGroupDropdown();
   else {
     $("groupDropdown").hidden = true;
     $("groupDropdown").innerHTML = "";
@@ -1515,8 +1147,8 @@ function detachedPanelHtml(panel, bounds) {
   const groupTools = view.hasGroups ? `<button class="nav-button" type="button" data-detached-group-step="-1" ${view.canPrev ? "" : "disabled"}>&lt;</button>
     <button class="group-button" type="button" disabled><span>${escapeHtml(group?.name || view.title)}</span><small>${escapeHtml(view.count)}</small></button>
     <button class="nav-button" type="button" data-detached-group-step="1" ${view.canNext ? "" : "disabled"}>&gt;</button>` : "";
-  const searchable = ["avatars", "worlds", "friends", "database", "recent"].includes(panel);
-  const placeholder = panel === "friends" ? "Search friends" : panel === "worlds" ? "Search worlds" : panel === "database" ? `Search ${databaseProviderLabel().toLowerCase()}` : panel === "recent" ? "Search recent" : "Search avatars";
+  const searchable = OVERLAY_PANELS.includes(panel);
+  const placeholder = panel === "friends" ? "Search friends" : panel === "worlds" ? "Search worlds" : "Search avatars";
   const search = searchable ? `<input class="detached-search" data-detached-search="${escapeHtml(panel)}" type="search" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(state.filters[panel] || "")}">` : "";
   return `<article class="detached-panel ${escapeHtml(panel)}" data-detached-panel="${escapeHtml(panel)}" style="left:${Number(bounds.x) || 20}px;top:${Number(bounds.y) || 70}px;width:${Number(bounds.width) || 340}px;height:${Number(bounds.height) || 460}px">
     <header class="detached-panel-titlebar" data-detached-drag="${escapeHtml(panel)}">
@@ -1803,12 +1435,12 @@ function renderDetailPanels() {
 
 function render() {
   applySnapshotSettings();
-  const searchable = ["avatars", "worlds", "friends", "database", "recent"].includes(state.panel);
+  const searchable = OVERLAY_PANELS.includes(state.panel);
   const panelControls = isDetached(state.panel) ? "" : panelControlsHtml(state.panel, false);
   $("overlayActions").hidden = !searchable && !["avatars", "worlds"].includes(state.panel);
   $("overlaySearchInput").hidden = !searchable;
   $("overlaySearchInput").value = state.filters[state.panel] || "";
-  $("overlaySearchInput").placeholder = state.panel === "friends" ? "Search friends" : state.panel === "worlds" ? "Search worlds" : state.panel === "database" ? "Search database" : state.panel === "recent" ? "Search recent" : "Search avatars";
+  $("overlaySearchInput").placeholder = state.panel === "friends" ? "Search friends" : state.panel === "worlds" ? "Search worlds" : "Search avatars";
   $("overlayDatabaseControls").hidden = !panelControls;
   $("overlayDatabaseControls").innerHTML = panelControls;
   $("saveCurrentAvatarOverlayBtn").hidden = state.panel !== "avatars";
@@ -1816,47 +1448,6 @@ function render() {
   applyMainPanelView();
   renderDetachedPanels();
   renderDetailPanels();
-}
-
-function scheduleDatabaseSearch(query) {
-  clearTimeout(state.database.timer);
-  const key = databaseSearchKey(query);
-  state.database.loading = true;
-  state.database.error = "";
-  state.database.query = query;
-  state.database.key = key;
-  state.database.timer = setTimeout(async () => {
-    try {
-      const authorOnly = state.database.scope === "author";
-      const searchDetails = Boolean(state.database.searchDescriptionTags);
-      const platforms = state.database.platforms || {};
-      const platformFilters = [
-        platforms.pc ? "pc" : "",
-        platforms.android ? "android" : "",
-        platforms.ios ? "ios" : ""
-      ].filter(Boolean).join(",");
-      const result = await api("avatarDatabaseSearch", {
-        query,
-        limit: 30,
-        page: 1,
-        provider: state.database.provider || "all",
-        searchMode: state.database.searchMode || "phrase",
-        searchAvatar: !authorOnly,
-        searchAuthor: true,
-        searchDescription: !authorOnly && searchDetails,
-        searchTags: !authorOnly && searchDetails,
-        platformFilters
-      }, 120000);
-      state.database.results = result?.results || result?.avatars || [];
-      state.database.error = "";
-    } catch (error) {
-      state.database.results = [];
-      state.database.error = error.message || "Database search failed.";
-    } finally {
-      state.database.loading = false;
-      if ((state.panel === "database" || isDetached("database")) && databaseSearchKey(query) === key) render();
-    }
-  }, 260);
 }
 
 async function refresh() {
@@ -1914,7 +1505,7 @@ function applySnapshotSettings() {
   if (!applySnapshotSettings.didChooseDefault && settings.overlayDefaultPanel) {
     applySnapshotSettings.didChooseDefault = true;
     const panel = normalizedPanel(settings.overlayDefaultPanel);
-    state.panel = ["avatars", "worlds", "friends", "database", "recent"].includes(panel) ? panel : "avatars";
+    state.panel = normalizedPanel(panel);
     document.querySelectorAll(".overlay-tabs button").forEach((button) => button.classList.toggle("active", button.dataset.panel === state.panel));
   }
 }
@@ -2348,8 +1939,6 @@ function findOverlayAvatar(avatarId = "") {
   const id = String(avatarId || "").toLowerCase();
   if (!id) return null;
   const sources = [
-    ...(state.database.results || []),
-    ...(state.data.recent || []),
     ...((state.data.avatarGroups || []).flatMap((group) => group.avatars || [])),
     state.data.current?.avatar || null
   ].filter(Boolean);
@@ -2632,42 +2221,11 @@ document.addEventListener("click", (event) => {
     toggleDatabaseMenu(menuToggle);
     return;
   }
-  const provider = event.target.closest("[data-database-provider]");
-  if (provider) {
-    state.database.provider = provider.dataset.databaseProvider || "all";
-    state.groupDropdownOpen = false;
-    resetDatabaseSearch();
-    hideDatabaseMenus();
-    render();
-    return;
-  }
-  const mode = event.target.closest("[data-database-mode]");
-  if (mode) {
-    state.database.searchMode = mode.dataset.databaseMode || "phrase";
-    resetDatabaseSearch();
-    hideDatabaseMenus();
-    render();
-    return;
-  }
-  const sort = event.target.closest("[data-database-sort]");
-  if (sort) {
-    state.database.sort = sort.dataset.databaseSort || "relevance";
-    hideDatabaseMenus();
-    render();
-    return;
-  }
   const panelSort = event.target.closest("[data-panel-sort]");
   if (panelSort) {
     const panel = panelSort.closest("[data-detached-panel]")?.dataset.detachedPanel || state.panel;
     if (PANEL_SORT_OPTIONS[panel]) state.sort[panel] = panelSort.dataset.panelSort || PANEL_SORT_OPTIONS[panel][0].value;
     hideDatabaseMenus();
-    render();
-    return;
-  }
-  const scope = event.target.closest("[data-database-scope]");
-  if (scope) {
-    state.database.scope = scope.dataset.databaseScope || "avatar";
-    resetDatabaseSearch();
     render();
     return;
   }
@@ -2712,30 +2270,7 @@ document.addEventListener("wheel", (event) => {
     cycle(PANEL_SORT_OPTIONS[panel] || [], state.sort[panel], (value) => { state.sort[panel] = value; });
     return;
   }
-  if (menu === "mode") {
-    cycle(DATABASE_SEARCH_MODES, state.database.searchMode || "phrase", (value) => { state.database.searchMode = value; resetDatabaseSearch(); });
-    return;
-  }
-  if (menu === "sort") {
-    cycle(DATABASE_SORT_OPTIONS, state.database.sort || "relevance", (value) => { state.database.sort = value; });
-  }
 }, { passive: false });
-
-document.addEventListener("change", (event) => {
-  const platform = event.target.closest("[data-database-platform]");
-  if (platform) {
-    const key = platform.dataset.databasePlatform || "";
-    state.database.platforms = { ...(state.database.platforms || {}), [key]: Boolean(platform.checked) };
-    resetDatabaseSearch();
-    render();
-    return;
-  }
-  const details = event.target.closest("[data-database-details-toggle]");
-  if (!details) return;
-  state.database.searchDescriptionTags = Boolean(details.checked);
-  resetDatabaseSearch();
-  render();
-});
 
 document.querySelectorAll(".overlay-tabs button").forEach((button) => button.addEventListener("click", () => setPanel(button.dataset.panel)));
 $("splitPanelBtn").addEventListener("click", () => {
@@ -2745,18 +2280,11 @@ $("splitPanelBtn").addEventListener("click", () => {
 $("prevGroupBtn").addEventListener("click", () => { state.groupDropdownOpen = false; stepGroupIndex(state.panel, -1); render(); });
 $("nextGroupBtn").addEventListener("click", () => { state.groupDropdownOpen = false; stepGroupIndex(state.panel, 1); render(); });
 $("groupSelectBtn").addEventListener("click", () => {
-  if (!["avatars", "worlds", "friends", "database", "recent"].includes(state.panel)) return;
+  if (!OVERLAY_PANELS.includes(state.panel)) return;
   state.groupDropdownOpen = !state.groupDropdownOpen;
   render();
 });
 $("groupDropdown").addEventListener("click", (event) => {
-  const recentMode = event.target.closest("[data-recent-mode]");
-  if (recentMode) {
-    state.recentMode = recentMode.dataset.recentMode === "worlds" ? "worlds" : "avatars";
-    state.groupDropdownOpen = false;
-    render();
-    return;
-  }
   const button = event.target.closest("[data-group-index]");
   if (!button) return;
   state.groupIndex[state.panel] = Number(button.dataset.groupIndex) || 0;
@@ -2830,8 +2358,8 @@ $("detachedPanels").addEventListener("pointerdown", (event) => {
     const dx = moveEvent.clientX - startX;
     const dy = moveEvent.clientY - startY;
     if (resize) {
-      state.detachedPanels[panel].width = Math.max(panel === "database" ? 420 : 260, Math.min(shell.width - 16, start.width + dx));
-      state.detachedPanels[panel].height = Math.max(panel === "database" ? 430 : 300, Math.min(shell.height - 16, start.height + dy));
+      state.detachedPanels[panel].width = Math.max(260, Math.min(shell.width - 16, start.width + dx));
+      state.detachedPanels[panel].height = Math.max(300, Math.min(shell.height - 16, start.height + dy));
     } else {
       const width = Number(start.width) || 340;
       const height = Number(start.height) || 460;
@@ -2974,24 +2502,6 @@ async function handleOverlayContentClick(event) {
   if (randomWorld) {
     event.stopPropagation();
     await randomWorldFromOverlay(randomWorld);
-    return;
-  }
-  const randomDatabasePage = event.target.closest("[data-random-database-page]");
-  if (randomDatabasePage) {
-    event.stopPropagation();
-    await randomDatabasePageFromOverlay(randomDatabasePage);
-    return;
-  }
-  const randomDatabaseAvatar = event.target.closest("[data-random-database-avatar]");
-  if (randomDatabaseAvatar) {
-    event.stopPropagation();
-    await randomDatabaseAvatarFromOverlay(randomDatabaseAvatar, "Random Avatar");
-    return;
-  }
-  const databaseRoulette = event.target.closest("[data-database-roulette]");
-  if (databaseRoulette) {
-    event.stopPropagation();
-    await toggleDatabaseRoulette(databaseRoulette);
     return;
   }
   const saveAvatar = event.target.closest("[data-save-avatar]");
