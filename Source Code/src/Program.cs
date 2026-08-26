@@ -8547,9 +8547,10 @@ internal sealed class AvatarDatabaseClient
         offset += checked(fileAvatars * flagSize);
 
         var authorIds = new uint[fileAvatars];
+        var authorIndexMask = PasAuthorIndexMask(fileAuthors);
         for (var i = 0; i < authorIds.Length; i++)
         {
-            authorIds[i] = BitConverter.ToUInt32(bytes, offset + (i * 4));
+            authorIds[i] = BitConverter.ToUInt32(bytes, offset + (i * 4)) & authorIndexMask;
         }
         offset += checked(fileAvatars * 4);
 
@@ -8561,6 +8562,14 @@ internal sealed class AvatarDatabaseClient
         if (avatarNames.Length < fileAvatars || authorNames.Length < fileAuthors) throw new InvalidOperationException("The Prismic PAS database row counts do not match the header.");
 
         return new PasDatabaseData(path, PlatformLabelFromPas(platform), fileDate, avatarCount, authorCount, fileAvatars, fileAuthors, dynamicBytes, avatarIds, authorIds, avatarNames, authorNames);
+    }
+
+    private static uint PasAuthorIndexMask(int fileAuthorCount)
+    {
+        var maxIndex = (uint)Math.Max(0, fileAuthorCount - 1);
+        uint mask = 0;
+        while (mask < maxIndex) mask = (mask << 1) | 1;
+        return mask;
     }
 
     private static byte[] BuildPasDynamicBytes(int version, int flagSize, byte[] randomBytes)
