@@ -7,22 +7,20 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <DebugType>none</DebugType>
-    <AssemblyName>VRCNeph</AssemblyName>
+    <AssemblyName>VRCNeph.App</AssemblyName>
     <Title>VRCNeph</Title>
     <Product>VRCNeph</Product>
     <Description>Desktop app for managing VRChat avatar favorites, groups, notes, syncing, and database search.</Description>
     <Company>VRCNeph</Company>
     <Authors>VRCNeph</Authors>
     <Copyright></Copyright>
-    <Version>1.0.31</Version>
+    <Version>1.0.32</Version>
     <AssemblyVersion>$(Version).0</AssemblyVersion>
     <FileVersion>$(Version).0</FileVersion>
     <InformationalVersion>$(Version)</InformationalVersion>
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <SelfContained>false</SelfContained>
     <UseWindowsForms>true</UseWindowsForms>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <ApplicationIcon>src\App\VRCNeph.ico</ApplicationIcon>
     <PublishDir>$(MSBuildProjectDirectory)\artifacts\publish\</PublishDir>
     <RootExecutablePath Condition="'$([System.IO.Path]::GetFileName($(MSBuildProjectDirectory)))' == 'Source Code'">$(MSBuildProjectDirectory)\..\VRCNeph.exe</RootExecutablePath>
@@ -47,13 +45,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="src\App\**\*" />
+    <Content Include="src\App\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
-
-  <Target Name="PublishRootExecutable" AfterTargets="Build">
-    <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="Publish" Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);PublishDir=$(MSBuildProjectDirectory)\artifacts\publish\;NoBuild=true" />
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\artifacts\publish\VRCNeph.exe" DestinationFiles="$(RootExecutablePath)" />
-  </Target>
 
   <Target Name="ValidateVersionContract" BeforeTargets="BeforeBuild">
     <Error Condition="'$(InformationalVersion)' != '$(Version)'" Text="InformationalVersion must match Version so the in-app updater reports the installed build correctly." />

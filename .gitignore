@@ -1,1 +1,4 @@
 VRCNeph.exe
+artifacts/
+Launcher/bin/
+Launcher/obj/

@@ -2626,12 +2626,17 @@ async function runRandomAvatarDatabasePage() {
   $("avatarDatabaseStatus").textContent = `Loading random ${providerLabel} avatars...`;
   try {
     let page = [];
-    for (let attempt = 0; page.length < 50 && attempt < 5; attempt++) {
-      const result = await api("avatarDatabaseRandom", { provider: avatarDatabaseProvider(), query: "", limit: 50, page: 1 }, 120000);
-      if (token !== state.avatarDatabaseSearchToken) return;
-      page = filterRandomDatabaseAvatars([...page, ...(result.results || [])]).slice(0, 50);
-    }
-    if (!page.length) throw new Error(`No safe random ${providerLabel} avatars found outside Recent, Deleted, Private, or invalid entries.`);
+    const alreadyShown = new Set(state.avatarDatabaseRandomPages
+      .flat()
+      .map((avatar) => avatarRandomId(avatar))
+      .filter(Boolean));
+    const excluded = new Set([...alreadyShown, ...excludedRandomAvatarIds()]);
+    const result = await api("avatarDatabaseRandom", { provider: avatarDatabaseProvider(), query: "", limit: 50, page: 1, excludedAvatarIds: [...excluded] }, 120000);
+    if (token !== state.avatarDatabaseSearchToken) return;
+    page = filterRandomDatabaseAvatars(result.results || [])
+      .filter((avatar) => !alreadyShown.has(avatarRandomId(avatar)))
+      .slice(0, 50);
+    if (page.length < 50) throw new Error(`Could not load a full 50-avatar random ${providerLabel} page. Please try again.`);
     state.avatarDatabaseMode = "random";
     state.avatarDatabaseRandomPages.push(page);
     state.avatarDatabaseResults = state.avatarDatabaseRandomPages.flat();
@@ -2643,6 +2648,7 @@ async function runRandomAvatarDatabasePage() {
     state.avatarDatabaseLoading = false;
     state.avatarDatabaseSearched = true;
     renderAvatarDatabaseResults();
+    $("avatarDatabaseResults").scrollTop = 0;
     $("avatarDatabaseStatus").textContent = `${state.avatarDatabaseTotal} random ${providerLabel} avatars loaded.`;
   } catch (e) {
     handleAvatarDatabaseError(e, token);
@@ -2650,9 +2656,10 @@ async function runRandomAvatarDatabasePage() {
 }
 async function fetchRandomDatabaseAvatar() {
   const provider = avatarDatabaseProvider();
+  const excluded = [...excludedRandomAvatarIds()];
   let results = [];
   for (let attempt = 0; !results.length && attempt < 5; attempt++) {
-    const result = await api("avatarDatabaseRandom", { provider, query: "", limit: 50, page: 1 }, 120000);
+    const result = await api("avatarDatabaseRandom", { provider, query: "", limit: 50, page: 1, excludedAvatarIds: excluded }, 120000);
     results = filterRandomDatabaseAvatars(result.results || []);
   }
   if (!results.length) throw new Error(`No safe random ${avatarDatabaseProviderLabel(provider)} avatars found.`);
