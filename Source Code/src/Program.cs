@@ -8864,52 +8864,61 @@ internal sealed class AvatarDatabaseClient
     {
         var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
         var excludedAvatarIds = RandomExcludedAvatarIds(input);
-        var firstPage = await QueryAvtrZipAvatarsAsync("", 1);
-        var total = firstPage.TotalCount;
-        if (total <= 0) throw new InvalidOperationException("AVTR.zip did not report any avatars.");
-
         var results = new List<AvatarInput>();
         var byDuplicateKey = new Dictionary<string, AvatarInput>(StringComparer.OrdinalIgnoreCase);
-        var selectedPositions = new HashSet<int>();
-        var loadedPages = new Dictionary<int, AvatarDatabaseSearchResult> { [1] = firstPage.Result };
-        var maxAttempts = Math.Min(total, Math.Max(limit * 12, 100));
+        var total = 0;
 
-        // AVTR.zip has no random route. Choose a uniform zero-based record position
-        // ourselves, then fetch exactly the gateway page that contains it. This is
-        // a record-level sample across its reported total, not a shuffle of page 1.
-        for (var attempts = 0; results.Count < limit && attempts < maxAttempts; attempts++)
+        // The gateway asks AVTR.zip for its seeded whole-catalogue random ordering.
+        // A fresh server-generated seed is used on every request. Additional bounded
+        // batches are only needed when exclusions or malformed records leave a gap.
+        for (var attempt = 0; results.Count < limit && attempt < 6; attempt++)
         {
-            var position = Random.Shared.Next(total);
-            if (!selectedPositions.Add(position)) continue;
-            var pageNumber = position / 50 + 1;
-            var indexOnPage = position % 50;
-            if (!loadedPages.TryGetValue(pageNumber, out var page))
+            var requested = Math.Clamp(limit - results.Count, 1, 50);
+            var batch = await QueryAvtrZipRandomAsync(requested);
+            total = batch.TotalCount;
+            foreach (var avatar in batch.Results)
             {
-                try
-                {
-                    page = (await QueryAvtrZipAvatarsAsync("", pageNumber)).Result;
-                    loadedPages[pageNumber] = page;
-                }
-                catch
-                {
-                    // Do not substitute PAS for an AVTR.zip position. Leave this
-                    // draw unavailable and continue sampling other AVTR.zip records.
-                    continue;
-                }
+                if (!IsRandomDatabaseAvatarEligible(avatar, excludedAvatarIds)) continue;
+                AddDedupedAvatar(avatar, results, byDuplicateKey);
+                if (results.Count >= limit) break;
             }
-
-            if (indexOnPage >= page.Results.Count) continue;
-            var avatar = page.Results[indexOnPage];
-            if (!IsRandomDatabaseAvatarEligible(avatar, excludedAvatarIds)) continue;
-            AddDedupedAvatar(avatar, results, byDuplicateKey);
         }
 
         if (vrchat is not null) await HydrateVrChatResultsAsync(results, vrchat);
         var finalResults = results.Where(avatar => IsRandomDatabaseAvatarEligible(avatar, excludedAvatarIds)).Take(limit).ToList();
         if (finalResults.Count < limit)
             throw new InvalidOperationException($"AVTR.zip could not return {limit} distinct random avatars.");
-        Shuffle(finalResults);
-        return new AvatarDatabaseSearchResult(finalResults, 1, false, DateTimeOffset.UtcNow);
+        return new AvatarDatabaseSearchResult(finalResults, 1, false, DateTimeOffset.UtcNow, total);
+    }
+
+    private static async Task<AvtrZipRandomBatch> QueryAvtrZipRandomAsync(int limit)
+    {
+        var safeLimit = Math.Clamp(limit, 1, 50);
+        var body = await GetAvtrZipGatewayStringAsync($"random?limit={safeLimit}");
+        using var document = JsonDocument.Parse(body);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("ok", out var ok) || ok.ValueKind != JsonValueKind.True
+            || !root.TryGetProperty("provider", out var provider) || provider.ValueKind != JsonValueKind.String
+            || !string.Equals(provider.GetString(), "avtrzip", StringComparison.OrdinalIgnoreCase)
+            || !root.TryGetProperty("seed", out var seedElement) || seedElement.ValueKind != JsonValueKind.Number
+            || !seedElement.TryGetUInt32(out var seed)
+            || !root.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+            throw new InvalidOperationException("AVTR.zip random gateway returned an unexpected response.");
+
+        var totalCount = ReadInt(root, "total", -1);
+        if (totalCount <= 0)
+            throw new InvalidOperationException("AVTR.zip random gateway did not report a valid catalogue total.");
+
+        var results = new List<AvatarInput>();
+        foreach (var item in items.EnumerateArray())
+        {
+            var avatar = ReadAvtrZipAvatar(item);
+            if (!string.IsNullOrWhiteSpace(avatar.AvatarId)) results.Add(avatar);
+        }
+        if (results.Count > safeLimit)
+            throw new InvalidOperationException("AVTR.zip random gateway returned more avatars than requested.");
+
+        return new AvtrZipRandomBatch(results, totalCount, seed);
     }
 
     private static async Task<AvtrZipSearchPage> QueryAvtrZipAvatarsAsync(string query, int page)
@@ -10286,6 +10295,7 @@ internal sealed record DatabaseSourceStatus(string Provider, string Name, bool A
 internal sealed record DatabaseSourceStatusResult(DatabaseSourceStatus[] Sources);
 internal sealed record PasUpdateStatus(bool HasLocalFile, bool HasUpdate, string LocalFileDate, string RemoteFileDate, long LocalBytes, long RemoteBytes, string Url, string Message);
 internal sealed record AvtrZipSearchPage(AvatarDatabaseSearchResult Result, int TotalCount);
+internal sealed record AvtrZipRandomBatch(List<AvatarInput> Results, int TotalCount, uint Seed);
 internal sealed record PasDatabaseData(string Path, string PlatformLabel, string FileDate, int AvatarCount, int AuthorCount, int FileAvatarCount, int FileAuthorCount, byte[] DynamicBytes, byte[] AvatarIds, uint[] AuthorIds, string[] AvatarNames, string[] AuthorNames);
 internal sealed record VrcxFeedAvatarRow(string CreatedAt, string UserId, string DisplayName, string OwnerId, string AvatarName, string CurrentImageUrl, string CurrentThumbnailImageUrl);
 internal sealed record PasDatabaseInfo(string Location, string FileDate, long ContentLength, DateTimeOffset? LastModifiedUtc, string ETag, int AvatarCount, int AuthorCount, int FileAvatarCount, int FileAuthorCount, bool HeaderVerified);
