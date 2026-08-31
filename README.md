@@ -11,10 +11,9 @@ Download the current Windows EXE from the [latest GitHub release](https://github
 Run `scripts\Build-VRCNeph.ps1` to rebuild the root `VRCNeph.exe` used by existing shortcuts and prepare these GitHub Release assets:
 
 - `VRCNeph.exe` — portable launcher.
-- `VRCNeph-app.zip` — framework-dependent VRCNeph app package.
-- `VRCNeph-release.json` — package version and SHA-256.
+- `VRCNephAssets.zip` — framework-dependent VRCNeph app package.
 
-Run `scripts\Publish-GitHubRelease.ps1` after the source commit is pushed to create or update the matching GitHub Release. It uploads all three assets together.
+Run `scripts\Publish-GitHubRelease.ps1` after the source commit is pushed to create or update the matching GitHub Release. It uploads both assets together.
 
 ## Source code
 

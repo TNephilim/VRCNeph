@@ -11,8 +11,7 @@ internal static class Program
 {
     private const string Owner = "TNephilim";
     private const string Repository = "VRCNeph";
-    private const string PackageName = "VRCNeph-app.zip";
-    private const string ReleaseManifestName = "VRCNeph-release.json";
+    private const string PackageName = "VRCNephAssets.zip";
     private const string AppExeName = "VRCNeph.App.exe";
     private const string DotnetInstallerUrl = "https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe";
     private const string WebViewInstallerUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
@@ -138,21 +137,13 @@ internal static class Program
                 .Where(asset => string.Equals(asset.GetProperty("name").GetString(), PackageName, StringComparison.OrdinalIgnoreCase))
                 .Select(asset => asset.GetProperty("browser_download_url").GetString())
                 .FirstOrDefault(url => !string.IsNullOrWhiteSpace(url));
-            var manifestUrl = assets
-                .Where(asset => string.Equals(asset.GetProperty("name").GetString(), ReleaseManifestName, StringComparison.OrdinalIgnoreCase))
-                .Select(asset => asset.GetProperty("browser_download_url").GetString())
-                .FirstOrDefault(url => !string.IsNullOrWhiteSpace(url));
-            if (string.IsNullOrWhiteSpace(version) || string.IsNullOrWhiteSpace(packageUrl) || string.IsNullOrWhiteSpace(manifestUrl)) throw new InvalidOperationException("The latest VRCNeph release does not include a valid app package and verification manifest.");
+            var expectedDigest = assets
+                .Where(asset => string.Equals(asset.GetProperty("name").GetString(), PackageName, StringComparison.OrdinalIgnoreCase))
+                .Select(asset => asset.TryGetProperty("digest", out var digest) ? digest.GetString() : null)
+                .FirstOrDefault(digest => !string.IsNullOrWhiteSpace(digest));
+            if (string.IsNullOrWhiteSpace(version) || string.IsNullOrWhiteSpace(packageUrl) || string.IsNullOrWhiteSpace(expectedDigest) || !expectedDigest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The latest VRCNeph release does not include a valid VRCNephAssets.zip package with a SHA-256 digest.");
             if (AppPackageIsCurrent(appDirectory, version)) return;
-
-            var manifest = JsonDocument.Parse(await Http.GetStringAsync(manifestUrl));
-            var manifestVersion = manifest.RootElement.GetProperty("version").GetString() ?? "";
-            var manifestPackage = manifest.RootElement.GetProperty("package").GetString() ?? "";
-            var expectedHash = manifest.RootElement.GetProperty("sha256").GetString() ?? "";
-            if (!string.Equals(manifestVersion, version, StringComparison.Ordinal) || !string.Equals(manifestPackage, PackageName, StringComparison.Ordinal) || expectedHash.Length != 64)
-            {
-                throw new InvalidOperationException("The VRCNeph release manifest does not match its GitHub release.");
-            }
+            var expectedHash = expectedDigest["sha256:".Length..];
 
             var cacheDirectory = Path.Combine(root, "Package Cache");
             Directory.CreateDirectory(cacheDirectory);
@@ -166,7 +157,7 @@ internal static class Program
             await using (var packageStream = File.OpenRead(temporary))
             {
                 var actualHash = Convert.ToHexString(await SHA256.HashDataAsync(packageStream));
-                if (!actualHash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The VRCNeph app package did not match its release hash.");
+                if (!actualHash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("VRCNephAssets.zip did not match GitHub's release hash.");
             }
             File.Move(temporary, destination, true);
             var packageVersion = await ReadPackageVersionAsync(destination);

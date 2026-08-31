@@ -8,11 +8,11 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 & (Join-Path $PSScriptRoot 'Build-VRCNeph.ps1') -Launch:$Launch
 
-$manifestPath = Join-Path $projectRoot 'artifacts\release\VRCNeph-release.json'
-$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-$tag = "v$($manifest.version)"
+[xml]$project = Get-Content -LiteralPath (Join-Path $projectRoot 'Source Code\VRCNeph.csproj')
+$version = [string](($project.Project.PropertyGroup | Select-Object -First 1).Version)
+$tag = "v$version"
 $launcher = Join-Path $projectRoot 'VRCNeph.exe'
-$package = Join-Path $projectRoot 'artifacts\release\VRCNeph-app.zip'
+$package = Join-Path $projectRoot 'artifacts\release\VRCNephAssets.zip'
 
 & git diff --check
 if ($LASTEXITCODE -ne 0) { throw 'Git whitespace validation failed. Release was not created.' }
@@ -22,14 +22,15 @@ $exists = $false
 if ($LASTEXITCODE -eq 0) { $exists = $true }
 
 if ($exists) {
-    & gh release upload $tag $launcher $package $manifestPath --clobber
+    & gh release delete-asset $tag VRCNeph-app.zip VRCNeph-release.json --yes 2>$null
+    & gh release upload $tag $launcher $package --clobber
     if ($LASTEXITCODE -ne 0) { throw "GitHub Release $tag assets were not updated." }
-    $editArgs = @('release', 'edit', $tag, '--title', "VRCNeph $($manifest.version)")
+    $editArgs = @('release', 'edit', $tag, '--title', "VRCNeph $version")
     if ($Prerelease) { $editArgs += '--prerelease' }
     & gh @editArgs
     if ($LASTEXITCODE -ne 0) { throw "GitHub Release $tag metadata was not updated." }
 } else {
-    $releaseArgs = @('release', 'create', $tag, $launcher, $package, $manifestPath, '--title', "VRCNeph $($manifest.version)", '--generate-notes')
+    $releaseArgs = @('release', 'create', $tag, $launcher, $package, '--title', "VRCNeph $version", '--generate-notes')
     if ($Prerelease) { $releaseArgs += '--prerelease' }
     & gh @releaseArgs
     if ($LASTEXITCODE -ne 0) { throw "GitHub Release $tag was not created." }

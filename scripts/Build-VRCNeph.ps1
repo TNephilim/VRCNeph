@@ -9,7 +9,7 @@ $sourceProject = Join-Path $projectRoot 'Source Code\VRCNeph.csproj'
 $launcherProject = Join-Path $projectRoot 'Launcher\VRCNeph.Launcher.csproj'
 $artifacts = Join-Path $projectRoot 'artifacts\release'
 $appPublish = Join-Path $artifacts 'app'
-$packagePath = Join-Path $artifacts 'VRCNeph-app.zip'
+$packagePath = Join-Path $artifacts 'VRCNephAssets.zip'
 $launcherPublish = Join-Path $artifacts 'launcher'
 $rootExe = Join-Path $projectRoot 'VRCNeph.exe'
 
@@ -27,6 +27,7 @@ foreach ($path in @($appPublish, $launcherPublish)) {
     }
 }
 Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $artifacts 'VRCNeph-release.json') -Force -ErrorAction SilentlyContinue
 
 & dotnet publish $sourceProject -c Release -r win-x64 --self-contained false '-p:PublishSingleFile=false' -o $appPublish
 if ($LASTEXITCODE -ne 0) { throw "VRCNeph app publish failed with exit code $LASTEXITCODE." }
@@ -38,13 +39,6 @@ if ($LASTEXITCODE -ne 0) { throw "VRCNeph launcher publish failed with exit code
 $launcherExe = Join-Path $launcherPublish 'VRCNeph.exe'
 if (-not (Test-Path -LiteralPath $launcherExe)) { throw 'The launcher publish did not produce VRCNeph.exe.' }
 Copy-Item -LiteralPath $launcherExe -Destination $rootExe -Force
-
-$hash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash
-@{
-    version = $version
-    package = 'VRCNeph-app.zip'
-    sha256 = $hash
-} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $artifacts 'VRCNeph-release.json') -Encoding utf8
 
 Write-Host "Built VRCNeph $version"
 Write-Host "Launcher: $rootExe"
