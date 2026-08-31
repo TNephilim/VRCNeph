@@ -1,23 +1,18 @@
 using System.Diagnostics;
 using System.IO.Compression;
-using System.Net.Http.Headers;
-using System.Security.Cryptography;
-using System.Text.Json;
 using Microsoft.Win32;
 
 namespace VRCNeph.Launcher;
 
 internal static class Program
 {
-    private const string Owner = "TNephilim";
-    private const string Repository = "VRCNeph";
-    private const string PackageName = "VRCNephAssets.zip";
+    private const string EmbeddedPackageName = "VRCNephAssets.zip";
     private const string AppExeName = "VRCNeph.App.exe";
     private const string DotnetInstallerUrl = "https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe";
     private const string WebViewInstallerUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
     private const string WebViewClientKey = @"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
     private const string WebViewUserKey = @"Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
-    private static readonly HttpClient Http = CreateHttp();
+    private static readonly HttpClient Http = new();
 
     [STAThread]
     private static async Task<int> Main(string[] args)
@@ -39,18 +34,7 @@ internal static class Program
                 if (!HasWebView2Runtime()) throw new InvalidOperationException("Microsoft Edge WebView2 Runtime was not available after its installer completed.");
             }
 
-            var localPackage = ReadOption(args, "--package");
-            if (!string.IsNullOrWhiteSpace(localPackage))
-            {
-                var package = Path.GetFullPath(localPackage);
-                if (!File.Exists(package)) throw new FileNotFoundException("VRCNeph's app package could not be found.", package);
-                var packageVersion = await ReadPackageVersionAsync(package);
-                if (!AppPackageIsCurrent(appDirectory, packageVersion)) InstallAppPackage(package, appDirectory, packageVersion);
-            }
-            else
-            {
-                await EnsureLatestAppPackageAsync(root, appDirectory);
-            }
+            EnsureEmbeddedAppPackage(appDirectory);
 
             CleanupLegacyTempCache();
 
@@ -74,13 +58,6 @@ internal static class Program
             ShowError(ex.Message);
             return 1;
         }
-    }
-
-    private static HttpClient CreateHttp()
-    {
-        var client = new HttpClient();
-        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("VRCNeph-Launcher", "1.0"));
-        return client;
     }
 
     private static bool HasDesktopRuntime()
@@ -124,63 +101,26 @@ internal static class Program
         }
     }
 
-    private static async Task EnsureLatestAppPackageAsync(string root, string appDirectory)
+    private static void EnsureEmbeddedAppPackage(string appDirectory)
     {
-        try
-        {
-            using var response = await Http.GetAsync($"https://api.github.com/repos/{Owner}/{Repository}/releases/latest");
-            response.EnsureSuccessStatusCode();
-            using var release = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
-            var version = NormalizeVersion(release.RootElement.GetProperty("tag_name").GetString() ?? "");
-            var assets = release.RootElement.GetProperty("assets").EnumerateArray().ToArray();
-            var packageUrl = assets
-                .Where(asset => string.Equals(asset.GetProperty("name").GetString(), PackageName, StringComparison.OrdinalIgnoreCase))
-                .Select(asset => asset.GetProperty("browser_download_url").GetString())
-                .FirstOrDefault(url => !string.IsNullOrWhiteSpace(url));
-            var expectedDigest = assets
-                .Where(asset => string.Equals(asset.GetProperty("name").GetString(), PackageName, StringComparison.OrdinalIgnoreCase))
-                .Select(asset => asset.TryGetProperty("digest", out var digest) ? digest.GetString() : null)
-                .FirstOrDefault(digest => !string.IsNullOrWhiteSpace(digest));
-            if (string.IsNullOrWhiteSpace(version) || string.IsNullOrWhiteSpace(packageUrl) || string.IsNullOrWhiteSpace(expectedDigest) || !expectedDigest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The latest VRCNeph release does not include a valid VRCNephAssets.zip package with a SHA-256 digest.");
-            if (AppPackageIsCurrent(appDirectory, version)) return;
-            var expectedHash = expectedDigest["sha256:".Length..];
-
-            var cacheDirectory = Path.Combine(root, "Package Cache");
-            Directory.CreateDirectory(cacheDirectory);
-            var destination = Path.Combine(cacheDirectory, PackageName);
-            var temporary = destination + ".download";
-            await using (var source = await Http.GetStreamAsync(packageUrl))
-            await using (var target = File.Create(temporary))
-            {
-                await source.CopyToAsync(target);
-            }
-            await using (var packageStream = File.OpenRead(temporary))
-            {
-                var actualHash = Convert.ToHexString(await SHA256.HashDataAsync(packageStream));
-                if (!actualHash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("VRCNephAssets.zip did not match GitHub's release hash.");
-            }
-            File.Move(temporary, destination, true);
-            var packageVersion = await ReadPackageVersionAsync(destination);
-            if (!string.Equals(packageVersion, version, StringComparison.Ordinal)) throw new InvalidOperationException("The downloaded VRCNeph app package version does not match its GitHub release.");
-            InstallAppPackage(destination, appDirectory, packageVersion);
-        }
-        catch when (File.Exists(Path.Combine(appDirectory, AppExeName)))
-        {
-            // A previously installed package remains usable when GitHub is temporarily unavailable.
-        }
+        var packageVersion = ReadEmbeddedPackageVersion();
+        if (!AppPackageIsCurrent(appDirectory, packageVersion)) InstallEmbeddedAppPackage(appDirectory, packageVersion);
     }
 
-    private static async Task<string> ReadPackageVersionAsync(string packagePath)
+    private static string ReadEmbeddedPackageVersion()
     {
-        await using var package = File.OpenRead(packagePath);
+        using var package = OpenEmbeddedPackage();
         using var archive = new ZipArchive(package, ZipArchiveMode.Read);
         var marker = archive.GetEntry(".vrcneph-package-version") ?? throw new InvalidOperationException("The VRCNeph app package is missing its version marker.");
-        await using var stream = marker.Open();
+        using var stream = marker.Open();
         using var reader = new StreamReader(stream);
-        var version = (await reader.ReadToEndAsync()).Trim();
+        var version = reader.ReadToEnd().Trim();
         if (string.IsNullOrWhiteSpace(version)) throw new InvalidOperationException("The VRCNeph app package has an empty version marker.");
         return version;
     }
+
+    private static Stream OpenEmbeddedPackage() => typeof(Program).Assembly.GetManifestResourceStream(EmbeddedPackageName)
+        ?? throw new InvalidOperationException("The VRCNeph app package is missing from this EXE.");
 
     private static bool AppPackageIsCurrent(string appDirectory, string packageVersion)
     {
@@ -190,13 +130,17 @@ internal static class Program
             && string.Equals(File.ReadAllText(marker).Trim(), packageVersion, StringComparison.Ordinal);
     }
 
-    private static void InstallAppPackage(string packagePath, string appDirectory, string packageVersion)
+    private static void InstallEmbeddedAppPackage(string appDirectory, string packageVersion)
     {
         var staging = appDirectory + ".new";
         var previous = appDirectory + ".previous";
         TryDeleteDirectory(staging);
         Directory.CreateDirectory(staging);
-        ZipFile.ExtractToDirectory(packagePath, staging, true);
+        using (var package = OpenEmbeddedPackage())
+        using (var archive = new ZipArchive(package, ZipArchiveMode.Read))
+        {
+            archive.ExtractToDirectory(staging, true);
+        }
         File.WriteAllText(Path.Combine(staging, ".vrcneph-package-version"), packageVersion);
         if (!File.Exists(Path.Combine(staging, AppExeName))) throw new InvalidOperationException("The VRCNeph app package does not contain VRCNeph.App.exe.");
 
@@ -206,32 +150,7 @@ internal static class Program
         TryDeleteDirectory(previous);
     }
 
-    private static string? ReadOption(IEnumerable<string> args, string option)
-    {
-        var values = args.ToArray();
-        for (var index = 0; index < values.Length - 1; index++)
-        {
-            if (values[index].Equals(option, StringComparison.OrdinalIgnoreCase)) return values[index + 1];
-        }
-        return null;
-    }
-
-    private static string JoinLaunchArguments(IEnumerable<string> args)
-    {
-        var retained = new List<string>();
-        using var enumerator = args.GetEnumerator();
-        while (enumerator.MoveNext())
-        {
-            if (enumerator.Current.Equals("--package", StringComparison.OrdinalIgnoreCase))
-            {
-                enumerator.MoveNext();
-                continue;
-            }
-            retained.Add(enumerator.Current);
-        }
-        return string.Join(" ", retained.Select(Quote));
-    }
-    private static string NormalizeVersion(string value) => value.Trim().TrimStart('v', 'V');
+    private static string JoinLaunchArguments(IEnumerable<string> args) => string.Join(" ", args.Select(Quote));
     private static string Quote(string value) => value.Contains(' ') || value.Contains('"') ? $"\"{value.Replace("\"", "\\\"")}\"" : value;
 
     private static void TryDeleteDirectory(string path)

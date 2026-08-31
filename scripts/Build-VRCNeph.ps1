@@ -42,5 +42,5 @@ Copy-Item -LiteralPath $launcherExe -Destination $rootExe -Force
 
 Write-Host "Built VRCNeph $version"
 Write-Host "Launcher: $rootExe"
-Write-Host "Release package: $packagePath"
-if ($Launch) { Start-Process -FilePath $rootExe -ArgumentList ('--package "{0}"' -f $packagePath) -WorkingDirectory $projectRoot }
+Remove-Item -LiteralPath $packagePath -Force
+if ($Launch) { Start-Process -FilePath $rootExe -WorkingDirectory $projectRoot }

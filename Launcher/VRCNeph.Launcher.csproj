@@ -16,4 +16,8 @@
     <InformationalVersion>$(Version)</InformationalVersion>
     <IsTrimmable>true</IsTrimmable>
   </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\artifacts\release\VRCNephAssets.zip" LogicalName="VRCNephAssets.zip" />
+  </ItemGroup>
 </Project>
