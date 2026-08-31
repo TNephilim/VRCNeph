@@ -22,7 +22,10 @@ $exists = $false
 if ($LASTEXITCODE -eq 0) { $exists = $true }
 
 if ($exists) {
-    & gh release delete-asset $tag VRCNeph-app.zip VRCNeph-release.json --yes 2>$null
+    foreach ($obsoleteAsset in @('VRCNeph-app.zip', 'VRCNeph-release.json')) {
+        & gh release delete-asset $tag $obsoleteAsset --yes 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "Obsolete GitHub Release asset $obsoleteAsset could not be removed." }
+    }
     & gh release upload $tag $launcher $package --clobber
     if ($LASTEXITCODE -ne 0) { throw "GitHub Release $tag assets were not updated." }
     $editArgs = @('release', 'edit', $tag, '--title', "VRCNeph $version")
