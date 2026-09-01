@@ -7614,8 +7614,12 @@ internal sealed class AvatarDatabaseClient
 
     public async Task<AvatarDatabaseSearchResult> RandomAsync(AvatarSearchInput input, VrChatClient? vrchat = null)
     {
-        if (IsAllProvider(input)) return await RandomAllAsync(input, vrchat);
-        if (IsAvtrZipProvider(input)) return await RandomAvtrZipAsync(input, vrchat);
+        // AVTR.zip remains available for ordinary search while Crecross builds
+        // the first complete local catalogue. Random, random pages, and
+        // roulette use PAS only so they cannot consume AVTR.zip capabilities.
+        if (IsAllProvider(input)) return await RandomPasAsync(input with { Provider = "pas" }, vrchat);
+        if (IsAvtrZipProvider(input))
+            throw new InvalidOperationException("AVTR.zip random selection is paused while the local catalogue is being built.");
         if (IsPasProvider(input)) return await RandomPasAsync(input, vrchat);
         throw new InvalidOperationException("VRCX DB is available for search, but is excluded from random results until it supports full-database random selection.");
     }

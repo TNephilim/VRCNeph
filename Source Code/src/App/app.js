@@ -2366,6 +2366,26 @@ function avatarDatabaseProviderDescription(provider = avatarDatabaseProvider()) 
   if (provider === "all") return "Search all databases. Pick one for faster results.";
   return provider === "avtrzip" ? "Search AVTR.zip avatars." : provider === "pas" ? "Search Prismic PAS avatars." : "Search VRCX avatars.";
 }
+function avatarDatabaseRandomAvailable(provider = avatarDatabaseProvider()) {
+  return provider === "all" || provider === "pas";
+}
+function avatarDatabaseRandomProviderLabel(provider = avatarDatabaseProvider()) {
+  return provider === "all" ? "Prismic PAS" : avatarDatabaseProviderLabel(provider);
+}
+function updateAvatarDatabaseRandomAvailability() {
+  const available = avatarDatabaseRandomAvailable();
+  if (!available && state.avatarRouletteRunning && state.avatarRouletteMode === 'database') {
+    stopAvatarRoulette({ notify: false });
+  }
+  const unavailableTitle = avatarDatabaseProvider() === "avtrzip"
+    ? "AVTR.zip random selection is paused while the local catalogue is being built."
+    : "This database does not support full-catalogue random selection.";
+  for (const id of ["randomAvatarDatabaseBtn", "equipRandomAvatarBtn", "avatarRouletteBtn"]) {
+    const button = $(id);
+    button.disabled = !available;
+    button.title = available ? button.dataset.randomTitle : unavailableTitle;
+  }
+}
 function updateAvatarDatabaseCopy() {
   const provider = avatarDatabaseProvider();
   state.avatarDatabaseProvider = provider;
@@ -2379,6 +2399,7 @@ function updateAvatarDatabaseCopy() {
     : provider === "all"
       ? "All-database searches take longer. Pick one database for quicker results."
     : "Start typing at least three characters to search VRCX-compatible avatars.";
+  updateAvatarDatabaseRandomAvailability();
 }
 async function checkDatabaseSourceAvailability({ deferSummary = false } = {}) {
   try {
@@ -2616,9 +2637,10 @@ async function runAvatarDatabaseSearch(page = 0) {
   finally { }
 }
 async function runRandomAvatarDatabasePage() {
+  if (!avatarDatabaseRandomAvailable()) return;
   const token = ++state.avatarDatabaseSearchToken;
   state.avatarDatabaseProvider = avatarDatabaseProvider();
-  const providerLabel = avatarDatabaseProviderLabel();
+  const providerLabel = avatarDatabaseRandomProviderLabel();
   $("databasePrevPageBtn").disabled = true;
   $("databaseNextPageBtn").disabled = true;
   state.avatarDatabaseLoading = true;
@@ -2656,6 +2678,11 @@ async function runRandomAvatarDatabasePage() {
 }
 async function fetchRandomDatabaseAvatar() {
   const provider = avatarDatabaseProvider();
+  if (!avatarDatabaseRandomAvailable(provider)) {
+    throw new Error(provider === "avtrzip"
+      ? "AVTR.zip random selection is paused while the local catalogue is being built."
+      : "This database does not support full-catalogue random selection.");
+  }
   const excluded = [...excludedRandomAvatarIds()];
   let results = [];
   for (let attempt = 0; !results.length && attempt < 5; attempt++) {
@@ -2683,7 +2710,7 @@ async function equipRandomDatabaseAvatar({ quiet = false } = {}) {
     }
     throw e;
   } finally {
-    if (!quiet) $("equipRandomAvatarBtn").disabled = false;
+    if (!quiet) $("equipRandomAvatarBtn").disabled = !avatarDatabaseRandomAvailable();
   }
 }
 async function handleRandomDatabaseHotkey() {
@@ -2698,6 +2725,7 @@ async function handleRandomDatabaseHotkey() {
   }
 }
 function openAvatarRouletteDialog(mode = 'favorites') {
+  if (mode === 'database' && !avatarDatabaseRandomAvailable()) return;
   state.avatarRoulettePendingMode = mode;
   const label = mode === 'database' ? 'random database' : 'random favorite';
   const runningLabel = state.avatarRouletteMode === 'database' ? 'Database roulette' : 'Favorite roulette';
