@@ -37,6 +37,21 @@ body {
   overflow: hidden;
   user-select: none;
 }
+body.equip-notice-mode .overlay-shell,
+body.equip-notice-mode > dialog { display: none; }
+.overlay-equip-notice { width: 100vw; height: 100vh; display: grid; grid-template-columns: 138px minmax(0, 1fr); gap: 16px; align-items: center; padding: 14px; border: 1px solid var(--overlay-line-strong); border-radius: 14px; background: linear-gradient(135deg, var(--overlay-accent-glow), transparent 48%), var(--overlay-bg); box-shadow: 0 14px 40px rgba(0,0,0,.42), 0 0 22px var(--overlay-accent-glow), inset 0 0 0 1px rgba(255,255,255,.05); opacity: 0; transform: translateY(10px) scale(.985); animation: overlayEquipNoticeIn 180ms ease-out forwards, overlayEquipNoticeOut 280ms ease-in 4.62s forwards; overflow: hidden; }
+.overlay-equip-notice-image { width: 138px; height: 138px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--overlay-line-strong); border-radius: 10px; background: var(--overlay-bg-strong); color: var(--overlay-muted); font-size: 12px; }
+.overlay-equip-notice-image img { width: 100%; height: 100%; object-fit: cover; }
+.overlay-equip-notice-copy { min-width: 0; display: grid; gap: 5px; align-content: center; }
+.overlay-equip-notice-status { display: flex; align-items: center; gap: 7px; color: var(--overlay-muted); font-size: 14px; font-weight: 800; }
+.overlay-equip-notice-status span { width: 22px; height: 22px; display: inline-grid; place-items: center; border-radius: 50%; background: var(--overlay-accent); color: var(--overlay-text); font-size: 15px; }
+.overlay-equip-notice h1, .overlay-equip-notice p { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.overlay-equip-notice h1 { color: var(--overlay-text); font-size: 25px; line-height: 1.12; letter-spacing: -.01em; }
+.overlay-equip-notice p { color: var(--overlay-muted); font-size: 15px; }
+.overlay-equip-notice-badges { display: flex; flex-wrap: wrap; gap: 6px; min-height: 24px; margin-top: 2px; }
+.overlay-equip-notice-badge { padding: 3px 8px; border: 1px solid var(--overlay-line-strong); border-radius: 999px; color: var(--overlay-text); background: var(--overlay-accent-soft); font-size: 12px; font-weight: 700; }
+@keyframes overlayEquipNoticeIn { to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes overlayEquipNoticeOut { to { opacity: 0; transform: translateY(8px) scale(.99); } }
 button { font: inherit; }
 
 .overlay-shell {

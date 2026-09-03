@@ -16,6 +16,7 @@ $rootExe = Join-Path $projectRoot 'VRCNeph.exe'
 [xml]$project = Get-Content -LiteralPath $sourceProject
 $version = [string](($project.Project.PropertyGroup | Select-Object -First 1).Version)
 if ([string]::IsNullOrWhiteSpace($version)) { throw 'VRCNeph.csproj is missing its Version property.' }
+$packageVersion = "{0}-build-{1}" -f $version, (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss')
 
 New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
 foreach ($path in @($appPublish, $launcherPublish)) {
@@ -31,7 +32,7 @@ Remove-Item -LiteralPath (Join-Path $artifacts 'VRCNeph-release.json') -Force -E
 
 & dotnet publish $sourceProject -c Release -r win-x64 --self-contained false '-p:PublishSingleFile=false' -o $appPublish
 if ($LASTEXITCODE -ne 0) { throw "VRCNeph app publish failed with exit code $LASTEXITCODE." }
-Set-Content -LiteralPath (Join-Path $appPublish '.vrcneph-package-version') -Value $version -NoNewline -Encoding utf8
+Set-Content -LiteralPath (Join-Path $appPublish '.vrcneph-package-version') -Value $packageVersion -NoNewline -Encoding utf8
 Compress-Archive -Path (Join-Path $appPublish '*') -DestinationPath $packagePath -Force
 
 & dotnet publish $launcherProject -c Release -r win-x64 -o $launcherPublish ("-p:Version={0}" -f $version)

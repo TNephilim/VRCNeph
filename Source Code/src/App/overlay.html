@@ -7,6 +7,15 @@
   <link rel="stylesheet" href="overlay.css">
 </head>
 <body>
+  <section id="equipNotice" class="overlay-equip-notice" hidden aria-live="polite">
+    <div class="overlay-equip-notice-image"><img id="equipNoticeImage" alt="" hidden><span id="equipNoticeFallback">No thumbnail</span></div>
+    <div class="overlay-equip-notice-copy">
+      <div class="overlay-equip-notice-status"><span aria-hidden="true">↻</span> Switching to</div>
+      <h1 id="equipNoticeName">Avatar equipped</h1>
+      <p id="equipNoticeAuthor">Author unavailable</p>
+      <div id="equipNoticeBadges" class="overlay-equip-notice-badges"></div>
+    </div>
+  </section>
   <main class="overlay-shell">
     <div id="dragHandle" class="drag-handle" title="Drag overlay">
       <span></span><span></span><span></span>

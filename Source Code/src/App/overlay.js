@@ -87,6 +87,8 @@ const state = {
 };
 
 let removedDetachedPanels = false;
+let overlayHostMode = "";
+let overlayHostToken = "";
 for (const panel of Object.keys(state.detachedPanels || {})) {
   if (OVERLAY_PANELS.includes(panel)) continue;
   delete state.detachedPanels[panel];
@@ -103,6 +105,9 @@ function handleNativeMessage(message) {
   if (response.event) {
     if (response.event === "overlayRefresh") {
       applyOverlaySnapshot(response.data);
+    }
+    if (response.event === "overlayEquipNotice") {
+      showEquipNotice(response.data);
     }
     return;
   }
@@ -122,6 +127,28 @@ function applyOverlaySnapshot(snapshot) {
   render();
 }
 
+function showEquipNotice(notice = {}) {
+  state.data.settings = { ...(state.data.settings || {}), themeColor: notice.themeColor || "", panelColor: notice.panelColor || "", panelColorSynced: false, overlayOpacity: notice.panelOpacity || 85, overlayScale: 100 };
+  applySnapshotSettings();
+  $("equipNoticeName").textContent = String(notice.name || "Avatar equipped").trim() || "Avatar equipped";
+  const author = String(notice.authorName || "").trim();
+  $("equipNoticeAuthor").textContent = author ? `by ${author}` : "Author unavailable";
+  const image = $("equipNoticeImage");
+  const fallback = $("equipNoticeFallback");
+  const imageUrl = String(notice.thumbnailImageUrl || "").trim();
+  if (imageUrl) { image.src = imageUrl; image.hidden = false; fallback.hidden = true; }
+  const labels = [];
+  const release = String(notice.releaseStatus || "").trim();
+  if (release) labels.push(release[0].toUpperCase() + release.slice(1));
+  for (const platform of String(notice.platforms || "").split(/[,|]/).map((value) => value.trim()).filter(Boolean)) labels.push(platform);
+  $("equipNoticeBadges").replaceChildren(...labels.slice(0, 3).map((label) => { const badge = document.createElement("span"); badge.className = "overlay-equip-notice-badge"; badge.textContent = label; return badge; }));
+  const noticeElement = $("equipNotice");
+  noticeElement.hidden = true;
+  void noticeElement.offsetWidth;
+  noticeElement.hidden = false;
+  document.body.classList.add("equip-notice-mode");
+}
+
 function api(command, payload = {}, timeoutMs = 120000) {
   if (!window.external || typeof window.external.sendMessage !== "function") return Promise.reject(new Error("Overlay bridge is not available."));
   const id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -131,6 +158,22 @@ function api(command, payload = {}, timeoutMs = 120000) {
   });
   window.external.sendMessage(JSON.stringify({ id, command, payload }));
   return promise;
+}
+
+async function refreshOverlayHostMode() {
+  try {
+    const host = await api("overlayHostState", {}, 3000);
+    const mode = String(host?.mode || "hidden").toLowerCase();
+    const token = String(host?.token || "");
+    if (mode === "notice" && (overlayHostMode !== "notice" || overlayHostToken !== token)) {
+      showEquipNotice(host?.notice || {});
+    } else if (mode !== "notice" && overlayHostMode === "notice") {
+      $("equipNotice").hidden = true;
+      document.body.classList.remove("equip-notice-mode");
+    }
+    overlayHostMode = mode;
+    overlayHostToken = token;
+  } catch { }
 }
 
 function send(command, payload = {}) {
@@ -2562,3 +2605,5 @@ render();
 showFirstOpenTip();
 refreshSettingsFast();
 refresh();
+void refreshOverlayHostMode();
+setInterval(() => { void refreshOverlayHostMode(); }, 180);

@@ -134,7 +134,7 @@
       </section>
       <section id="databasePage" class="workspace-page" hidden>
         <header class="toolbar">
-          <div class="toolbar-title"><h2>Database Search</h2><div class="toolbar-status-row"><p id="avatarDatabaseStatus">Search AVTR.zip, Prismic PAS, and VRCX DB.</p><span id="rouletteCountdownDb" class="roulette-countdown toolbar-countdown" hidden></span></div></div>
+          <div class="toolbar-title"><h2>Database Search</h2><div class="toolbar-status-row"><p id="avatarDatabaseStatus">Search AVTR.zip, Prismic PAS, and VRCX.</p><span id="rouletteCountdownDb" class="roulette-countdown toolbar-countdown" hidden></span></div></div>
           <div class="toolbar-actions database-toolbar-actions">
             <div class="database-search-history-wrap">
               <input id="avatarDatabaseSearchInput" type="search" placeholder="Search all databases" autocomplete="off">
@@ -163,7 +163,7 @@
                 <section class="database-filter-section">
                   <h4>Search</h4>
                   <label id="databaseDescriptionTagsWrap" class="field-toggle database-description-tags-toggle"><input id="databaseSearchDescriptionTagsToggle" type="checkbox" checked>Description & Tags</label>
-                  <label class="field-toggle"><input id="databaseHideOlderAvatarsToggle" type="checkbox">Hide pre-3.0 avatars</label>
+                  <label class="field-toggle"><input id="databaseHideOlderAvatarsToggle" type="checkbox">Hide older avatars</label>
                 </section>
                 <section class="database-filter-section">
                   <h4>Platforms</h4>
@@ -180,15 +180,15 @@
                 <option value="all" selected>All Databases</option>
                 <option value="avtrzip">AVTR.zip</option>
                 <option value="pas">Prismic PAS</option>
-                <option value="vrcx">VRCX DB</option>
+                <option value="vrcx">VRCX</option>
+                <option value="vrcneph">VRCNeph</option>
               </select>
             </div>
             <div class="sort-control">
-              <button id="databaseSortMenuBtn" type="button">Relevance</button>
+              <button id="databaseSortMenuBtn" type="button">Recently updated</button>
               <div id="databaseSortMenu" class="sort-menu" hidden></div>
               <select id="databaseSortSelect" hidden>
-                <option value="relevance">Relevance</option>
-                <option value="updatedDesc">Recently updated</option>
+                <option value="updatedDesc" selected>Recently updated</option>
                 <option value="createdDesc">Recently added</option>
                 <option value="nameAsc">Name A-Z</option>
                 <option value="authorAsc">Author A-Z</option>
@@ -477,14 +477,11 @@
           <span>In VRChat desktop mode, hold Tab to free your mouse so you can click, drag, resize, and use overlay controls without opening the VRChat menu.</span>
         </article>
       </div>
-      <label class="sync-toggle-label overlay-toggle-label">Enable overlay hotkey<input id="overlayEnabledToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span></label>
+      <label class="sync-toggle-label overlay-toggle-label">Enable overlay<input id="overlayEnabledToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span></label>
       <label>Overlay keybind</label>
       <div class="overlay-hotkey-row"><input id="overlayHotkeyInput" type="text" value="F8" readonly><button id="resetOverlayHotkeyBtn" type="button">Reset</button></div>
       <label>Desktop random database keybind</label>
       <div class="overlay-hotkey-row"><input id="databaseRandomHotkeyInput" type="text" value="Ctrl+R" readonly><button id="resetDatabaseRandomHotkeyBtn" type="button">Reset</button></div>
-      <label>VR random database keybind</label>
-      <div class="overlay-hotkey-row vr-hotkey-row"><input id="databaseRandomVrBindingInput" type="text" value="Unbound" readonly><button id="bindDatabaseRandomVrBtn" type="button">Bind</button><button id="clearDatabaseRandomVrBtn" type="button">Clear</button></div>
-      <small class="settings-help">Requires SteamVR to be running. Click Bind, then press the controller button you want.</small>
       <label>Default panel
         <select id="overlayDefaultPanelSelect">
           <option value="avatars">Avatars</option>
