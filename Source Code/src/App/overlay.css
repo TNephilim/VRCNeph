@@ -46,10 +46,16 @@ body.equip-notice-mode > dialog { display: none; }
 .overlay-equip-notice-status { display: flex; align-items: center; gap: 7px; color: var(--overlay-muted); font-size: 14px; font-weight: 800; }
 .overlay-equip-notice-status span { width: 22px; height: 22px; display: inline-grid; place-items: center; border-radius: 50%; background: var(--overlay-accent); color: var(--overlay-text); font-size: 15px; }
 .overlay-equip-notice h1, .overlay-equip-notice p { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.overlay-equip-notice h1 { color: var(--overlay-text); font-size: 25px; line-height: 1.12; letter-spacing: -.01em; }
+.overlay-equip-notice h1 { color: var(--overlay-text); font-size: 25px; line-height: 1.28; letter-spacing: -.01em; padding-block: 1px; }
 .overlay-equip-notice p { color: var(--overlay-muted); font-size: 15px; }
 .overlay-equip-notice-badges { display: flex; flex-wrap: wrap; gap: 6px; min-height: 24px; margin-top: 2px; }
 .overlay-equip-notice-badge { padding: 3px 8px; border: 1px solid var(--overlay-line-strong); border-radius: 999px; color: var(--overlay-text); background: var(--overlay-accent-soft); font-size: 12px; font-weight: 700; }
+.overlay-equip-notice-badge.public { color: var(--overlay-green); border-color: color-mix(in srgb, var(--overlay-green) 58%, var(--overlay-line)); }
+.overlay-equip-notice-badge.private { color: var(--overlay-gold); border-color: color-mix(in srgb, var(--overlay-gold) 52%, var(--overlay-line)); }
+.overlay-equip-notice-badge.deleted { color: var(--overlay-danger); border-color: color-mix(in srgb, var(--overlay-danger) 58%, var(--overlay-line)); }
+.overlay-equip-notice-badge.platform-pc { color: var(--overlay-blue); border-color: color-mix(in srgb, var(--overlay-blue) 58%, var(--overlay-line)); }
+.overlay-equip-notice-badge.platform-android { color: var(--overlay-green); border-color: color-mix(in srgb, var(--overlay-green) 58%, var(--overlay-line)); }
+.overlay-equip-notice-badge.platform-ios { color: #d7b7ff; border-color: #6a4f92; }
 @keyframes overlayEquipNoticeIn { to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes overlayEquipNoticeOut { to { opacity: 0; transform: translateY(8px) scale(.99); } }
 button { font: inherit; }

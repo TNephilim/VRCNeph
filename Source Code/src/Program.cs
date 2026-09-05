@@ -163,6 +163,8 @@ internal static class Program
     private const string UpdateRepositoryName = "VRCNeph";
     private const string OverlayDisplayHotkey = "F8";
     private const string LaunchHandoffMutexName = "Local\\VRCNeph.LaunchHandoff";
+    private static Mutex? LaunchHandoffMutex;
+    private static bool LaunchHandoffMutexHeld;
     private static readonly AvatarStore Store = new();
     private static readonly AppSettingsStore Settings = new();
     private static readonly MessageHistoryStore MessageHistory = new();
@@ -183,6 +185,8 @@ internal static class Program
     private static OverlayHotkeyPoller? DatabaseRandomHotkey;
     private static PhotinoWindow? OverlayWindow;
     private static nint OverlayWindowHandle;
+    private static FileSystemWatcher? OverlayHostStateWatcher;
+    private static System.Threading.Timer? OverlayHostStateTimer;
     private static FileSystemWatcher? LibraryWatcher;
     private static System.Threading.Timer? LibraryChangeTimer;
     private static System.Threading.Timer? LocalAvatarCacheTimer;
@@ -226,6 +230,20 @@ internal static class Program
             Resizable = true,
             Maximized = true
         }
+        .RegisterWindowCreatedHandler((sender, _) =>
+        {
+            if (sender is not PhotinoWindow photino || !OperatingSystem.IsWindows()) return;
+            try
+            {
+                var handle = photino.WindowHandle;
+                if (handle == IntPtr.Zero) return;
+                // This is the normal app window, not the overlay. A launch from the
+                // desktop should surface VRCNeph instead of leaving it behind windows.
+                ShowWindowAsync(handle, SwShow);
+                SetForegroundWindow(handle);
+            }
+            catch { }
+        })
         .RegisterWebMessageReceivedHandler((sender, message) =>
         {
             if (sender is not PhotinoWindow photino)
@@ -258,6 +276,7 @@ internal static class Program
         })
         .Load(appPath);
         AppWindow = window;
+        ReleaseLaunchHandoffMutex();
         StartLibraryChangeWatcher();
         Pipeline = new VrChatPipelineClient(VrChat, async evt =>
         {
@@ -287,7 +306,6 @@ internal static class Program
 
         ConfigureHotkeys();
         OverlayHostStateStore.Write(OverlayHostState.Hidden);
-        if (Settings.Get().OverlayEnabled) EnsureOverlayHost();
         StartLocalAvatarCache();
 
         try
@@ -322,7 +340,9 @@ internal static class Program
                 UseOsDefaultSize = false,
                 UseOsDefaultLocation = false,
                 Size = new Size(overlaySettings.OverlayWidth, overlaySettings.OverlayHeight),
-                Location = new Point(overlaySettings.OverlayX, overlaySettings.OverlayY),
+                // Create the helper away from visible monitors. Its active panel or
+                // notification mode moves it into place once the WebView is ready.
+                Location = new Point(-32000, -32000),
                 Resizable = true,
                 Chromeless = true,
                 Transparent = true,
@@ -353,7 +373,9 @@ internal static class Program
             .Load(overlayPath);
 
             StartLibraryChangeWatcher();
+            StartOverlayHostStateWatcher();
             overlay.WaitForClose();
+            StopOverlayHostStateWatcher();
             StopLibraryChangeWatcher();
             Logs.Info("App", "Overlay helper exiting.");
             Environment.Exit(0);
@@ -397,6 +419,11 @@ internal static class Program
             {
                 try
                 {
+                    if (!IsVrChatForeground())
+                    {
+                        Logs.Info("App", "Random database avatar hotkey ignored because VRChat is not focused.");
+                        return;
+                    }
                     Logs.Info("App", "Random database avatar hotkey detected.");
                     SendAppEvent("randomDatabaseAvatarHotkey", new { });
                 }
@@ -419,11 +446,7 @@ internal static class Program
     {
         var saved = Settings.Save(settings);
         ConfigureHotkeys();
-        if (saved.OverlayEnabled)
-        {
-            EnsureOverlayHost();
-        }
-        else
+        if (!saved.OverlayEnabled)
         {
             OverlayHostStateStore.Write(OverlayHostState.Hidden);
             CloseOverlay();
@@ -550,6 +573,7 @@ internal static class Program
     private const uint SwpFrameChanged = 0x0020;
     private const uint SwpShowWindow = 0x0040;
     private const int SwShow = 5;
+    private const int SwShowNoActivate = 4;
     private const int SwHide = 0;
     private static readonly nint HwndTopmost = new(-1);
 
@@ -568,6 +592,12 @@ internal static class Program
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetForegroundWindow(nint hWnd);
 
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(nint hWnd, out uint processId);
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetWindowRect(nint hWnd, out WindowRect rect);
 
@@ -578,6 +608,21 @@ internal static class Program
         public int Top;
         public int Right;
         public int Bottom;
+    }
+
+    private static bool IsVrChatForeground()
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        try
+        {
+            var foregroundWindow = GetForegroundWindow();
+            if (foregroundWindow == IntPtr.Zero) return false;
+            GetWindowThreadProcessId(foregroundWindow, out var processId);
+            if (processId == 0) return false;
+            using var process = Process.GetProcessById((int)processId);
+            return process.ProcessName.Equals("VRChat", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 
     private static void UpdateSyncedOrderProgress(SyncedAvatarOrderProgress progress)
@@ -896,18 +941,16 @@ internal static class Program
 
     private static void CloseEarlierInstancesForNewLaunch()
     {
-        using var launchMutex = new Mutex(false, LaunchHandoffMutexName);
-        var mutexAcquired = false;
+        LaunchHandoffMutex = new Mutex(false, LaunchHandoffMutexName);
         List<Process> earlierInstances = [];
         try
         {
-            mutexAcquired = launchMutex.WaitOne(TimeSpan.FromSeconds(10));
-            if (!mutexAcquired) throw new InvalidOperationException("Another VRCNeph launch is already in progress. Wait a moment, then open VRCNeph again.");
+            LaunchHandoffMutexHeld = LaunchHandoffMutex.WaitOne(TimeSpan.FromSeconds(10));
+            if (!LaunchHandoffMutexHeld) throw new InvalidOperationException("Another VRCNeph launch is already in progress. Wait a moment, then open VRCNeph again.");
         }
         catch (AbandonedMutexException)
         {
-            // The prior launcher ended unexpectedly; this launch can safely take over.
-            mutexAcquired = true;
+            LaunchHandoffMutexHeld = true;
         }
 
         try
@@ -922,7 +965,13 @@ internal static class Program
                 {
                     try
                     {
-                        return !process.HasExited && string.Equals(process.MainModule?.FileName, currentExe, StringComparison.OrdinalIgnoreCase);
+                        // The installed app can be replaced between launches. Reading
+                        // MainModule in that moment is not reliable, which allowed a
+                        // second real VRCNeph window to slip through. The process name
+                        // and its exact main-window title distinguish it from the
+                        // separate "VRCNeph Overlay" helper.
+                        return !process.HasExited
+                            && process.MainWindowTitle.Equals("VRCNeph", StringComparison.OrdinalIgnoreCase);
                     }
                     catch
                     {
@@ -931,11 +980,13 @@ internal static class Program
                 })
                 .ToList();
 
+            Logs.Info("App", $"Found {earlierInstances.Count} earlier VRCNeph main window(s) to close.");
+
             foreach (var process in earlierInstances)
             {
                 try
                 {
-                    process.CloseMainWindow();
+                    if (!process.CloseMainWindow()) Logs.Warn("App", $"Could not request close for VRCNeph process {process.Id}.");
                 }
                 catch { }
             }
@@ -963,7 +1014,22 @@ internal static class Program
         finally
         {
             foreach (var process in earlierInstances) process.Dispose();
-            if (mutexAcquired) launchMutex.ReleaseMutex();
+        }
+    }
+
+    private static void ReleaseLaunchHandoffMutex()
+    {
+        var mutex = LaunchHandoffMutex;
+        LaunchHandoffMutex = null;
+        if (mutex is null) return;
+        try
+        {
+            if (LaunchHandoffMutexHeld) mutex.ReleaseMutex();
+        }
+        finally
+        {
+            LaunchHandoffMutexHeld = false;
+            mutex.Dispose();
         }
     }
 
@@ -1026,7 +1092,10 @@ internal static class Program
             var exe = Process.GetCurrentProcess().MainModule?.FileName;
             if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe)) exe = Path.Combine(AppContext.BaseDirectory, "VRCNeph.exe");
             if (!File.Exists(exe)) throw new InvalidOperationException("Could not find VRCNeph.exe to start the overlay host.");
-            OverlayProcess = Process.Start(new ProcessStartInfo(exe) { Arguments = "--overlay", UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Path.GetDirectoryName(exe) ?? AppContext.BaseDirectory, WindowStyle = ProcessWindowStyle.Minimized });
+            // The overlay owns its own transparent window. Starting its process minimized
+            // can leave that real window minimized forever, even after a non-activating
+            // SetWindowPos request. CreateNoWindow already keeps the helper unobtrusive.
+            OverlayProcess = Process.Start(new ProcessStartInfo(exe) { Arguments = "--overlay", UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Path.GetDirectoryName(exe) ?? AppContext.BaseDirectory, WindowStyle = ProcessWindowStyle.Hidden });
             Logs.Info("App", OverlayProcess is null ? "Overlay host failed to start." : $"Overlay host started as process {OverlayProcess.Id}.");
         }
     }
@@ -1044,6 +1113,41 @@ internal static class Program
         return state;
     }
 
+    private static void StartOverlayHostStateWatcher()
+    {
+        StopOverlayHostStateWatcher();
+        Directory.CreateDirectory(AppPaths.RootDirectory);
+        OverlayHostStateWatcher = new FileSystemWatcher(AppPaths.RootDirectory, Path.GetFileName(AppPaths.OverlayHostStatePath))
+        {
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
+            EnableRaisingEvents = true
+        };
+        FileSystemEventHandler changed = (_, _) => ScheduleOverlayHostStateRefresh();
+        RenamedEventHandler renamed = (_, _) => ScheduleOverlayHostStateRefresh();
+        OverlayHostStateWatcher.Changed += changed;
+        OverlayHostStateWatcher.Created += changed;
+        OverlayHostStateWatcher.Renamed += renamed;
+        ScheduleOverlayHostStateRefresh();
+    }
+
+    private static void StopOverlayHostStateWatcher()
+    {
+        OverlayHostStateWatcher?.Dispose();
+        OverlayHostStateWatcher = null;
+        OverlayHostStateTimer?.Dispose();
+        OverlayHostStateTimer = null;
+    }
+
+    private static void ScheduleOverlayHostStateRefresh()
+    {
+        OverlayHostStateTimer?.Dispose();
+        OverlayHostStateTimer = new System.Threading.Timer(_ =>
+        {
+            var state = GetOverlayHostState();
+            SendOverlayEvent("overlayHostState", state);
+        }, null, 50, Timeout.Infinite);
+    }
+
     private static void ApplyOverlayHostMode(string? requestedMode)
     {
         if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return;
@@ -1053,6 +1157,7 @@ internal static class Program
 
         try
         {
+            var window = OverlayWindow;
             var exStyle = (long)GetWindowLongPtr(OverlayWindowHandle, GwlExStyle);
             exStyle |= WsExToolWindow | WsExNoActivate;
             exStyle = mode == "notice" ? exStyle | WsExTransparent : exStyle & ~WsExTransparent;
@@ -1085,6 +1190,9 @@ internal static class Program
                 height = settings.OverlayHeight;
             }
 
+            // Native show/position avoids Photino restoring or activating the helper
+            // window while VRChat is in the foreground.
+            ShowWindowAsync(OverlayWindowHandle, SwShowNoActivate);
             SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, width, height, SwpNoActivate | SwpShowWindow | SwpFrameChanged);
         }
         catch (Exception ex)
@@ -1189,7 +1297,7 @@ internal static class Program
     {
         open,
         hotkey = Settings.Get().OverlayHotkey,
-        panels = new[] { "avatars", "worlds", "friends" }
+        panels = new[] { "avatars", "friends" }
     };
 
     private static async Task<object> BuildOverlaySnapshotAsync()
@@ -4054,7 +4162,7 @@ internal sealed class AppSettingsStore
         var panelColor = string.IsNullOrWhiteSpace(s.PanelColor) || !System.Text.RegularExpressions.Regex.IsMatch(s.PanelColor, "^#[0-9a-fA-F]{6}$") ? color : s.PanelColor;
         var panelSynced = s.SchemaVersion < 6 || s.PanelColorSynced;
         var overlayPanel = string.IsNullOrWhiteSpace(s.OverlayDefaultPanel) ? DefaultSettings.OverlayDefaultPanel : s.OverlayDefaultPanel.Trim().ToLowerInvariant();
-        if (!new[] { "avatars", "worlds", "friends" }.Contains(overlayPanel)) overlayPanel = DefaultSettings.OverlayDefaultPanel;
+        if (!new[] { "avatars", "friends" }.Contains(overlayPanel)) overlayPanel = DefaultSettings.OverlayDefaultPanel;
         var overlayOpacity = s.SchemaVersion < 10 && s.OverlayOpacity == 0 ? DefaultSettings.OverlayOpacity : Math.Clamp(s.SchemaVersion < 12 && s.OverlayOpacity == 86 ? DefaultSettings.OverlayOpacity : s.OverlayOpacity, 45, 100);
         var overlayScale = s.SchemaVersion < 10 && s.OverlayScale == 0 ? DefaultSettings.OverlayScale : Math.Clamp(s.OverlayScale, 80, 135);
         var hotkey = string.IsNullOrWhiteSpace(s.OverlayHotkey) ? DefaultSettings.OverlayHotkey : s.OverlayHotkey.Trim();
@@ -7905,12 +8013,12 @@ internal sealed class AvatarDatabaseClient
     {
         AvatarDatabaseSearchResult result;
         if (IsAllProvider(input)) result = await SearchAllAsync(input, vrchat);
-        else if (IsAvtrZipProvider(input)) result = await SearchAvtrZipAsync(input, vrchat);
-        else if (IsPasProvider(input)) result = await SearchPasAsync(input, vrchat);
+        else if (IsAvtrZipProvider(input)) result = await SearchAvtrZipAsync(ProviderSearchInput(input, "avtrzip"), vrchat);
+        else if (IsPasProvider(input)) result = await SearchPasAsync(ProviderSearchInput(input, "pas"), vrchat);
         else if (IsVrcNephProvider(input))
         {
             RefreshLocalEncounterCache();
-            result = SearchVrcNephAsync(input);
+            result = SearchVrcNephAsync(ProviderSearchInput(input, "vrcneph"));
         }
         else
         {
@@ -7930,9 +8038,9 @@ internal sealed class AvatarDatabaseClient
     public async Task<AvatarDatabaseCountResult> CountAsync(AvatarSearchInput input, VrChatClient? vrchat = null)
     {
         if (IsAllProvider(input)) return await CountAllAsync(input, vrchat);
-        if (IsAvtrZipProvider(input)) return await CountAvtrZipAsync(input);
-        if (IsPasProvider(input)) return await CountPasAsync(input);
-        if (IsVrcNephProvider(input)) return CountVrcNephAsync(input);
+        if (IsAvtrZipProvider(input)) return await CountAvtrZipAsync(ProviderSearchInput(input, "avtrzip"));
+        if (IsPasProvider(input)) return await CountPasAsync(ProviderSearchInput(input, "pas"));
+        if (IsVrcNephProvider(input)) return CountVrcNephAsync(ProviderSearchInput(input, "vrcneph"));
 
         var query = input.Query?.Trim() ?? "";
         if (query.Length > 0 && query.Length < 3 && !IsAuthorIdOnlySearch(input) && !HasOptionFilter(input)) throw new InvalidOperationException("Enter at least 3 characters to search the avatar database.");
@@ -8210,7 +8318,7 @@ internal sealed class AvatarDatabaseClient
             {
                 try
                 {
-                    var result = await SearchAvtrZipAsync(input with { Provider = "avtrzip", Page = providerPage, Limit = limit }, vrchat, fillPage: false);
+                    var result = await SearchAvtrZipAsync(ProviderSearchInput(input, "avtrzip") with { Page = providerPage, Limit = limit }, vrchat, fillPage: false);
                     pageResults.Add(("avtrzip", result));
                     providerHasMore["avtrzip"] = result.HasMore;
                 }
@@ -8225,7 +8333,7 @@ internal sealed class AvatarDatabaseClient
             {
                 try
                 {
-                    var result = await SearchPasAsync(input with { Provider = "pas", Page = providerPage, Limit = limit }, vrchat, fillPage: false);
+                    var result = await SearchPasAsync(ProviderSearchInput(input, "pas") with { Page = providerPage, Limit = limit }, vrchat, fillPage: false);
                     pageResults.Add(("pas", result));
                     providerHasMore["pas"] = result.HasMore;
                 }
@@ -8240,7 +8348,7 @@ internal sealed class AvatarDatabaseClient
             {
                 try
                 {
-                    var result = await SearchRemoteVrcxAsync(input with { Provider = "vrcx", Page = providerPage, Limit = limit }, vrchat, fillPage: false);
+                    var result = await SearchRemoteVrcxAsync(ProviderSearchInput(input, "vrcx") with { Page = providerPage, Limit = limit }, vrchat, fillPage: false);
                     pageResults.Add(("vrcx", result));
                     providerHasMore["vrcx"] = result.HasMore;
                 }
@@ -8255,7 +8363,7 @@ internal sealed class AvatarDatabaseClient
             {
                 try
                 {
-                    var result = SearchVrcNephAsync(input with { Provider = "vrcneph", Page = providerPage, Limit = limit });
+                    var result = SearchVrcNephAsync(ProviderSearchInput(input, "vrcneph") with { Page = providerPage, Limit = limit });
                     pageResults.Add(("vrcneph", result));
                     providerHasMore["vrcneph"] = result.HasMore;
                 }
@@ -8303,7 +8411,7 @@ internal sealed class AvatarDatabaseClient
             {
                 try
                 {
-                    var result = await SearchAvtrZipAsync(input with { Provider = "avtrzip", Page = providerPage, Limit = limit }, null, fillPage: false);
+                    var result = await SearchAvtrZipAsync(ProviderSearchInput(input, "avtrzip") with { Page = providerPage, Limit = limit }, null, fillPage: false);
                     pageResults.Add(result);
                     providerHasMore["avtrzip"] = result.HasMore;
                 }
@@ -8318,7 +8426,7 @@ internal sealed class AvatarDatabaseClient
             {
                 try
                 {
-                    var result = await SearchPasAsync(input with { Provider = "pas", Page = providerPage, Limit = limit }, null, fillPage: false);
+                    var result = await SearchPasAsync(ProviderSearchInput(input, "pas") with { Page = providerPage, Limit = limit }, null, fillPage: false);
                     pageResults.Add(result);
                     providerHasMore["pas"] = result.HasMore;
                 }
@@ -8333,7 +8441,7 @@ internal sealed class AvatarDatabaseClient
             {
                 try
                 {
-                    var result = await SearchRemoteVrcxAsync(input with { Provider = "vrcx", Page = providerPage, Limit = limit }, null, fillPage: false);
+                    var result = await SearchRemoteVrcxAsync(ProviderSearchInput(input, "vrcx") with { Page = providerPage, Limit = limit }, null, fillPage: false);
                     pageResults.Add(result);
                     providerHasMore["vrcx"] = result.HasMore;
                 }
@@ -8346,7 +8454,7 @@ internal sealed class AvatarDatabaseClient
 
             if (providerHasMore["vrcneph"])
             {
-                var result = SearchVrcNephAsync(input with { Provider = "vrcneph", Page = providerPage, Limit = limit });
+                var result = SearchVrcNephAsync(ProviderSearchInput(input, "vrcneph") with { Page = providerPage, Limit = limit });
                 pageResults.Add(result);
                 providerHasMore["vrcneph"] = result.HasMore;
             }
@@ -8755,7 +8863,7 @@ internal sealed class AvatarDatabaseClient
         if (input.SearchAuthor)
         {
             var authorIndex = database.AuthorIds[index];
-            if (authorIndex < (uint)database.AuthorNames.Length && TextMatches(query, input.SearchMode, ReverseText(database.AuthorNames[(int)authorIndex]))) textMatches = true;
+            if (authorIndex < (uint)database.AuthorNames.Length && AuthorNameMatches(query, ReverseText(database.AuthorNames[(int)authorIndex]), input)) textMatches = true;
         }
 
         if (input.SearchTags && TextMatches(query, input.SearchMode, PasTags(database))) textMatches = true;
@@ -9560,6 +9668,16 @@ internal sealed class AvatarDatabaseClient
     private static bool IsAvtrZipProvider(AvatarSearchInput input) => string.Equals(input.Provider, "avtrzip", StringComparison.OrdinalIgnoreCase);
     private static bool IsPasProvider(AvatarSearchInput input) => string.Equals(input.Provider, "pas", StringComparison.OrdinalIgnoreCase);
     private static bool IsVrcNephProvider(AvatarSearchInput input) => string.Equals(input.Provider, "vrcneph", StringComparison.OrdinalIgnoreCase);
+    private static AvatarSearchInput ProviderSearchInput(AvatarSearchInput input, string provider)
+    {
+        // Only VRCX exposes a trustworthy author-ID filter. The author card also
+        // supplies the visible name, so PAS, AVTR.zip, and VRCNeph must use that
+        // name as a normal author search instead of interpreting the ID as a
+        // universal match.
+        return IsAuthorIdOnlySearch(input) && !provider.Equals("vrcx", StringComparison.OrdinalIgnoreCase)
+            ? input with { Provider = provider, AuthorId = "" }
+            : input with { Provider = provider };
+    }
     private static bool IsAuthorNameOnlySearch(AvatarSearchInput input) =>
         input.SearchAuthor && !input.SearchAvatar && !input.SearchDescription && !input.SearchTags && !HasOptionFilter(input) && !string.IsNullOrWhiteSpace(input.Query);
     private static string AvtrZipCacheKey(AvatarSearchInput input, int page, int limit) =>
@@ -10108,7 +10226,7 @@ internal sealed class AvatarDatabaseClient
         var query = input.Query?.Trim() ?? "";
         var textMatches = string.IsNullOrWhiteSpace(query);
         if (input.SearchAvatar && TextMatches(query, input.SearchMode, avatar.Name, avatar.AvatarId, avatar.Id)) textMatches = true;
-        if (input.SearchAuthor && TextMatches(query, input.SearchMode, avatar.AuthorName, avatar.AuthorId)) textMatches = true;
+        if (input.SearchAuthor && AuthorMatches(avatar, query, input)) textMatches = true;
         if (input.SearchDescription && TextMatches(query, input.SearchMode, avatar.Description)) textMatches = true;
         if (input.SearchTags && TextMatches(query, input.SearchMode, avatar.Tags, avatar.Notes)) textMatches = true;
         if (!textMatches) return false;
@@ -10135,6 +10253,16 @@ internal sealed class AvatarDatabaseClient
             _ => value.Contains(needle, StringComparison.OrdinalIgnoreCase)
         });
     }
+
+    private static bool AuthorMatches(AvatarInput avatar, string query, AvatarSearchInput input) =>
+        input.ExactAuthorName
+            ? string.Equals(query.Trim(), avatar.AuthorName?.Trim(), StringComparison.OrdinalIgnoreCase)
+            : TextMatches(query, input.SearchMode, avatar.AuthorName, avatar.AuthorId);
+
+    private static bool AuthorNameMatches(string query, string authorName, AvatarSearchInput input) =>
+        input.ExactAuthorName
+            ? string.Equals(query.Trim(), authorName.Trim(), StringComparison.OrdinalIgnoreCase)
+            : TextMatches(query, input.SearchMode, authorName);
 
     private static string NormalizeSearchMode(string? mode) => (mode ?? "").Trim() switch
     {
@@ -10807,7 +10935,7 @@ internal sealed record ExportResult(string Path);
 internal sealed record GroupClearResult(LibraryData Library, int Removed, string BackupPath);
 internal sealed record SteamVrControllerBindingCapture(string Binding, string Display);
 internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayHotkey = "F8", string DatabaseRandomHotkey = "Ctrl+R", string DatabaseRandomVrBinding = "", string OverlayDefaultPanel = "avatars", int OverlayOpacity = 85, int OverlayScale = 100, int OverlayX = 8, int OverlayY = 16, int OverlayWidth = 360, int OverlayHeight = 519, int SchemaVersion = 14);
-internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx", string SearchMode = "phrase", List<string>? ExcludedAvatarIds = null, string Sort = "updatedDesc");
+internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx", string SearchMode = "phrase", List<string>? ExcludedAvatarIds = null, string Sort = "updatedDesc", bool ExactAuthorName = false);
 internal sealed record AvatarListResult(List<AvatarInput> Avatars);
 internal sealed record AvatarImageResolveInput(string AvatarId = "", string ImageUrl = "", string Name = "", string UserId = "", string DisplayName = "");
 internal sealed record AvatarDatabaseSearchResult(List<AvatarInput> Results, int Page, bool HasMore, DateTimeOffset CachedAt, int Total = 0);

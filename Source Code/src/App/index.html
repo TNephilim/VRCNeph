@@ -166,7 +166,7 @@
                   <label class="field-toggle"><input id="databaseHideOlderAvatarsToggle" type="checkbox">Hide older avatars</label>
                 </section>
                 <section class="database-filter-section">
-                  <h4>Platforms</h4>
+                  <h4>Show only</h4>
                   <label class="field-toggle"><input id="databasePlatformPcToggle" type="checkbox">PC</label>
                   <label class="field-toggle"><input id="databasePlatformAndroidToggle" type="checkbox">Android</label>
                   <label class="field-toggle"><input id="databasePlatformIosToggle" type="checkbox">iOS</label>
@@ -419,7 +419,7 @@
         <select id="saveAvatarGroupInput" hidden></select>
       </div>
     </div>
-    <menu><button id="unfavoriteAvatarGroupBtn" type="button" class="danger" hidden>Unfavorite</button><button type="button" data-close="saveAvatarGroupDialog">Cancel</button><button id="confirmSaveAvatarGroupBtn" class="primary">Save Avatar</button></menu>
+    <menu><button id="unfavoriteAvatarGroupBtn" type="button" class="danger" hidden>Unfavorite</button><button type="button" data-close="saveAvatarGroupDialog">Cancel</button><button id="copyFavoriteAvatarGroupBtn" type="button" hidden>Copy to Group</button><button id="confirmSaveAvatarGroupBtn" class="primary">Save Avatar</button></menu>
   </form></dialog>
 
   <dialog id="databaseJumpDialog"><form method="dialog" class="dialog-form">
@@ -485,7 +485,6 @@
       <label>Default panel
         <select id="overlayDefaultPanelSelect">
           <option value="avatars">Avatars</option>
-          <option value="worlds">Worlds</option>
           <option value="friends">Friends</option>
         </select>
       </label>

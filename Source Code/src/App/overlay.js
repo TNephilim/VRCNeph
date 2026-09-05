@@ -6,8 +6,8 @@ const OVERLAY_DETAIL_POSITIONS_KEY = "vrcneph.overlay.detailPositions.v1";
 const LOCAL_WORLD_GROUPS_KEY = "vrcneph.worldGroups";
 const DEFAULT_WORLD_GROUP_KEY = "local_world_favorites";
 const SYNCED_GROUP_AVATAR_LIMIT = 50;
-const OVERLAY_PANELS = ["avatars", "worlds", "friends"];
-const PANEL_LABELS = { avatars: "Avatars", worlds: "Worlds", friends: "Friends" };
+const OVERLAY_PANELS = ["avatars", "friends"];
+const PANEL_LABELS = { avatars: "Avatars", friends: "Friends" };
 const PANEL_SORT_OPTIONS = {
   avatars: [
     { value: "updatedDesc", label: "Recently updated" },
@@ -109,6 +109,9 @@ function handleNativeMessage(message) {
     if (response.event === "overlayEquipNotice") {
       showEquipNotice(response.data);
     }
+    if (response.event === "overlayHostState") {
+      applyOverlayHostState(response.data);
+    }
     return;
   }
   const pending = state.pending.get(response.id);
@@ -137,16 +140,37 @@ function showEquipNotice(notice = {}) {
   const fallback = $("equipNoticeFallback");
   const imageUrl = String(notice.thumbnailImageUrl || "").trim();
   if (imageUrl) { image.src = imageUrl; image.hidden = false; fallback.hidden = true; }
-  const labels = [];
+  const badges = [];
   const release = String(notice.releaseStatus || "").trim();
-  if (release) labels.push(release[0].toUpperCase() + release.slice(1));
-  for (const platform of String(notice.platforms || "").split(/[,|]/).map((value) => value.trim()).filter(Boolean)) labels.push(platform);
-  $("equipNoticeBadges").replaceChildren(...labels.slice(0, 3).map((label) => { const badge = document.createElement("span"); badge.className = "overlay-equip-notice-badge"; badge.textContent = label; return badge; }));
+  const releaseBadge = equipNoticeReleaseBadge(release);
+  if (releaseBadge) badges.push(releaseBadge);
+  badges.push(...equipNoticePlatformBadges(notice.platforms));
+  $("equipNoticeBadges").replaceChildren(...badges.slice(0, 3).map(({ label, className }) => { const badge = document.createElement("span"); badge.className = `overlay-equip-notice-badge ${className}`; badge.textContent = label; return badge; }));
   const noticeElement = $("equipNotice");
   noticeElement.hidden = true;
   void noticeElement.offsetWidth;
   noticeElement.hidden = false;
   document.body.classList.add("equip-notice-mode");
+}
+
+function equipNoticeReleaseBadge(status) {
+  const value = String(status || "").trim();
+  if (!value) return null;
+  const lower = value.toLowerCase();
+  if (lower === "deleted" || lower === "unavailable") return { label: "Deleted", className: "deleted" };
+  if (lower === "private" || lower === "hidden") return { label: "Private", className: "private" };
+  return { label: lower === "public" ? "Public" : value, className: lower === "public" ? "public" : "private" };
+}
+
+function equipNoticePlatformBadges(value) {
+  const badges = [];
+  for (const item of String(value || "").split(/[,;|\n]/).map((entry) => entry.trim()).filter(Boolean)) {
+    const lower = item.toLowerCase();
+    const label = lower.includes("standalonewindows") || /\b(windows|pc)\b/.test(lower) ? "PC" : lower.includes("android") || lower.includes("quest") ? "Android" : lower.includes("ios") ? "iOS" : "";
+    if (!label || badges.some((badge) => badge.label === label)) continue;
+    badges.push({ label, className: label === "PC" ? "platform-pc" : label === "Android" ? "platform-android" : "platform-ios" });
+  }
+  return badges;
 }
 
 function api(command, payload = {}, timeoutMs = 120000) {
@@ -160,9 +184,7 @@ function api(command, payload = {}, timeoutMs = 120000) {
   return promise;
 }
 
-async function refreshOverlayHostMode() {
-  try {
-    const host = await api("overlayHostState", {}, 3000);
+function applyOverlayHostState(host = {}) {
     const mode = String(host?.mode || "hidden").toLowerCase();
     const token = String(host?.token || "");
     if (mode === "notice" && (overlayHostMode !== "notice" || overlayHostToken !== token)) {
@@ -173,6 +195,10 @@ async function refreshOverlayHostMode() {
     }
     overlayHostMode = mode;
     overlayHostToken = token;
+}
+async function refreshOverlayHostMode() {
+  try {
+    applyOverlayHostState(await api("overlayHostState", {}, 3000));
   } catch { }
 }
 
