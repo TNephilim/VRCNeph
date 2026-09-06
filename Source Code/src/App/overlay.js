@@ -29,21 +29,32 @@ const PANEL_SORT_OPTIONS = {
     { value: "platformAsc", label: "Platform" }
   ]
 };
+const appStateStore = { ready: false, values: new Map(), pending: new Map(), promise: null };
+let equipNoticeFadeTimer = null;
 
 function loadOverlayJson(key, fallback = null) {
+  if (appStateStore.values.has(key)) return appStateStore.values.get(key);
   try { return JSON.parse(localStorage.getItem(key) || "") || fallback; } catch { return fallback; }
 }
 
 function saveOverlayJson(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch { }
+  appStateStore.values.set(key, value);
+  if (!appStateStore.ready) {
+    appStateStore.pending.set(key, value);
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { }
+    return;
+  }
+  void api("appStateSave", { key, value }, 30000).catch(() => {});
+  try { localStorage.removeItem(key); } catch { }
 }
 
 function loadOverlayFlag(key) {
-  try { return localStorage.getItem(key) === "true"; } catch { return false; }
+  const value = loadOverlayJson(key, false);
+  return value === true || value === "true";
 }
 
 function saveOverlayFlag(key) {
-  try { localStorage.setItem(key, "true"); } catch { }
+  saveOverlayJson(key, true);
 }
 
 function loadLocalWorldGroups() {
@@ -147,10 +158,14 @@ function showEquipNotice(notice = {}) {
   badges.push(...equipNoticePlatformBadges(notice.platforms));
   $("equipNoticeBadges").replaceChildren(...badges.slice(0, 3).map(({ label, className }) => { const badge = document.createElement("span"); badge.className = `overlay-equip-notice-badge ${className}`; badge.textContent = label; return badge; }));
   const noticeElement = $("equipNotice");
-  noticeElement.hidden = true;
-  void noticeElement.offsetWidth;
-  noticeElement.hidden = false;
+  if (equipNoticeFadeTimer) clearTimeout(equipNoticeFadeTimer);
+  noticeElement.classList.remove("is-fading-out");
   document.body.classList.add("equip-notice-mode");
+  noticeElement.hidden = false;
+  requestAnimationFrame(() => send("overlayNoticeReady"));
+  equipNoticeFadeTimer = setTimeout(() => {
+    if (!noticeElement.hidden) noticeElement.classList.add("is-fading-out");
+  }, 4720);
 }
 
 function equipNoticeReleaseBadge(status) {
@@ -184,12 +199,42 @@ function api(command, payload = {}, timeoutMs = 120000) {
   return promise;
 }
 
+async function hydrateOverlayAppState() {
+  if (appStateStore.promise) return appStateStore.promise;
+  appStateStore.promise = (async () => {
+    let persisted = {};
+    try { persisted = await api("appStateLoad", {}, 30000) || {}; } catch { }
+    const local = {};
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (!key || !key.startsWith("vrcneph.")) continue;
+      try { local[key] = JSON.parse(localStorage.getItem(key) || ""); } catch { }
+    }
+    const merged = { ...local, ...(persisted || {}) };
+    for (const [key, value] of appStateStore.pending.entries()) merged[key] = value;
+    appStateStore.values = new Map(Object.entries(merged));
+    appStateStore.ready = true;
+    const writes = [];
+    for (const [key, value] of Object.entries(merged)) {
+      if (!Object.prototype.hasOwnProperty.call(persisted || {}, key) || appStateStore.pending.has(key)) writes.push(api("appStateSave", { key, value }, 30000).catch(() => {}));
+      try { localStorage.removeItem(key); } catch { }
+    }
+    await Promise.all(writes);
+    state.detachedPanels = loadOverlayJson(OVERLAY_DETACHED_PANELS_KEY, {});
+    state.detailPositions = loadOverlayJson(OVERLAY_DETAIL_POSITIONS_KEY, {});
+    state.data.settings = loadOverlayJson(OVERLAY_SETTINGS_CACHE_KEY, state.data.settings || {});
+    hydrateCachedSnapshot();
+    render();
+  })();
+  return appStateStore.promise;
+}
+
 function applyOverlayHostState(host = {}) {
     const mode = String(host?.mode || "hidden").toLowerCase();
     const token = String(host?.token || "");
     if (mode === "notice" && (overlayHostMode !== "notice" || overlayHostToken !== token)) {
       showEquipNotice(host?.notice || {});
-    } else if (mode !== "notice" && overlayHostMode === "notice") {
+    } else if (mode !== "notice") {
       $("equipNotice").hidden = true;
       document.body.classList.remove("equip-notice-mode");
     }
@@ -625,28 +670,15 @@ function randomFavoriteAvatar() {
   })));
 }
 
-async function waitForOverlayAvatarEquipped(id, kind = "") {
-  const target = avatarRandomId({ avatarId: id });
-  const started = Date.now();
-  while (Date.now() - started < 90000) {
-    if (kind && !state.roulette.running[kind]) throw new Error("Avatar roulette stopped.");
-    const avatar = await api("vrchatCurrentAvatar", {}, 30000).catch(() => null);
-    const current = avatarRandomId(avatar || {});
-    if (current && current === target) {
-      await delay(2000);
-      return true;
-    }
-    await delay(2500);
-  }
-  throw new Error("VRChat did not confirm the avatar equip within 90 seconds.");
-}
-
 async function equipAvatarIdFromOverlay(id, button = null, restoreLabel = "Equip", options = {}) {
   if (!id) return false;
   const restore = button ? setBusy(button, "...") : null;
   try {
-    await api("overlayEquipAvatar", { id }, 120000);
-    if (options.waitForConfirm) await waitForOverlayAvatarEquipped(id, options.rouletteKind || "");
+    const avatarMeta = findOverlayAvatar(id) || state.detailPanels.avatar?.item || { id, name: id };
+    await api("overlayBridgeRequest", {
+      command: "equip-avatar",
+      payload: { avatarId: id, avatarMeta, awaitCompletion: options.waitForConfirm === true }
+    }, options.waitForConfirm ? 600000 : 30000);
     if (restore) {
       restore("Sent");
       setTimeout(() => { if (button.isConnected) button.textContent = restoreLabel; }, 900);
@@ -978,6 +1010,16 @@ function friendRow(friend) {
   const statusClass = userStatusClass(friend.status, presence);
   const statusLabel = userStatusLabel(friend.status, presence);
   const selected = detailPanelMatches("user", friend.id);
+  const isFriend = friend.isFriend === true;
+  const isBlocked = friend.isBlocked === true;
+  const actions = [
+    `<button class="row-action" type="button" data-friend-action="invite" data-friend-id="${escapeHtml(friend.id || "")}">Invite</button>`,
+    `<button class="row-action" type="button" data-friend-action="request" data-friend-id="${escapeHtml(friend.id || "")}">Request</button>`,
+    `<button class="row-action" type="button" data-friend-action="message" data-friend-id="${escapeHtml(friend.id || "")}">Message</button>`,
+    !isFriend && !isBlocked ? `<button class="row-action" type="button" data-friend-action="friend" data-friend-id="${escapeHtml(friend.id || "")}">Friend</button>` : "",
+    isFriend ? `<button class="row-action danger" type="button" data-friend-action="unfriend" data-friend-id="${escapeHtml(friend.id || "")}">Unfriend</button>` : "",
+    isBlocked ? `<button class="row-action" type="button" data-friend-action="unblock" data-friend-id="${escapeHtml(friend.id || "")}">Unblock</button>` : `<button class="row-action danger" type="button" data-friend-action="block" data-friend-id="${escapeHtml(friend.id || "")}">Block</button>`
+  ].filter(Boolean).join("");
   return `<article class="overlay-row friend-row ${selected ? "selected" : ""}" data-friend-id="${escapeHtml(friend.id || "")}">
     ${friendImage(friend)}
     <div class="row-main">
@@ -985,10 +1027,7 @@ function friendRow(friend) {
       <div class="row-subtitle">${escapeHtml(friend.statusDescription || friendLocation(friend))}</div>
       <div class="chips">${chip(statusLabel, statusClass)}${platform ? chip(platform, platform) : ""}${friend.location && friend.location.startsWith("wrld_") ? chip("Joinable", "joinable") : ""}</div>
     </div>
-    <div class="row-actions friend-actions">
-      <button class="row-action" type="button" data-friend-action="invite" data-friend-id="${escapeHtml(friend.id || "")}">Invite</button>
-      <button class="row-action" type="button" data-friend-action="request" data-friend-id="${escapeHtml(friend.id || "")}">Request</button>
-    </div>
+    <div class="row-actions friend-actions">${actions}</div>
   </article>`;
 }
 
@@ -1458,6 +1497,8 @@ function userDetailBody(panel) {
   const presence = friendPresence(user);
   const statusLabel = userStatusLabel(user.status, presence);
   const avatarId = user.currentAvatarId || "";
+  const isFriend = user.isFriend === true;
+  const isBlocked = user.isBlocked === true;
   return `<div class="detail-hero">
     ${detailImageHtml(user, title)}
     <div class="detail-hero-main">
@@ -1470,6 +1511,9 @@ function userDetailBody(panel) {
     user.id ? `<button type="button" data-friend-action="invite" data-friend-id="${escapeHtml(user.id)}">Invite</button>` : "",
     user.id ? `<button type="button" data-friend-action="request" data-friend-id="${escapeHtml(user.id)}">Request</button>` : "",
     user.id ? `<button type="button" data-friend-action="message" data-friend-id="${escapeHtml(user.id)}">Message</button>` : "",
+    user.id && !isFriend && !isBlocked ? `<button type="button" data-friend-action="friend" data-friend-id="${escapeHtml(user.id)}">Friend</button>` : "",
+    user.id && isFriend ? `<button type="button" class="danger" data-friend-action="unfriend" data-friend-id="${escapeHtml(user.id)}">Unfriend</button>` : "",
+    user.id && isBlocked ? `<button type="button" data-friend-action="unblock" data-friend-id="${escapeHtml(user.id)}">Unblock</button>` : user.id ? `<button type="button" class="danger" data-friend-action="block" data-friend-id="${escapeHtml(user.id)}">Block</button>` : "",
     user.id ? `<button type="button" data-copy-text="${escapeHtml(user.id)}">Copy ID</button>` : ""
   ])}
   ${panel.loading ? `<div class="detail-status">Loading user details...</div>` : ""}
@@ -2046,19 +2090,10 @@ async function saveAvatarByIdFromOverlay(button) {
   }
   const restore = setBusy(button, "...");
   try {
-    await api("saveAvatar", {
-      id: "",
-      groupId: group.id,
-      avatarId,
-      name: avatar.name || avatar.title || "",
-      authorName: avatar.authorName || avatar.subtitle || "",
-      imageUrl: avatar.fullImageUrl || avatar.imageUrl || "",
-      thumbnailImageUrl: avatar.imageUrl || "",
-      releaseStatus: avatar.releaseStatus || "",
-      platforms: avatar.platforms || "",
-      source: avatar.source || "vrchat"
-    }, 45000);
-    if (isSyncedGroupId(group.id)) await api("vrchatFavoriteAdd", { avatarId, groupId: group.id }, 60000);
+    await api("overlayBridgeRequest", {
+      command: "favorite-add",
+      payload: { groupId: group.id, avatarId, avatar }
+    }, 60000);
     await refresh();
     restore(iconButton ? undefined : "Saved");
     if (!iconButton) setTimeout(() => { if (button.isConnected) button.textContent = normalLabel; }, 900);
@@ -2134,8 +2169,10 @@ async function unfavoriteAvatarFromOverlay(button) {
   if (!ok) return;
   const restore = setBusy(button, "...");
   try {
-    if (isSyncedGroupId(group.id)) await api("vrchatFavoriteRemove", { avatarId, groupId: group.id }, 60000);
-    await api("deleteAvatar", { id: localId }, 45000);
+    await api("overlayBridgeRequest", {
+      command: "favorite-remove",
+      payload: { avatarId, groupId: group.id, localId }
+    }, 60000);
     state.selectedAvatarId = "";
     await refresh();
   } catch (error) {
@@ -2180,87 +2217,75 @@ async function openWorldFromOverlay(button) {
   }
 }
 
+async function chooseOverlayInviteMessageSlot(type = "message") {
+  const result = await api("vrchatInviteMessages", { type }, 45000);
+  const messages = Array.isArray(result?.messages) ? result.messages : [];
+  if (!messages.length) return { messageSlot: 0 };
+  const choice = await chooseOverlay({
+    title: type === "request" ? "Request Invite" : "Send Invite",
+    message: type === "request" ? "Choose a saved VRChat request message." : "Choose a saved VRChat invite message.",
+    label: "Message slot",
+    confirmLabel: type === "request" ? "Request Invite" : "Send Invite",
+    options: messages.map((item) => {
+      const slot = Number(item.slot) || 0;
+      const text = String(item.message || "").trim() || (slot === 0 ? "Default message" : `Message ${slot}`);
+      const cooldown = Number(item.remainingCooldownMinutes) || 0;
+      const locked = item.canBeUpdated === false || cooldown > 0;
+      return { value: String(slot), disabled: false, label: `#${slot}: ${text}${locked ? " (saved)" : ""}` };
+    })
+  });
+  return choice === null ? null : { messageSlot: Number(choice) || 0 };
+}
+
+async function refreshFriendAfterOverlayAction(userId) {
+  await refresh();
+  if (state.detailPanels.user.open && state.selectedFriendId === userId) {
+    await openUserDetail(findOverlayFriend(userId) || { id: userId });
+  }
+}
+
 async function runFriendAction(button) {
   const userId = button.dataset.friendId || "";
   const action = button.dataset.friendAction || "";
   if (!userId || !action) return;
-  let restoreBusy = null;
-  const restoreLabel = action === "request" ? "Request" : action === "message" ? "Message" : "Invite";
+  const labels = { invite: "Invite", request: "Request", message: "Message", friend: "Friend", unfriend: "Unfriend", block: "Block", unblock: "Unblock" };
+  const restoreLabel = labels[action] || "Action";
+  const restore = setBusy(button, "...");
   try {
     if (action === "invite") {
-      const choice = await chooseOverlay({
-        title: "Invite Friend",
-        message: "Send the default invite or write a short invite message.",
-        label: "Invite type",
-        options: [
-          { value: "default", label: "Default invite" },
-          { value: "message", label: "With message" }
-        ]
-      });
-      if (!choice) return;
-      const instanceId = currentInstanceId();
-      if (!instanceId) throw new Error("No current instance is available to invite from.");
-      const restore = setBusy(button, "...");
-      restoreBusy = restore;
-      if (choice === "message") {
-        const message = await textOverlay({ title: "Invite Message", message: "Send a VRChat invite with a custom message.", confirmLabel: "Send" });
-        if (!message) {
-          restore("Invite");
-          return;
-        }
-        await api("vrchatSendChatMessage", { userId, message, mode: "invite" }, 45000);
-      } else {
-        await api("vrchatInviteUser", { userId, instanceId, messageSlot: 0 }, 45000);
-      }
-      restore("Sent");
-      setTimeout(() => { if (button.isConnected) button.textContent = "Invite"; }, 900);
-      return;
-    }
-    if (action === "request") {
-      const choice = await chooseOverlay({
-        title: "Request Invite",
-        message: "Send the default request or write a short request message.",
-        label: "Request type",
-        options: [
-          { value: "default", label: "Default request" },
-          { value: "message", label: "With message" }
-        ]
-      });
-      if (!choice) return;
-      const restore = setBusy(button, "...");
-      restoreBusy = restore;
-      if (choice === "message") {
-        const message = await textOverlay({ title: "Request Message", message: "Send a VRChat request invite with a custom message.", confirmLabel: "Send" });
-        if (!message) {
-          restore("Request");
-          return;
-        }
-        await api("vrchatSendChatMessage", { userId, message, mode: "request" }, 45000);
-      } else {
-        await api("vrchatRequestInvite", { id: userId, messageSlot: 0 }, 45000);
-      }
-      restore("Sent");
-      setTimeout(() => { if (button.isConnected) button.textContent = "Request"; }, 900);
-      return;
-    }
-    if (action === "message") {
-      const restore = setBusy(button, "...");
-      restoreBusy = restore;
-      restore("Message");
+      const choice = await chooseOverlayInviteMessageSlot("message");
+      if (!choice) { restore(restoreLabel); return; }
+      await api("vrchatInviteUser", { userId, instanceId: currentInstanceId(), messageSlot: choice.messageSlot }, 45000);
+    } else if (action === "request") {
+      const choice = await chooseOverlayInviteMessageSlot("request");
+      if (!choice) { restore(restoreLabel); return; }
+      await api("vrchatRequestInvite", { id: userId, messageSlot: choice.messageSlot }, 45000);
+    } else if (action === "message") {
       const message = await textOverlay({ title: "Message Friend", message: "Send a VRChat invite/request message.", confirmLabel: "Send" });
-      if (!message) return;
-      const sent = setBusy(button, "...");
+      if (!message) { restore(restoreLabel); return; }
       await api("vrchatSendChatMessage", { userId, message, mode: "auto" }, 45000);
-      sent("Sent");
-      setTimeout(() => { if (button.isConnected) button.textContent = "Message"; }, 900);
+    } else if (action === "friend") {
+      if (!await confirmOverlay({ title: "Friend Request", message: "Send this user a VRChat friend request?", confirmLabel: "Send Request", danger: false })) { restore(restoreLabel); return; }
+      await api("vrchatFriendRequest", { id: userId }, 45000);
+    } else if (action === "unfriend") {
+      if (!await confirmOverlay({ title: "Unfriend", message: "Remove this user from your VRChat friends?", confirmLabel: "Unfriend", danger: true })) { restore(restoreLabel); return; }
+      await api("vrchatUnfriend", { id: userId }, 45000);
+    } else if (action === "block") {
+      if (!await confirmOverlay({ title: "Block User", message: "Block this user on VRChat?", confirmLabel: "Block", danger: true })) { restore(restoreLabel); return; }
+      await api("vrchatBlockUser", { id: userId, type: "block" }, 45000);
+    } else if (action === "unblock") {
+      if (!await confirmOverlay({ title: "Unblock User", message: "Unblock this user on VRChat?", confirmLabel: "Unblock", danger: false })) { restore(restoreLabel); return; }
+      await api("vrchatUnblockUser", { id: userId, type: "block" }, 45000);
+    } else {
       return;
     }
+    restore(action === "friend" ? "Sent" : "Sent");
+    await refreshFriendAfterOverlayAction(userId);
+    setTimeout(() => { if (button.isConnected) button.textContent = restoreLabel; }, 900);
   } catch (error) {
+    restore(restoreLabel);
     await confirmOverlay({ title: "Friend Action", message: error.message, confirmLabel: "OK", danger: false });
-    restoreBusy?.(restoreLabel);
-    return;
   }
-  setTimeout(() => { if (button.isConnected) button.textContent = action === "request" ? "Request" : action === "message" ? "Message" : "Invite"; }, 900);
 }
 
 function showFirstOpenTip() {
@@ -2626,9 +2651,9 @@ $("saveCurrentAvatarOverlayBtn").addEventListener("click", openSaveCurrentAvatar
 $("saveCurrentWorldOverlayBtn").addEventListener("click", saveCurrentWorldFromOverlay);
 
 installWindowControls();
-hydrateCachedSnapshot();
-render();
-showFirstOpenTip();
+  hydrateCachedSnapshot();
+  render();
+  void hydrateOverlayAppState().then(() => showFirstOpenTip());
 refreshSettingsFast();
 refresh();
 void refreshOverlayHostMode();

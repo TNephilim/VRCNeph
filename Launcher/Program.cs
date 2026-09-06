@@ -104,7 +104,68 @@ internal static class Program
     private static void EnsureEmbeddedAppPackage(string appDirectory)
     {
         var packageVersion = ReadEmbeddedPackageVersion();
-        if (!AppPackageIsCurrent(appDirectory, packageVersion)) InstallEmbeddedAppPackage(appDirectory, packageVersion);
+        if (AppPackageIsCurrent(appDirectory, packageVersion)) return;
+
+        // The installed app owns files beneath appDirectory. It must be allowed to
+        // close before this launcher swaps the folder for a newer embedded package.
+        CloseInstalledAppForPackageReplacement(appDirectory);
+        InstallEmbeddedAppPackage(appDirectory, packageVersion);
+    }
+
+    private static void CloseInstalledAppForPackageReplacement(string appDirectory)
+    {
+        var installedAppPath = Path.GetFullPath(Path.Combine(appDirectory, AppExeName));
+        var processName = Path.GetFileNameWithoutExtension(AppExeName);
+        var installedInstances = Process.GetProcessesByName(processName)
+            .Where(process => IsProcessRunningFromPath(process, installedAppPath))
+            .ToList();
+
+        try
+        {
+            foreach (var process in installedInstances)
+            {
+                if (!process.CloseMainWindow())
+                {
+                    throw new InvalidOperationException("VRCNeph is running but could not be asked to close for the update. Close VRCNeph, then open it again.");
+                }
+            }
+
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+            while (installedInstances.Any(process => IsStillRunning(process)) && DateTimeOffset.UtcNow < deadline)
+            {
+                Thread.Sleep(100);
+            }
+
+            if (installedInstances.Any(IsStillRunning))
+            {
+                throw new InvalidOperationException("VRCNeph is still closing. Wait a moment, then open VRCNeph again.");
+            }
+        }
+        finally
+        {
+            foreach (var process in installedInstances) process.Dispose();
+        }
+    }
+
+    private static bool IsProcessRunningFromPath(Process process, string expectedPath)
+    {
+        try
+        {
+            return !process.HasExited
+                && string.Equals(Path.GetFullPath(process.MainModule?.FileName ?? ""), expectedPath, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            // Access can fail for a process that is already exiting. It cannot be
+            // safely identified as this installed app, so leave it untouched.
+            return false;
+        }
+    }
+
+    private static bool IsStillRunning(Process process)
+    {
+        try { return !process.HasExited; }
+        catch { return false; }
     }
 
     private static string ReadEmbeddedPackageVersion()

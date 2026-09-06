@@ -10,7 +10,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>VRCNeph</AssemblyName>
     <ApplicationIcon>..\Source Code\src\App\VRCNeph.ico</ApplicationIcon>
-    <Version>1.0.35</Version>
+    <Version>1.0.36</Version>
     <AssemblyVersion>$(Version).0</AssemblyVersion>
     <FileVersion>$(Version).0</FileVersion>
     <InformationalVersion>$(Version)</InformationalVersion>

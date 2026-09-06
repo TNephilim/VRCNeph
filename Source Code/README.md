@@ -54,14 +54,14 @@ The app stores VRChat session cookies locally after login. It does not store you
 
 The database tab can search:
 
-- VRCNeph's local encounter cache, built from VRChat player and avatar logs.
+- Activity encounter history, built from VRChat player and avatar logs.
 - The remote VRCX-compatible avatar database.
 - AVTR.zip through the Crecross avatar gateway. The app receives only normalized
   search results; verification, action rotation, paging capabilities, and the
   24-hour authorization renewal stay on the server.
 - Prismic PAS.
 
-VRCNeph's local encounter cache is stored in its own local database and is refreshed from VRChat logs while VRCNeph is open. The remote VRCX-compatible database is a separate search source and does not require VRCX to be installed.
+Activity encounter history is stored in VRCNeph's local app data and is refreshed from VRChat logs while VRCNeph is open. The remote VRCX-compatible database is a separate search source and does not require VRCX to be installed.
 
 ## Local Data
 
@@ -75,7 +75,9 @@ Important folders and files:
 
 - `groups\library.json` stores the main local avatar library.
 - `export\` stores exported JSON backups.
-- `Database\VRCNeph.sqlite3` stores VRCNeph's local encounter database, alongside downloaded database files.
+- `Activity\` stores app-owned Activity history and encounter data.
+- `Activity\` also stores app-owned UI and synchronization state as JSON.
+- `Database\` stores downloaded source databases such as the Prismic PAS file.
 - `groups\vrchat-session.json` stores the saved VRChat session.
 
 Deleting the app executable does not delete your library.
