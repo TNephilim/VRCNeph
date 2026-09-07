@@ -8,6 +8,7 @@ internal static class Program
 {
     private const string EmbeddedPackageName = "VRCNephAssets.zip";
     private const string AppExeName = "VRCNeph.App.exe";
+    private const string MainWindowTitle = "VRCNeph";
     private const string DotnetInstallerUrl = "https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe";
     private const string WebViewInstallerUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
     private const string WebViewClientKey = @"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
@@ -117,7 +118,7 @@ internal static class Program
         var installedAppPath = Path.GetFullPath(Path.Combine(appDirectory, AppExeName));
         var processName = Path.GetFileNameWithoutExtension(AppExeName);
         var installedInstances = Process.GetProcessesByName(processName)
-            .Where(process => IsProcessRunningFromPath(process, installedAppPath))
+            .Where(process => IsMainAppProcess(process, installedAppPath))
             .ToList();
 
         try
@@ -158,6 +159,23 @@ internal static class Program
         {
             // Access can fail for a process that is already exiting. It cannot be
             // safely identified as this installed app, so leave it untouched.
+            return false;
+        }
+    }
+
+    private static bool IsMainAppProcess(Process process, string expectedPath)
+    {
+        if (!IsProcessRunningFromPath(process, expectedPath)) return false;
+        try
+        {
+            // The overlay host uses the same installed executable, but it is a
+            // separate hidden window titled "VRCNeph Overlay" (and stale hosts
+            // can have no window at all). The main app is the only process the
+            // launcher should ask the user to close before replacing the package.
+            return string.Equals(process.MainWindowTitle, MainWindowTitle, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
             return false;
         }
     }

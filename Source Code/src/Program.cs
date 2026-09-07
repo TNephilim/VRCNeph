@@ -39,6 +39,7 @@ internal static class AppPaths
     public static readonly string SettingsPath = Path.Combine(RootDirectory, "settings.json");
     public static readonly string UpdateFailureStatusPath = Path.Combine(RootDirectory, "update-failure.txt");
     public static readonly string OverlayHostStatePath = Path.Combine(RootDirectory, "overlay-host-state.json");
+    public static readonly string OverlaySettingsPreviewPath = Path.Combine(RootDirectory, "overlay-settings-preview.json");
     public static readonly string SessionPath = Path.Combine(GroupsDirectory, "vrchat-session.json");
 
     private static bool _initialized;
@@ -171,6 +172,10 @@ internal static class Program
     private static nint OverlayWindowHandle;
     private static FileSystemWatcher? OverlayHostStateWatcher;
     private static System.Threading.Timer? OverlayHostStateTimer;
+    private static FileSystemWatcher? OverlaySettingsPreviewWatcher;
+    private static System.Threading.Timer? OverlaySettingsPreviewTimer;
+    private static readonly object OverlaySettingsPreviewGate = new();
+    private static AppSettings? PendingOverlaySettingsPreview;
     private static FileSystemWatcher? LibraryWatcher;
     private static System.Threading.Timer? LibraryChangeTimer;
     private static System.Threading.Timer? LocalAvatarCacheTimer;
@@ -386,6 +391,7 @@ internal static class Program
             {
                 if (sender is not PhotinoWindow photino) return;
                 OverlayWebReady = true;
+                SendPendingOverlaySettingsPreview();
                 // The helper starts on a tiny, non-activating surface so WebView2
                 // can initialize even while the overlay is logically hidden. Once
                 // the page has sent its first bridge message, apply the real host
@@ -409,6 +415,7 @@ internal static class Program
                 OverlayWindowClosing = true;
                 OverlayWebReady = false;
                 StopOverlayHostStateWatcher();
+                StopOverlaySettingsPreviewWatcher();
                 StopLibraryChangeWatcher();
                 OverlayWindowHandle = IntPtr.Zero;
                 OverlayWindow = null;
@@ -418,8 +425,10 @@ internal static class Program
 
             StartLibraryChangeWatcher();
             StartOverlayHostStateWatcher();
+            StartOverlaySettingsPreviewWatcher();
             overlay.WaitForClose();
             StopOverlayHostStateWatcher();
+            StopOverlaySettingsPreviewWatcher();
             StopLibraryChangeWatcher();
             Logs.Info("App", "Overlay helper exiting.");
             Environment.Exit(0);
@@ -896,6 +905,7 @@ internal static class Program
                 "overlayHide" => HideOverlay(),
                 "overlayToggle" => ToggleOverlay(),
                 "overlaySnapshot" => await BuildOverlaySnapshotAsync(),
+                "overlaySettingsPreview" => PreviewOverlaySettings(GetPayload<AppSettings>(request)),
                 "overlayEquipNotice" => ShowEquipNotice(GetPayload<AvatarInput>(request)),
                 "overlayNoticeReady" => MarkOverlayNoticeReady(),
                 "overlayHostState" => GetOverlayHostState(),
@@ -1401,6 +1411,81 @@ internal static class Program
         }, null, 50, Timeout.Infinite);
     }
 
+    private static void StartOverlaySettingsPreviewWatcher()
+    {
+        StopOverlaySettingsPreviewWatcher();
+        Directory.CreateDirectory(AppPaths.RootDirectory);
+        OverlaySettingsPreviewWatcher = new FileSystemWatcher(AppPaths.RootDirectory, Path.GetFileName(AppPaths.OverlaySettingsPreviewPath))
+        {
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
+            EnableRaisingEvents = true
+        };
+        FileSystemEventHandler changed = (_, _) => ScheduleOverlaySettingsPreviewRefresh();
+        RenamedEventHandler renamed = (_, _) => ScheduleOverlaySettingsPreviewRefresh();
+        OverlaySettingsPreviewWatcher.Changed += changed;
+        OverlaySettingsPreviewWatcher.Created += changed;
+        OverlaySettingsPreviewWatcher.Renamed += renamed;
+        ScheduleOverlaySettingsPreviewRefresh();
+    }
+
+    private static void StopOverlaySettingsPreviewWatcher()
+    {
+        OverlaySettingsPreviewWatcher?.Dispose();
+        OverlaySettingsPreviewWatcher = null;
+        lock (OverlaySettingsPreviewGate)
+        {
+            OverlaySettingsPreviewTimer?.Dispose();
+            OverlaySettingsPreviewTimer = null;
+        }
+    }
+
+    private static void ScheduleOverlaySettingsPreviewRefresh()
+    {
+        lock (OverlaySettingsPreviewGate)
+        {
+            OverlaySettingsPreviewTimer?.Dispose();
+            OverlaySettingsPreviewTimer = new System.Threading.Timer(_ =>
+            {
+                SendOverlaySettingsPreviewFromFile();
+                lock (OverlaySettingsPreviewGate)
+                {
+                    OverlaySettingsPreviewTimer?.Dispose();
+                    OverlaySettingsPreviewTimer = null;
+                }
+            }, null, 5, Timeout.Infinite);
+        }
+    }
+
+    private static void SendOverlaySettingsPreviewFromFile()
+    {
+        if (OverlayWindowClosing || !File.Exists(AppPaths.OverlaySettingsPreviewPath)) return;
+        try
+        {
+            var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(AppPaths.OverlaySettingsPreviewPath), ProgramJson.Options);
+            if (settings is null) return;
+            if (!OverlayWebReady)
+            {
+                lock (OverlaySettingsPreviewGate) PendingOverlaySettingsPreview = settings;
+                return;
+            }
+            SendOverlayEvent("overlaySettingsPreview", settings);
+        }
+        catch
+        {
+        }
+    }
+
+    private static void SendPendingOverlaySettingsPreview()
+    {
+        AppSettings? settings;
+        lock (OverlaySettingsPreviewGate)
+        {
+            settings = PendingOverlaySettingsPreview;
+            PendingOverlaySettingsPreview = null;
+        }
+        if (settings is not null) SendOverlayEvent("overlaySettingsPreview", settings);
+    }
+
     private static void ApplyOverlayHostMode(string? requestedMode)
     {
         if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return;
@@ -1584,6 +1669,19 @@ internal static class Program
         hotkey = Settings.Get().OverlayHotkey,
         panels = new[] { "avatars", "friends" }
     };
+
+    private static object PreviewOverlaySettings(AppSettings settings)
+    {
+        try
+        {
+            Directory.CreateDirectory(AppPaths.RootDirectory);
+            var temporaryPath = AppPaths.OverlaySettingsPreviewPath + "." + Environment.ProcessId + ".tmp";
+            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(settings, ProgramJson.Options));
+            File.Move(temporaryPath, AppPaths.OverlaySettingsPreviewPath, true);
+        }
+        catch { }
+        return new { ok = true };
+    }
 
     private static async Task<object> BuildOverlaySnapshotAsync()
     {
@@ -4488,7 +4586,7 @@ internal sealed class AvatarStore
 
 internal sealed class AppSettingsStore
 {
-    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, "", true, "F8", "Ctrl+R", "Ctrl+Alt+R", "", "avatars", 85, 100, 8, 16, 360, 519, 16);
+    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, true, "", true, "F8", "Ctrl+R", "Ctrl+Alt+R", "", "avatars", 85, 100, 8, 16, 360, 519, 17);
     private readonly string _settingsPath = AppPaths.SettingsPath;
     public AppSettings Get()
     {
@@ -4529,7 +4627,7 @@ internal sealed class AppSettingsStore
         var overlayY = s.SchemaVersion < 11 && s.OverlayY == 0 ? DefaultSettings.OverlayY : Math.Clamp(s.OverlayY, -10000, 10000);
         var overlayWidth = s.SchemaVersion < 11 && s.OverlayWidth == 0 ? DefaultSettings.OverlayWidth : Math.Clamp(s.OverlayWidth, 360, 900);
         var overlayHeight = s.SchemaVersion < 11 && s.OverlayHeight == 0 ? DefaultSettings.OverlayHeight : Math.Clamp(s.OverlayHeight, 420, 1000);
-        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BackgroundEffect ?? "", s.OverlayEnabled, hotkey, databaseRandomHotkey, favoriteRandomHotkey, databaseRandomVrBinding, overlayPanel, overlayOpacity, overlayScale, overlayX, overlayY, overlayWidth, overlayHeight, 16);
+        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BlurEnabled, s.BackgroundEffect ?? "", s.OverlayEnabled, hotkey, databaseRandomHotkey, favoriteRandomHotkey, databaseRandomVrBinding, overlayPanel, overlayOpacity, overlayScale, overlayX, overlayY, overlayWidth, overlayHeight, 17);
     }
 }
 
@@ -11605,7 +11703,7 @@ internal sealed record DiagnosticsResult(List<DiagnosticItem> Items);
 internal sealed record ExportResult(string Path);
 internal sealed record GroupClearResult(LibraryData Library, int Removed, string BackupPath);
 internal sealed record SteamVrControllerBindingCapture(string Binding, string Display);
-internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayHotkey = "F8", string DatabaseRandomHotkey = "Ctrl+R", string FavoriteRandomHotkey = "Ctrl+Alt+R", string DatabaseRandomVrBinding = "", string OverlayDefaultPanel = "avatars", int OverlayOpacity = 85, int OverlayScale = 100, int OverlayX = 8, int OverlayY = 16, int OverlayWidth = 360, int OverlayHeight = 519, int SchemaVersion = 16);
+internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, bool BlurEnabled = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayHotkey = "F8", string DatabaseRandomHotkey = "Ctrl+R", string FavoriteRandomHotkey = "Ctrl+Alt+R", string DatabaseRandomVrBinding = "", string OverlayDefaultPanel = "avatars", int OverlayOpacity = 85, int OverlayScale = 100, int OverlayX = 8, int OverlayY = 16, int OverlayWidth = 360, int OverlayHeight = 519, int SchemaVersion = 17);
 internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx", string SearchMode = "phrase", List<string>? ExcludedAvatarIds = null, string Sort = "updatedDesc", bool ExactAuthorName = false);
 internal sealed record AvatarListResult(List<AvatarInput> Avatars);
 internal sealed record AvatarImageResolveInput(string AvatarId = "", string ImageUrl = "", string Name = "", string UserId = "", string DisplayName = "");

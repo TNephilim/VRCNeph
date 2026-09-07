@@ -117,6 +117,10 @@ function handleNativeMessage(message) {
     if (response.event === "overlayRefresh") {
       applyOverlaySnapshot(response.data);
     }
+    if (response.event === "overlaySettingsPreview") {
+      state.data = { ...state.data, settings: { ...(state.data?.settings || {}), ...(response.data || {}) } };
+      applySnapshotSettings();
+    }
     if (response.event === "overlayEquipNotice") {
       showEquipNotice(response.data);
     }
@@ -1596,7 +1600,7 @@ function hydrateCachedSnapshot() {
 function applySnapshotSettings() {
   const settings = state.data.settings || {};
   const opacity = Math.min(100, Math.max(45, Number(settings.overlayOpacity) || 85)) / 100;
-  const scale = Math.min(135, Math.max(80, Number(settings.overlayScale) || 100)) / 100;
+  const scale = 1;
   const theme = hexToRgb(settings.themeColor) || hexToRgb("#303735");
   const panel = hexToRgb(settings.panelColorSynced === false ? settings.panelColor : settings.themeColor) || theme;
   const appBase = { r: 18, g: 22, b: 20 };

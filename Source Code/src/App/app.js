@@ -1,4 +1,4 @@
-const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", overlayEnabled: true, overlayHotkey: "F8", databaseRandomHotkey: "Ctrl+R", favoriteRandomHotkey: "Ctrl+Alt+R", databaseRandomVrBinding: "", overlayDefaultPanel: "avatars", overlayOpacity: 85, overlayScale: 100, overlayX: 8, overlayY: 16, overlayWidth: 360, overlayHeight: 519, schemaVersion: 16 };
+const DEFAULT_SETTINGS = { gridSize: 10, databaseGridSize: 10, themeColor: "#303735", panelColor: "#303735", panelColorSynced: true, blurEnabled: true, backgroundOpacity: 20, panelOpacity: 35, backgroundEffect: "", overlayEnabled: true, overlayHotkey: "F8", databaseRandomHotkey: "Ctrl+R", favoriteRandomHotkey: "Ctrl+Alt+R", databaseRandomVrBinding: "", overlayDefaultPanel: "avatars", overlayOpacity: 85, overlayScale: 100, overlayX: 8, overlayY: 16, overlayWidth: 360, overlayHeight: 519, schemaVersion: 17 };
 const OVERLAY_TAB_TIP_SEEN_KEY = "vrcneph.overlay.tabTipSeen.v1";
 const DATABASE_OLDER_AVATAR_CUTOFF_MS = Date.parse("2020-08-06T00:00:00Z");
 const LIVE_SYNC_TIMING = {
@@ -122,6 +122,8 @@ const state = {
   settingsDraft: null,
   pendingBackupRestore: null,
   pendingBackgroundGroupId: "",
+  backgroundDialogReturnDialogId: "",
+  backgroundDialogHandoffClosing: false,
   backgroundCache: new Map(),
   pendingGroupIconId: "",
   activePage: "favorites",
@@ -180,7 +182,7 @@ const state = {
 let pointerSortSession = null;
 let pointerSortIgnoreClickUntil = 0;
 let floatingDragPreviewElement = null;
-let dragHitTestTimer = null;
+let dragHitTestFrame = null;
 let currentAvatarVerificationTimer = null;
 let currentAvatarVerificationInFlight = false;
 let lastCurrentAvatarVerificationAt = 0;
@@ -551,6 +553,7 @@ async function loadSettings() {
       themeColor: /^#[0-9a-f]{6}$/i.test(saved.themeColor || "") ? saved.themeColor : DEFAULT_SETTINGS.themeColor,
       panelColor: /^#[0-9a-f]{6}$/i.test(saved.panelColor || "") ? saved.panelColor : /^#[0-9a-f]{6}$/i.test(saved.themeColor || "") ? saved.themeColor : DEFAULT_SETTINGS.panelColor,
       panelColorSynced: saved.panelColorSynced !== false,
+      blurEnabled: saved.blurEnabled !== false,
       backgroundOpacity: Number.isFinite(saved.backgroundOpacity) ? Math.min(100, Math.max(0, Number(saved.backgroundOpacity))) : DEFAULT_SETTINGS.backgroundOpacity,
       panelOpacity: Number.isFinite(saved.panelOpacity) ? Math.min(100, Math.max(0, Number(saved.panelOpacity))) : DEFAULT_SETTINGS.panelOpacity,
       backgroundEffect: String(saved.backgroundEffect || ""),
@@ -957,7 +960,7 @@ function applyActiveBackgroundEffect() {
 function backgroundDialogPreviewEffect(value) {
   return value === "global" ? state.settings.backgroundEffect : value;
 }
-async function saveSettings() { try { state.settings = await api("settingsSave", state.settings); applySettings(); } catch (e) { toast(e.message); } }
+async function saveSettings() { try { state.settings = await api("settingsSave", state.settings); applySettings(); scheduleOverlaySettingsPreview(0); } catch (e) { toast(e.message); } }
 function queueSaveSettings() { clearTimeout(state.settingsSaveTimer); state.settingsSaveTimer = setTimeout(saveSettings, 220); }
 
 function render() { renderPageTabs(); renderGroups(); renderToolbar(); renderAvatars(); renderAvatarDatabaseResults(); renderAccount(); renderEquipProgress(); renderNotificationsPage(); renderMessagesPage(); renderInlineMessagePanel(); renderMessagePopup(); }
@@ -4047,8 +4050,15 @@ function syncDatabaseJumpFromNumber() {
 function showContextMenu(x, y, actions) {
   const menu = $("contextMenu");
   const openDialog = document.querySelector("dialog[open]");
-  if (openDialog && menu.parentElement !== openDialog) openDialog.append(menu);
-  else if (!openDialog && menu.parentElement !== document.body) document.body.append(menu);
+  closeContextMenuTopLayer(menu);
+  const useTopLayer = Boolean(openDialog && canUsePopover(menu));
+  if (useTopLayer || !openDialog) {
+    if (menu.parentElement !== document.body) document.body.append(menu);
+    if (useTopLayer) {
+      menu.setAttribute("popover", "manual");
+      menu.classList.add("context-menu-portal");
+    }
+  } else if (menu.parentElement !== openDialog) openDialog.append(menu);
   menu.style.width = "";
   const menuActions = actions.some((action) => /^cancel\b/i.test(action.label || ""))
     ? actions
@@ -4058,6 +4068,16 @@ function showContextMenu(x, y, actions) {
     : `<button type="button" data-index="${i}" class="${escapeAttr(a.className || "")}" ${a.disabled ? "disabled" : ""}>${escapeHtml(a.label)}</button>`).join("");
   menu.onclick = (event) => event.stopPropagation();
   menu.hidden = false;
+  if (useTopLayer) {
+    try {
+      menu.showPopover();
+      menu._contextMenuTopLayer = true;
+    } catch {
+      menu.removeAttribute("popover");
+      menu.classList.remove("context-menu-portal");
+      if (menu.parentElement !== openDialog) openDialog?.append(menu);
+    }
+  }
   const width = Math.ceil(Math.min(menu.scrollWidth, Math.min(380, window.innerWidth - 16)));
   menu.style.width = `${width}px`;
   menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8))}px`;
@@ -4071,8 +4091,9 @@ function showContextMenu(x, y, actions) {
 }
 function hideContextMenu() {
   const menu = $("contextMenu");
+  closeContextMenuTopLayer(menu);
   menu.hidden = true;
-  document.querySelectorAll(".chat-actions-menu").forEach((item) => { item.hidden = true; });
+  closeChatActionsMenus();
   if (menu.parentElement !== document.body) document.body.append(menu);
   hideSortMenu();
   hideSortMenu("databaseSortMenu", "databaseSortMenuBtn");
@@ -4091,6 +4112,50 @@ function hideContextMenu() {
   hideSortMenu("saveAvatarGroupMenu", "saveAvatarGroupMenuBtn");
   hideSortMenu("databaseAvatarGroupMenu", "databaseAvatarGroupMenuBtn");
   hideDatabaseFieldMenu();
+}
+function canUsePopover(element) {
+  return Boolean(element && typeof element.showPopover === "function" && typeof element.hidePopover === "function");
+}
+function closeContextMenuTopLayer(menu) {
+  if (!menu) return;
+  if (menu._contextMenuTopLayer && canUsePopover(menu)) {
+    try { menu.hidePopover(); } catch {}
+  }
+  menu._contextMenuTopLayer = false;
+  menu.removeAttribute("popover");
+  menu.classList.remove("context-menu-portal");
+}
+function restoreChatActionsMenu(menu) {
+  if (!menu) return;
+  menu.hidden = true;
+  const owner = menu._chatActionsOwner;
+  if (owner?.isConnected && menu.parentElement === document.body) owner.append(menu);
+  menu.classList.remove("chat-actions-menu-portal");
+  menu.style.left = "";
+  menu.style.top = "";
+  menu.style.visibility = "";
+  menu._chatActionsOwner = null;
+  menu._chatActionsAnchor = null;
+}
+function closeChatActionsMenus() {
+  document.querySelectorAll(".chat-actions-menu").forEach(restoreChatActionsMenu);
+}
+function positionChatActionsMenu(menu, anchor) {
+  if (!menu || !anchor) return;
+  menu.style.visibility = "hidden";
+  const anchorRect = anchor.getBoundingClientRect();
+  const menuWidth = menu.offsetWidth;
+  const menuHeight = menu.offsetHeight;
+  const edge = 8;
+  const gap = 6;
+  const left = Math.max(edge, Math.min(anchorRect.right - menuWidth, window.innerWidth - menuWidth - edge));
+  let top = anchorRect.bottom + gap;
+  if (top + menuHeight > window.innerHeight - edge && anchorRect.top - menuHeight - gap >= edge) {
+    top = anchorRect.top - menuHeight - gap;
+  }
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+  menu.style.visibility = "";
 }
 function hideDatabaseFieldMenu() {
   const menu = $("databaseFieldMenu");
@@ -4231,6 +4296,42 @@ function positionSortMenu(menu, button) {
   if (!menu || !button) return;
   const openDialog = button.closest("dialog[open]");
   if (openDialog) {
+    // The background-effect picker is part of the preview dialog itself. Keep
+    // it in that dialog instead of moving it into the popover top layer: the
+    // preview intentionally makes the rest of the page transparent, and the
+    // native dialog then provides the reliable hit-test surface for its menu.
+    if (menu.id !== "backgroundEffectMenu" && canUsePopover(menu)) {
+      if (menu.parentElement !== document.body) document.body.append(menu);
+      menu.setAttribute("popover", "manual");
+      menu.classList.add("sort-menu-portal");
+      try {
+        menu.showPopover();
+        menu._sortMenuTopLayer = true;
+      } catch {
+        closeSortMenuTopLayer(menu);
+        openDialog.append(menu);
+      }
+      if (menu._sortMenuTopLayer) {
+        const rect = button.getBoundingClientRect();
+        const gap = 6;
+        const viewportPadding = 12;
+        const availableBelow = window.innerHeight - rect.bottom - viewportPadding - gap;
+        const availableAbove = rect.top - viewportPadding - gap;
+        const openAbove = availableBelow < 160 && availableAbove > availableBelow;
+        const maxHeight = Math.max(120, Math.min(320, openAbove ? availableAbove : availableBelow));
+        menu.style.position = "fixed";
+        menu.style.left = `${Math.max(viewportPadding, Math.min(rect.left, window.innerWidth - rect.width - viewportPadding))}px`;
+        menu.style.top = openAbove ? `${Math.max(viewportPadding, rect.top - gap - maxHeight)}px` : `${rect.bottom + gap}px`;
+        menu.style.right = "auto";
+        menu.style.bottom = "auto";
+        menu.style.width = `${rect.width}px`;
+        menu.style.maxHeight = `${maxHeight}px`;
+        menu.style.pointerEvents = "auto";
+        menu.scrollTop = 0;
+        containSortMenuWheel(menu);
+        return;
+      }
+    }
     if (menu.parentElement !== openDialog) openDialog.append(menu);
     const rect = button.getBoundingClientRect();
     const dialogRect = openDialog.getBoundingClientRect();
@@ -4304,6 +4405,7 @@ function hideSortMenu(menuId = "sortMenu", buttonId = "sortMenuBtn") {
   const button = $(buttonId);
   if (!menu || !button) return;
   const wasOpen = !menu.hidden;
+  closeSortMenuTopLayer(menu);
   menu.hidden = true;
   menu.style.position = "";
   menu.style.left = "";
@@ -4311,17 +4413,26 @@ function hideSortMenu(menuId = "sortMenu", buttonId = "sortMenuBtn") {
   menu.style.bottom = "";
   menu.style.width = "";
   menu.style.maxHeight = "";
+  menu.style.pointerEvents = "";
   menu.scrollTop = 0;
   restoreSortMenu(menu, button);
   button.setAttribute("aria-expanded", "false");
   button.closest(".sort-control")?.classList.remove("open");
   if (menuId === "backgroundEffectMenu") {
     document.body.classList.remove("background-effect-preview");
-    if (wasOpen) pulseSettingsLivePreview();
     if (wasOpen && menu.dataset.committed !== "true") applyActiveBackgroundEffect();
     delete menu.dataset.committed;
   }
   renderSyncQueueStatus();
+}
+function closeSortMenuTopLayer(menu) {
+  if (!menu) return;
+  if (menu._sortMenuTopLayer && canUsePopover(menu)) {
+    try { menu.hidePopover(); } catch {}
+  }
+  menu._sortMenuTopLayer = false;
+  menu.removeAttribute("popover");
+  menu.classList.remove("sort-menu-portal");
 }
 function syncActionDisplayLabel(item) {
   const kind = String(item?.kind || "").toLowerCase();
@@ -4510,13 +4621,21 @@ function toggleSortMenu(event, selectId = "sortSelect", menuId = "sortMenu", but
 }
 
 function clearDropIndicators({ clearPlaceholder = false } = {}) {
-  document.querySelectorAll(".drop-before, .drop-after, .drop-target").forEach((x) => x.classList.remove("drop-before", "drop-after", "drop-target"));
-  if (state.dragSort) state.dragSort.dropIndicatorKey = null;
+  const drag = state.dragSort;
+  const tracked = drag?.dropIndicatorElements;
+  if (tracked?.length) {
+    tracked.forEach((element) => element.classList.remove("drop-before", "drop-after", "drop-target"));
+    drag.dropIndicatorElements = [];
+  } else {
+    document.querySelectorAll(".drop-before, .drop-after, .drop-target").forEach((x) => x.classList.remove("drop-before", "drop-after", "drop-target"));
+  }
+  if (drag) drag.dropIndicatorKey = null;
   if (clearPlaceholder) clearDropPlaceholder();
 }
 function clearDragSortIndicators({ preserveDragging = false } = {}) {
   const selector = preserveDragging ? ".drop-before, .drop-after, .drop-target" : ".dragging, .drop-before, .drop-after, .drop-target";
   document.querySelectorAll(selector).forEach((x) => x.classList.remove("dragging", "drop-before", "drop-after", "drop-target"));
+  if (state.dragSort?.dropIndicatorElements) state.dragSort.dropIndicatorElements = [];
   clearDropPlaceholder();
   clearFloatingDragPreview();
   cancelScheduledDragHitTest();
@@ -4575,39 +4694,41 @@ function updateRawPointerDragPreview(event) {
   const point = latestPointerSample(event);
   if (!point) return;
   startDragAutoScroll(point);
+  scheduleDragHitTest();
 }
 function scheduleDragHitTest() {
-  if (dragHitTestTimer !== null) return;
-  dragHitTestTimer = window.setTimeout(() => {
-    dragHitTestTimer = null;
+  if (dragHitTestFrame !== null) return;
+  dragHitTestFrame = window.requestAnimationFrame(() => {
+    dragHitTestFrame = null;
     updateDragDropTargetFromLatestPoint();
-  }, 0);
+  });
 }
 function cancelScheduledDragHitTest() {
-  if (dragHitTestTimer === null) return;
-  window.clearTimeout(dragHitTestTimer);
-  dragHitTestTimer = null;
+  if (dragHitTestFrame === null) return;
+  window.cancelAnimationFrame(dragHitTestFrame);
+  dragHitTestFrame = null;
 }
 function updateDragDropTargetFromLatestPoint() {
   const session = pointerSortSession;
   const point = state.dragPoint;
   if (!session?.started || !state.dragSort || !point) return;
+  const rects = state.dragSort.hitTestCache?.rects;
   if (session.type === "avatar") {
-    if (pointInside($("avatarGrid"), point)) updateAvatarDropTarget(point);
-    else if (pointInside($("groupList"), point)) updateAvatarGroupDropTarget(point);
+    if (pointInsideRect(rects?.avatarGrid, point)) updateAvatarDropTarget(point);
+    else if (pointInsideRect(rects?.groupList, point)) updateAvatarGroupDropTarget(point);
     else {
       clearDropIndicators({ clearPlaceholder: true });
       state.dragSort.dropGroupId = "";
     }
   }
   if (session.type === "database-avatar") {
-    if (pointInside($("groupList"), point)) updateAvatarGroupDropTarget(point);
+    if (pointInsideRect(rects?.groupList, point)) updateAvatarGroupDropTarget(point);
     else {
       clearDropIndicators({ clearPlaceholder: true });
       state.dragSort.dropGroupId = "";
     }
   }
-  if (session.type === "group" && pointInside($("groupList"), point)) updateGroupDropTarget(point);
+  if (session.type === "group" && pointInsideRect(rects?.groupList, point)) updateGroupDropTarget(point);
 }
 function restoreActivePointerDragVisuals() {
   const drag = state.dragSort;
@@ -4617,6 +4738,9 @@ function restoreActivePointerDragVisuals() {
   }
 }
 function pointerTarget(selector, point) {
+  const top = document.elementFromPoint(point.clientX, point.clientY);
+  const direct = top?.closest?.(selector);
+  if (direct && !direct.classList.contains("dragging")) return direct;
   for (const element of document.elementsFromPoint(point.clientX, point.clientY)) {
     const target = element.closest?.(selector);
     if (target && !target.classList.contains("dragging")) return target;
@@ -4635,9 +4759,9 @@ function avatarDropSlot(point, cards) {
 function forceMeaningfulDropSide(type, targetId, after) {
   const drag = state.dragSort;
   if (!drag || (drag.ids?.length || 1) > 1 || !targetId) return after;
-  const values = type === "group" ? reorderableGroups() : orderedGroupAvatars(drag.groupId);
-  const from = values.findIndex((item) => item.id === drag.id);
-  const to = values.findIndex((item) => item.id === targetId);
+  const values = drag.hitTestCache?.orderIds || (type === "group" ? reorderableGroups() : orderedGroupAvatars(drag.groupId)).map((item) => item.id);
+  const from = values.indexOf(drag.id);
+  const to = values.indexOf(targetId);
   if (from < 0 || to < 0 || Math.abs(from - to) !== 1) return after;
   return from < to;
 }
@@ -4651,12 +4775,56 @@ function groupDropSlot(point, items) {
   const rect = target.getBoundingClientRect();
   return { target, after: point.clientY > rect.top + rect.height / 2 };
 }
+function pointInsideRect(rect, point) {
+  return Boolean(rect && point && point.clientX >= rect.left && point.clientX <= rect.right && point.clientY >= rect.top && point.clientY <= rect.bottom);
+}
+function captureDragContainerLayout(container) {
+  if (!container) return null;
+  const rect = container.getBoundingClientRect();
+  const style = getComputedStyle(container);
+  return {
+    rect,
+    columnGap: parseFloat(style.columnGap || style.gap) || 0,
+    rowGap: parseFloat(style.rowGap || style.gap) || 0,
+    paddingLeft: parseFloat(style.paddingLeft) || 0,
+    paddingTop: parseFloat(style.paddingTop) || 0
+  };
+}
+function preparePointerDragHitTestCache(type) {
+  const drag = state.dragSort;
+  if (!drag) return;
+  const grid = $("avatarGrid");
+  const list = $("groupList");
+  const cache = {
+    rects: {
+      avatarGrid: grid?.getBoundingClientRect(),
+      groupList: list?.getBoundingClientRect()
+    },
+    layouts: new Map(),
+    avatarCards: [],
+    groupItems: [],
+    orderIds: []
+  };
+  if (grid) cache.layouts.set(grid, captureDragContainerLayout(grid));
+  if (list) {
+    cache.layouts.set(list, captureDragContainerLayout(list));
+    cache.groupItems = [...list.querySelectorAll('.group-item[data-can-reorder="true"]:not(.dragging)')];
+  }
+  if (type === "avatar") {
+    cache.avatarCards = [...(grid?.querySelectorAll(".avatar-card:not(.dragging)") || [])];
+    cache.orderIds = orderedGroupAvatars(drag.groupId).map((item) => item.id);
+  } else if (type === "group") {
+    cache.orderIds = reorderableGroups().map((item) => item.id);
+  }
+  drag.hitTestCache = cache;
+}
 function trailingSlotRect(container, previous, type) {
   const rect = previous.getBoundingClientRect();
-  const style = getComputedStyle(container);
-  const columnGap = parseFloat(style.columnGap || style.gap) || 0;
-  const rowGap = parseFloat(style.rowGap || style.gap) || 0;
-  const containerRect = container.getBoundingClientRect();
+  const layout = state.dragSort?.hitTestCache?.layouts?.get(container);
+  const style = layout ? null : getComputedStyle(container);
+  const columnGap = layout?.columnGap ?? (parseFloat(style.columnGap || style.gap) || 0);
+  const rowGap = layout?.rowGap ?? (parseFloat(style.rowGap || style.gap) || 0);
+  const containerRect = layout?.rect || container.getBoundingClientRect();
   if (type === "group") return { left: rect.left, top: rect.bottom + rowGap, width: rect.width, height: rect.height };
   const nextLeft = rect.right + columnGap;
   if (nextLeft + rect.width <= containerRect.right) return { left: nextLeft, top: rect.top, width: rect.width, height: rect.height };
@@ -4664,11 +4832,12 @@ function trailingSlotRect(container, previous, type) {
 }
 function dropSlotRect(container, items, target, after, type) {
   if (!target) {
-    const rect = container.getBoundingClientRect();
-    const style = getComputedStyle(container);
+    const layout = state.dragSort?.hitTestCache?.layouts?.get(container);
+    const rect = layout?.rect || container.getBoundingClientRect();
+    const style = layout ? null : getComputedStyle(container);
     return {
-      left: rect.left + (parseFloat(style.paddingLeft) || 0),
-      top: rect.top + (parseFloat(style.paddingTop) || 0),
+      left: rect.left + (layout?.paddingLeft ?? (parseFloat(style.paddingLeft) || 0)),
+      top: rect.top + (layout?.paddingTop ?? (parseFloat(style.paddingTop) || 0)),
       width: state.dragSort?.dragWidth || rect.width,
       height: state.dragSort?.dragHeight || (type === "group" ? 42 : 120)
     };
@@ -4682,7 +4851,10 @@ function applyDropIndicator(type, target, after, rect) {
   const key = `${type}:${id}:${after ? "after" : "before"}`;
   if (state.dragSort?.dropIndicatorKey !== key) {
     clearDropIndicators();
-    if (target) target.classList.add(after ? "drop-after" : "drop-before");
+    if (target) {
+      target.classList.add(after ? "drop-after" : "drop-before");
+      if (state.dragSort) state.dragSort.dropIndicatorElements = [target];
+    }
     if (state.dragSort) state.dragSort.dropIndicatorKey = key;
   }
 }
@@ -4702,7 +4874,7 @@ function updateAvatarDropTarget(event) {
     return null;
   }
   const grid = $("avatarGrid");
-  const cards = [...grid.querySelectorAll(".avatar-card:not(.dragging)")];
+  const cards = state.dragSort.hitTestCache?.avatarCards || [...grid.querySelectorAll(".avatar-card:not(.dragging)")];
   if (!cards.length) {
     const rect = dropSlotRect(grid, cards, null, true, "avatar");
     applyDropIndicator("avatar", null, true, rect);
@@ -4714,12 +4886,11 @@ function updateAvatarDropTarget(event) {
   const slot = avatarDropSlot(event, cards);
   const best = slot.target;
   if (!best) {
-    const last = cards[cards.length - 1];
-    if (last) applyDropIndicator("avatar", last, true, dropSlotRect(grid, cards, last, true, "avatar"));
+    clearDropIndicators({ clearPlaceholder: true });
     state.dragSort.dropTargetId = "";
     state.dragSort.dropAfter = true;
     state.dragSort.dropPosition = orderedGroupAvatars(state.dragSort.groupId).length;
-    return last || null;
+    return null;
   }
   const after = forceMeaningfulDropSide("avatar", best.dataset.avatarId, slot.after);
   const rect = dropSlotRect(grid, cards, best, after, "avatar");
@@ -4739,8 +4910,10 @@ function updateAvatarGroupDropTarget(event) {
     drag.dropGroupId = "";
     return null;
   }
+  if (drag.dropGroupId === group.id && item.classList.contains("drop-target")) return group;
   clearDropIndicators({ clearPlaceholder: true });
   item.classList.add("drop-target");
+  drag.dropIndicatorElements = [item];
   drag.dropGroupId = group.id;
   return group;
 }
@@ -4754,7 +4927,7 @@ function updateGroupDropTarget(event) {
     return null;
   }
   const list = $("groupList");
-  const items = [...list.querySelectorAll('.group-item[data-can-reorder="true"]:not(.dragging)')];
+  const items = state.dragSort.hitTestCache?.groupItems || [...list.querySelectorAll('.group-item[data-can-reorder="true"]:not(.dragging)')];
   if (!items.length) return null;
   const slot = groupDropSlot(event, items);
   const best = slot.target;
@@ -4796,6 +4969,7 @@ function startPointerSort(session, point) {
   for (const selectedId of session.drag.ids || []) {
     if (selectedId !== session.drag.id) $("avatarGrid").querySelector(`[data-avatar-id="${CSS.escape(selectedId)}"]`)?.classList.add("dragging");
   }
+  preparePointerDragHitTestCache(type);
   createFloatingAvatarDragPreview(element, point);
   startDragAutoScroll(point);
 }
@@ -6221,6 +6395,10 @@ function stepBackgroundOpacity(delta) {
   state.settings.backgroundOpacity = Math.min(100, Math.max(0, Number(state.settings.backgroundOpacity) + delta));
   applyBackgroundOpacity();
 }
+function resetBackgroundOpacity() {
+  state.settings.backgroundOpacity = DEFAULT_SETTINGS.backgroundOpacity;
+  applyBackgroundOpacity();
+}
 async function checkDeletedFavoritesManual() {
   if (!state.vrchat?.isLoggedIn) { toast("Log in to VRChat first."); return; }
   if (state.syncQueueRunning || state.syncQueue.length || state.pendingSyncedFavoriteActions.size) { toast("Wait for favorite sync to finish first."); return; }
@@ -6407,6 +6585,10 @@ function stepPanelOpacity(delta) {
   state.settings.panelOpacity = Math.min(100, Math.max(0, Number(state.settings.panelOpacity) + delta));
   applyPanelOpacity();
 }
+function resetPanelOpacity() {
+  state.settings.panelOpacity = DEFAULT_SETTINGS.panelOpacity;
+  applyPanelOpacity();
+}
 function syncPanelOpacityFromNumber() {
   state.settings.panelOpacity = Number($("panelOpacityNumber").value);
   applyPanelOpacity();
@@ -6418,7 +6600,6 @@ function applyOverlaySettingsControls() {
   $("databaseRandomHotkeyInput").value = state.settings.databaseRandomHotkey || DEFAULT_SETTINGS.databaseRandomHotkey;
   $("favoriteRandomHotkeyInput").value = state.settings.favoriteRandomHotkey || DEFAULT_SETTINGS.favoriteRandomHotkey;
   applyOverlayOpacityControls();
-  applyOverlayScaleControls();
 }
 function applyOverlayOpacityControls() {
   const value = Math.min(100, Math.max(45, Number(state.settings.overlayOpacity) || DEFAULT_SETTINGS.overlayOpacity));
@@ -6426,27 +6607,20 @@ function applyOverlayOpacityControls() {
   $("overlayOpacityInput").value = String(value);
   $("overlayOpacityNumber").value = String(value);
 }
-function applyOverlayScaleControls() {
-  const value = Math.min(135, Math.max(80, Number(state.settings.overlayScale) || DEFAULT_SETTINGS.overlayScale));
-  state.settings.overlayScale = value;
-  $("overlayScaleInput").value = String(value);
-  $("overlayScaleNumber").value = String(value);
-}
 function stepOverlayOpacity(delta) {
   state.settings.overlayOpacity = Math.min(100, Math.max(45, Number(state.settings.overlayOpacity) + delta));
   applyOverlayOpacityControls();
+  scheduleOverlaySettingsPreview();
+}
+function resetOverlayOpacity() {
+  state.settings.overlayOpacity = DEFAULT_SETTINGS.overlayOpacity;
+  applyOverlayOpacityControls();
+  scheduleOverlaySettingsPreview();
 }
 function syncOverlayOpacityFromNumber() {
   state.settings.overlayOpacity = Number($("overlayOpacityNumber").value);
   applyOverlayOpacityControls();
-}
-function stepOverlayScale(delta) {
-  state.settings.overlayScale = Math.min(135, Math.max(80, Number(state.settings.overlayScale) + delta));
-  applyOverlayScaleControls();
-}
-function syncOverlayScaleFromNumber() {
-  state.settings.overlayScale = Number($("overlayScaleNumber").value);
-  applyOverlayScaleControls();
+  scheduleOverlaySettingsPreview();
 }
 function resetOverlayLayoutSettings() {
   state.settings.overlayX = DEFAULT_SETTINGS.overlayX;
@@ -6501,31 +6675,43 @@ function openSettingsDialog() {
 }
 const SETTINGS_LIVE_PREVIEW_RESTORE_MS = 3000;
 let settingsLivePreviewTimer = null;
-function beginSettingsLivePreview() {
+let overlaySettingsPreviewFrame = null;
+function beginSettingsLivePreview(preserveBackgroundDim = false) {
   clearTimeout(settingsLivePreviewTimer);
   document.body.classList.add("settings-live-preview");
+  document.body.classList.toggle("settings-preview-background-opacity", preserveBackgroundDim);
 }
 function endSettingsLivePreview(delay = SETTINGS_LIVE_PREVIEW_RESTORE_MS) {
   clearTimeout(settingsLivePreviewTimer);
-  settingsLivePreviewTimer = setTimeout(() => document.body.classList.remove("settings-live-preview"), delay);
+  settingsLivePreviewTimer = setTimeout(() => {
+    document.body.classList.remove("settings-live-preview", "settings-preview-background-opacity");
+  }, delay);
 }
-function pulseSettingsLivePreview(delay = SETTINGS_LIVE_PREVIEW_RESTORE_MS) {
-  beginSettingsLivePreview();
+function pulseSettingsLivePreview(delay = SETTINGS_LIVE_PREVIEW_RESTORE_MS, preserveBackgroundDim = false) {
+  beginSettingsLivePreview(preserveBackgroundDim);
   endSettingsLivePreview(delay);
 }
 function bindSettingsLivePreviewControl(id) {
   const control = $(id);
   if (!control) return;
-  control.addEventListener("focus", beginSettingsLivePreview);
+  const preserveBackgroundDim = id === "backgroundOpacityInput" || id === "backgroundOpacityNumber" || id === "backgroundOpacityPrevBtn" || id === "backgroundOpacityNextBtn";
+  control.addEventListener("focus", () => beginSettingsLivePreview(preserveBackgroundDim));
   control.addEventListener("blur", () => endSettingsLivePreview());
-  control.addEventListener("pointerdown", beginSettingsLivePreview);
+  control.addEventListener("pointerdown", () => beginSettingsLivePreview(preserveBackgroundDim));
   control.addEventListener("pointerup", () => endSettingsLivePreview());
   control.addEventListener("pointercancel", () => endSettingsLivePreview());
-  control.addEventListener("input", () => pulseSettingsLivePreview());
+  control.addEventListener("input", () => pulseSettingsLivePreview(SETTINGS_LIVE_PREVIEW_RESTORE_MS, preserveBackgroundDim));
   control.addEventListener("change", () => endSettingsLivePreview());
 }
+function scheduleOverlaySettingsPreview() {
+  if (overlaySettingsPreviewFrame !== null) return;
+  overlaySettingsPreviewFrame = requestAnimationFrame(() => {
+    overlaySettingsPreviewFrame = null;
+    void api("overlaySettingsPreview", state.settings, 5000).catch(() => {});
+  });
+}
 function setSettingsTab(tab) {
-  const tabs = ["customization", "overlay", "sync", "diagnostics", "history", "logs", "backups"];
+  const tabs = ["customization", "keybinds", "overlay", "sync", "diagnostics", "history", "logs", "backups"];
   for (const name of tabs) {
     $(`settings${name[0].toUpperCase()}${name.slice(1)}Tab`).classList.toggle("active", name === tab);
     $(`settings${name[0].toUpperCase()}${name.slice(1)}Panel`).hidden = name !== tab;
@@ -9052,17 +9238,24 @@ function renderPopupMessageConversationInto(selected, header, thread) {
   if (!selected || !header || !thread) return;
   if (!selected.imageUrl) void hydrateMessageConversationUser(selected.userId, selected.name);
   header.innerHTML = messageThreadHeaderHtml(selected);
-  header.insertAdjacentHTML("beforeend", `<div class="chat-actions-wrap"><button type="button" class="icon-button chat-actions-btn" data-chat-actions="${escapeAttr(selected.userId)}" title="More chat actions" aria-label="More chat actions">⋯</button><div class="chat-actions-menu" hidden><button type="button" data-social-action="invite" data-user-id="${escapeAttr(selected.userId)}">Invite</button><button type="button" data-social-action="requestInvite" data-user-id="${escapeAttr(selected.userId)}">Request Invite</button></div></div><button type="button" class="icon-button chat-collapse-btn" data-chat-collapse="${escapeAttr(selected.userId)}" title="Minimize chat" aria-label="Minimize chat">−</button><button type="button" class="icon-button chat-close-btn" data-chat-close="${escapeAttr(selected.userId)}" title="Close chat" aria-label="Close chat">×</button>`);
+  header.insertAdjacentHTML("beforeend", `<div class="chat-actions-wrap"><button type="button" class="icon-button chat-actions-btn" data-chat-actions="${escapeAttr(selected.userId)}" title="More chat actions" aria-label="More chat actions">⋯</button><div class="chat-actions-menu sort-menu" hidden><button type="button" data-social-action="invite" data-user-id="${escapeAttr(selected.userId)}">Invite</button><button type="button" data-social-action="requestInvite" data-user-id="${escapeAttr(selected.userId)}">Request Invite</button></div></div><button type="button" class="icon-button chat-collapse-btn" data-chat-collapse="${escapeAttr(selected.userId)}" title="Minimize chat" aria-label="Minimize chat">−</button><button type="button" class="icon-button chat-close-btn" data-chat-close="${escapeAttr(selected.userId)}" title="Close chat" aria-label="Close chat">×</button>`);
   thread.innerHTML = `<div class="message-bubbles">${selected.items.map((item) => messageBubbleHtml(item, selected)).join("")}</div>${messageComposerHtml(selected)}`;
   bindMessageHeaderUserDetails(header);
   header.querySelectorAll("[data-social-action]").forEach((button) => button.addEventListener("click", handleSocialAction));
   header.querySelectorAll("[data-chat-actions]").forEach((button) => button.addEventListener("click", (event) => {
     event.stopPropagation();
-    const menu = button.nextElementSibling;
+    const menu = button._chatActionsMenu || button.nextElementSibling;
     if (!menu) return;
+    button._chatActionsMenu = menu;
     const opening = menu.hidden;
-    document.querySelectorAll(".chat-actions-menu").forEach((item) => { item.hidden = true; });
-    menu.hidden = !opening;
+    closeChatActionsMenus();
+    if (!opening) return;
+    menu._chatActionsOwner = button.parentElement;
+    menu._chatActionsAnchor = button;
+    document.body.append(menu);
+    menu.classList.add("chat-actions-menu-portal");
+    menu.hidden = false;
+    positionChatActionsMenu(menu, button);
   }));
   thread.querySelectorAll("[data-social-action]").forEach((button) => button.addEventListener("click", handleSocialAction));
   const composer = thread.querySelector("#messageComposerForm");
@@ -9116,6 +9309,7 @@ async function openMessageFriendDetails(userId, displayName = "") {
 function renderMessagePopupDock() {
   const dock = $("messagePopupDock");
   if (!dock) return;
+  closeChatActionsMenus();
   const ids = state.inlineMessageUserIds || [];
   const conversations = messageConversations();
   const panels = ids.map((id) => conversations.find((item) => item.userId === id)).filter(Boolean);
@@ -12816,6 +13010,11 @@ async function loadBackgroundDialogInfo(groupId, requestId) {
 function openBackgroundDialog(groupId = "") {
   const requestId = ++backgroundDialogRequestId;
   state.pendingBackgroundGroupId = groupId || "";
+  const parentDialog = groupId ? $("groupDialog") : $("customizationDialog");
+  const returnDialog = parentDialog?.open ? parentDialog : null;
+  state.backgroundDialogReturnDialogId = returnDialog?.id || "";
+  state.backgroundDialogHandoffClosing = Boolean(returnDialog);
+  if (returnDialog) returnDialog.close();
   const group = groupId ? state.library.groups.find((item) => item.id === groupId) : null;
   $("backgroundActionTitle").textContent = group ? `Edit ${group.name} Backgrounds` : "Edit Global Backgrounds";
   $("importBackgroundsBtn").textContent = "Add Backgrounds";
@@ -12892,6 +13091,7 @@ function cancelSettingsDialog() {
     state.settings = cloneSettings(state.settingsDraft.original);
     state.settings.backgroundEffect = backgroundEffect;
     applySettings();
+    scheduleOverlaySettingsPreview(0);
     updateVrChatBackgroundSyncTimer();
   }
   state.settingsDraft = null;
@@ -13166,7 +13366,7 @@ async function handleAppCloseRequested(data = {}) {
   }
 }
 
-function applySettings() { applyGridSize(); applyColors(); applyBackgroundOpacity(); applyPanelOpacity(); applyOverlaySettingsControls(); applyActiveBackgroundEffect(); }
+function applySettings() { applyGridSize(); applyColors(); applyBackgroundOpacity(); applyPanelOpacity(); applyBlur(); applyOverlaySettingsControls(); applyActiveBackgroundEffect(); }
 function applyGridSize() {
   const columns = Math.min(10, Math.max(3, Number(state.activePage === "database" ? state.settings.databaseGridSize : state.settings.gridSize) || DEFAULT_SETTINGS.gridSize));
   const activeGrid = state.activePage === "database" ? $("avatarDatabaseResults") : $("avatarGrid");
@@ -13205,7 +13405,27 @@ function applyPanelOpacity() {
   $("panelOpacityPrevBtn").disabled = value <= 0;
   $("panelOpacityNextBtn").disabled = value >= 100;
 }
+function applyBlur() {
+  const enabled = state.settings.blurEnabled !== false;
+  document.documentElement.classList.toggle("blur-disabled", !enabled);
+  const toggle = $("blurEnabledToggle");
+  if (toggle) toggle.checked = enabled;
+}
 let _bgCanvas = null, _bgFrame = null, _bgActive = "", _bgMediaActive = false;
+const BG_EFFECT_FRAME_INTERVAL = 33;
+function backgroundEffectRenderScale(effect = _bgActive) {
+  return 1;
+}
+function backgroundEffectFrameInterval(effect = _bgActive) {
+  return effect === "aurora" || effect === "aurorasnow" ? BG_EFFECT_FRAME_INTERVAL : 16;
+}
+function resizeBackgroundCanvas(effect = _bgActive) {
+  if (!_bgCanvas) return;
+  const scale = backgroundEffectRenderScale(effect);
+  _bgCanvas.width = Math.max(1, Math.round(window.innerWidth * scale));
+  _bgCanvas.height = Math.max(1, Math.round(window.innerHeight * scale));
+  _bgState = {};
+}
 function renderBackground(bg) {
   const layer = $("backgroundLayer");
   if (!layer) return;
@@ -13243,19 +13463,23 @@ function startBgEffect(effect) {
   if (layer && _bgCanvas.parentElement !== layer) {
     layer.append(_bgCanvas);
   }
-  _bgCanvas.width = window.innerWidth;
-  _bgCanvas.height = window.innerHeight;
+  resizeBackgroundCanvas(effect);
   _bgCanvas.hidden = false;
   _bgActive = effect;
   const ctx = _bgCanvas.getContext("2d");
   let frame = 0;
-  function draw() {
+  let lastDrawAt = -Infinity;
+  const frameInterval = backgroundEffectFrameInterval(effect);
+  function draw(timestamp) {
     if (_bgActive !== effect) return;
-    frame++;
-    _bgDraw(ctx, effect, frame, _bgCanvas.width, _bgCanvas.height);
+    if (timestamp - lastDrawAt >= frameInterval) {
+      frame++;
+      _bgDraw(ctx, effect, frame, _bgCanvas.width, _bgCanvas.height);
+      lastDrawAt = timestamp;
+    }
     _bgFrame = requestAnimationFrame(draw);
   }
-  draw();
+  draw(performance.now());
 }
 function stopBgEffect() {
   if (_bgFrame) cancelAnimationFrame(_bgFrame);
@@ -13309,20 +13533,31 @@ function _bgParticles(ctx, w, h) {
 function _bgAurora(ctx, frame, w, h) {
   ctx.clearRect(0, 0, w, h);
   const t = frame * 0.01;
+  const step = 4;
+  if (!_bgState.auroraSamples || _bgState.auroraWidth !== w) {
+    const samples = [];
+    for (let x = 0; x < w; x += step) {
+      samples.push({ x, x005: x * 0.005, x012: x * 0.012, x003: x * 0.003, x007: x * 0.007 });
+    }
+    _bgState.auroraSamples = samples;
+    _bgState.auroraWidth = w;
+  }
+  const samples = _bgState.auroraSamples;
   for (let band = 0; band < 4; band++) {
     const baseY = h * (0.2 + band * 0.12);
     const hue = 155 + band * 50;
-    for (let x = 0; x < w; x += 4) {
-      const y = baseY + Math.sin(x * 0.005 + t * 0.8 + band) * 45 + Math.sin(x * 0.012 + t * 0.5 + band * 2) * 30;
-      const thickness = 80 + Math.sin(x * 0.003 + t + band) * 24;
-      const alpha = 0.16 + Math.sin(x * 0.007 + t * 0.6) * 0.06;
+    for (const sample of samples) {
+      const x = sample.x;
+      const y = baseY + Math.sin(sample.x005 + t * 0.8 + band) * 45 + Math.sin(sample.x012 + t * 0.5 + band * 2) * 30;
+      const thickness = 80 + Math.sin(sample.x003 + t + band) * 24;
+      const alpha = 0.16 + Math.sin(sample.x007 + t * 0.6) * 0.06;
       const g = ctx.createLinearGradient(x, y - thickness, x, y + thickness);
       g.addColorStop(0, `hsla(${hue}, 70%, 35%, 0)`);
       g.addColorStop(0.2, `hsla(${hue+20}, 65%, 40%, ${alpha})`);
       g.addColorStop(0.5, `hsla(${hue}, 80%, 50%, ${alpha*1.3})`);
       g.addColorStop(0.8, `hsla(${hue-10}, 65%, 35%, ${alpha*0.6})`);
       g.addColorStop(1, `hsla(${hue-20}, 50%, 25%, 0)`);
-      ctx.fillStyle = g; ctx.fillRect(x, y - thickness, 4, thickness * 2);
+      ctx.fillStyle = g; ctx.fillRect(x, y - thickness, step, thickness * 2);
     }
   }
 }
@@ -13919,8 +14154,13 @@ document.querySelectorAll("dialog").forEach((dialog) => {
   });
   dialog.addEventListener("close", () => {
     if (dialog.id === "backgroundActionDialog") {
+      const returnDialogId = state.backgroundDialogReturnDialogId;
+      state.backgroundDialogReturnDialogId = "";
+      state.backgroundDialogHandoffClosing = false;
       hideSortMenu("backgroundEffectMenu", "backgroundEffectMenuBtn");
       document.body.classList.remove("background-effect-preview");
+      const returnDialog = returnDialogId ? $(returnDialogId) : null;
+      if (returnDialog && !returnDialog.open) returnDialog.showModal();
     }
   });
 });
@@ -14001,6 +14241,10 @@ $("notificationsList").addEventListener("keydown", (event) => {
 $("databaseFieldMenuBtn").addEventListener("click", toggleDatabaseFieldMenu);
 $("databaseFieldMenu").addEventListener("click", (event) => event.stopPropagation());
 window.addEventListener("resize", positionDatabaseFieldMenu);
+window.addEventListener("resize", () => {
+  const menu = document.querySelector(".chat-actions-menu-portal:not([hidden])");
+  if (menu?._chatActionsAnchor) positionChatActionsMenu(menu, menu._chatActionsAnchor);
+});
 $("settingsLogFilterMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "settingsLogFilterSelect", "settingsLogFilterMenu", "settingsLogFilterMenuBtn", () => { state.settingsLogFilter = $("settingsLogFilterSelect").value; loadSettingsLogs(); }));
 $("settingsLogFilterMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "settingsLogFilterSelect", "settingsLogFilterMenuBtn", () => { state.settingsLogFilter = $("settingsLogFilterSelect").value; loadSettingsLogs(); }), { passive: false });
 document.addEventListener("click", hideContextMenu);
@@ -14108,11 +14352,14 @@ $("groupList").addEventListener("dragover", handleGroupListDragOver);
 $("groupList").addEventListener("drop", handleGroupListDrop);
 $("gridSizeInput").addEventListener("input", () => { state.settings.gridSize = Number($("gridSizeInput").value); applyGridSize(); queueSaveSettings(); });
 $("databaseGridSizeInput").addEventListener("input", () => { state.settings.databaseGridSize = Number($("databaseGridSizeInput").value); applyGridSize(); queueSaveSettings(); });
+$("gridSizeResetBtn").addEventListener("click", () => { state.settings.gridSize = DEFAULT_SETTINGS.gridSize; applyGridSize(); queueSaveSettings(); });
+$("databaseGridSizeResetBtn").addEventListener("click", () => { state.settings.databaseGridSize = DEFAULT_SETTINGS.databaseGridSize; applyGridSize(); queueSaveSettings(); });
 window.addEventListener("resize", applyGridSize);
 window.addEventListener("resize", () => { if (isNotificationPopoverOpen()) positionNotificationPopover(); });
-window.addEventListener("resize", () => { if (_bgCanvas && _bgActive) { _bgCanvas.width = window.innerWidth; _bgCanvas.height = window.innerHeight; _bgState = {}; } });
+window.addEventListener("resize", () => { if (_bgCanvas && _bgActive) resizeBackgroundCanvas(); });
 $("customizationBtn").addEventListener("click", openSettingsDialog);
 $("settingsCustomizationTab").addEventListener("click", () => setSettingsTab("customization"));
+$("settingsKeybindsTab").addEventListener("click", () => setSettingsTab("keybinds"));
 $("settingsOverlayTab").addEventListener("click", () => setSettingsTab("overlay"));
 $("settingsSyncTab").addEventListener("click", () => setSettingsTab("sync"));
 $("settingsDiagnosticsTab").addEventListener("click", () => setSettingsTab("diagnostics"));
@@ -14120,16 +14367,18 @@ $("settingsHistoryTab").addEventListener("click", () => setSettingsTab("history"
 $("settingsLogsTab").addEventListener("click", () => setSettingsTab("logs"));
 $("settingsBackupsTab").addEventListener("click", () => setSettingsTab("backups"));
 $("customizationDialog").addEventListener("close", () => {
+  if (state.backgroundDialogHandoffClosing) return;
   if (state.settingsDraft && !state.settingsDraft.applied) {
     const backgroundEffect = state.settings.backgroundEffect;
     state.settings = cloneSettings(state.settingsDraft.original);
     state.settings.backgroundEffect = backgroundEffect;
     applySettings();
+    scheduleOverlaySettingsPreview(0);
 
     updateVrChatBackgroundSyncTimer();
   }
   clearTimeout(settingsLivePreviewTimer);
-  document.body.classList.remove("settings-live-preview");
+  document.body.classList.remove("settings-live-preview", "settings-preview-background-opacity");
   state.settingsDraft = null;
 });
 $("syncedAvatarEditToggle").addEventListener("change", async (event) => { await setSyncedAvatarEditMode(event.target.checked); });
@@ -14153,10 +14402,13 @@ $("backgroundOpacityInput").addEventListener("input", () => { state.settings.bac
 $("backgroundOpacityNumber").addEventListener("input", syncBackgroundOpacityFromNumber);
 $("backgroundOpacityPrevBtn").addEventListener("click", () => stepBackgroundOpacity(-1));
 $("backgroundOpacityNextBtn").addEventListener("click", () => stepBackgroundOpacity(1));
+$("backgroundOpacityResetBtn").addEventListener("click", resetBackgroundOpacity);
 $("panelOpacityInput").addEventListener("input", () => { state.settings.panelOpacity = Number($("panelOpacityInput").value); applyPanelOpacity(); });
 $("panelOpacityNumber").addEventListener("input", syncPanelOpacityFromNumber);
 $("panelOpacityPrevBtn").addEventListener("click", () => stepPanelOpacity(-1));
 $("panelOpacityNextBtn").addEventListener("click", () => stepPanelOpacity(1));
+$("panelOpacityResetBtn").addEventListener("click", resetPanelOpacity);
+$("blurEnabledToggle").addEventListener("change", (event) => { state.settings.blurEnabled = event.target.checked; applyBlur(); pulseSettingsLivePreview(); });
 $("openOverlayBtn").addEventListener("click", openOverlayFromSettings);
 $("closeOverlayBtn").addEventListener("click", closeOverlayFromSettings);
 $("overlayEnabledToggle").addEventListener("change", async () => {
@@ -14203,14 +14455,11 @@ $("resetFavoriteRandomHotkeyBtn").addEventListener("click", () => {
   state.settings.favoriteRandomHotkey = DEFAULT_SETTINGS.favoriteRandomHotkey;
   applyOverlaySettingsControls();
 });
-$("overlayOpacityInput").addEventListener("input", () => { state.settings.overlayOpacity = Number($("overlayOpacityInput").value); applyOverlayOpacityControls(); });
+$("overlayOpacityInput").addEventListener("input", () => { state.settings.overlayOpacity = Number($("overlayOpacityInput").value); applyOverlayOpacityControls(); scheduleOverlaySettingsPreview(); });
 $("overlayOpacityNumber").addEventListener("input", syncOverlayOpacityFromNumber);
 $("overlayOpacityPrevBtn").addEventListener("click", () => stepOverlayOpacity(-1));
 $("overlayOpacityNextBtn").addEventListener("click", () => stepOverlayOpacity(1));
-$("overlayScaleInput").addEventListener("input", () => { state.settings.overlayScale = Number($("overlayScaleInput").value); applyOverlayScaleControls(); });
-$("overlayScaleNumber").addEventListener("input", syncOverlayScaleFromNumber);
-$("overlayScalePrevBtn").addEventListener("click", () => stepOverlayScale(-1));
-$("overlayScaleNextBtn").addEventListener("click", () => stepOverlayScale(1));
+$("overlayOpacityResetBtn").addEventListener("click", resetOverlayOpacity);
 $("resetOverlayLayoutBtn").addEventListener("click", resetOverlayLayoutSettings);
 [
   "themeColorInput",
@@ -14226,11 +14475,7 @@ $("resetOverlayLayoutBtn").addEventListener("click", resetOverlayLayoutSettings)
   "overlayOpacityInput",
   "overlayOpacityNumber",
   "overlayOpacityPrevBtn",
-  "overlayOpacityNextBtn",
-  "overlayScaleInput",
-  "overlayScaleNumber",
-  "overlayScalePrevBtn",
-  "overlayScaleNextBtn"
+  "overlayOpacityNextBtn"
 ].forEach(bindSettingsLivePreviewControl);
 $("checkUpdateBtn").addEventListener("click", () => checkForUpdates());
 $("resetThemeBtn").addEventListener("click", () => { state.settings.themeColor = DEFAULT_SETTINGS.themeColor; state.settings.panelColor = DEFAULT_SETTINGS.panelColor; state.settings.panelColorSynced = DEFAULT_SETTINGS.panelColorSynced; state.settings.backgroundOpacity = DEFAULT_SETTINGS.backgroundOpacity; state.settings.panelOpacity = DEFAULT_SETTINGS.panelOpacity; applySettings(); });
@@ -14589,10 +14834,12 @@ $("databaseJumpPageInput").addEventListener("input", updateDatabaseJumpSlider);
 $("databaseJumpPageNumber").addEventListener("input", syncDatabaseJumpFromNumber);
 $("databaseJumpPrevBtn").addEventListener("click", () => stepDatabaseJump(-1));
 $("databaseJumpNextBtn").addEventListener("click", () => stepDatabaseJump(1));
+$("databaseJumpResetBtn").addEventListener("click", () => { $("databaseJumpPageInput").value = "1"; updateDatabaseJumpSlider(); });
 $("positionInput").addEventListener("input", updatePositionSlider);
 $("positionNumber").addEventListener("input", syncPositionFromNumber);
 $("positionPrevBtn").addEventListener("click", () => stepPosition(-1));
 $("positionNextBtn").addEventListener("click", () => stepPosition(1));
+$("positionResetBtn").addEventListener("click", () => { $("positionInput").value = "1"; updatePositionSlider(); });
 $("confirmDatabaseJumpBtn").addEventListener("click", async (event) => {
   event.preventDefault();
   const requested = Math.floor(Number($("databaseJumpPageInput").value));

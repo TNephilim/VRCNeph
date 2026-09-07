@@ -126,7 +126,7 @@
               <button id="equipRandomFavoriteBtn" type="button" class="primary" title="Equip a random favorite avatar">Equip Random</button>
               <button id="favRouletteBtn" type="button" title="Favorite avatar roulette">Fav Roulette</button>
             </span>
-            <label class="range-control">Columns<input id="gridSizeInput" type="range" min="3" max="10" value="10"><output id="gridSizeValue">10</output></label>
+            <label class="range-control">Columns<input id="gridSizeInput" type="range" min="3" max="10" value="10"><output id="gridSizeValue">10</output><button id="gridSizeResetBtn" type="button" class="icon-button slider-reset-button" title="Reset to default" aria-label="Reset columns to default">↻</button></label>
             </div>
           </div>
         </header>
@@ -203,7 +203,7 @@
               <button id="equipRandomAvatarBtn" type="button" class="primary" title="Equip random avatar" data-random-title="Equip random avatar">Equip Random</button>
               <button id="avatarRouletteBtn" type="button" title="Avatar roulette" data-random-title="Avatar roulette">Roulette</button>
             </span>
-            <label class="range-control">Columns<input id="databaseGridSizeInput" type="range" min="3" max="10" value="10"><output id="databaseGridSizeValue">10</output></label>
+            <label class="range-control">Columns<input id="databaseGridSizeInput" type="range" min="3" max="10" value="10"><output id="databaseGridSizeValue">10</output><button id="databaseGridSizeResetBtn" type="button" class="icon-button slider-reset-button" title="Reset to default" aria-label="Reset database columns to default">↻</button></label>
             </div>
           </div>
         </header>
@@ -436,7 +436,7 @@
 
   <dialog id="databaseJumpDialog"><form method="dialog" class="dialog-form">
     <header><h3>Jump to Page</h3><button type="button" class="icon-button" data-close="databaseJumpDialog">x</button></header>
-    <div class="page-slider-row"><button id="databaseJumpPrevBtn" type="button" class="icon-button" title="Previous page">&lt;</button><input id="databaseJumpPageInput" type="range" min="1" step="1" value="1"><button id="databaseJumpNextBtn" type="button" class="icon-button" title="Next page">&gt;</button></div>
+    <div class="page-slider-row"><button id="databaseJumpPrevBtn" type="button" class="icon-button" title="Previous page">&lt;</button><input id="databaseJumpPageInput" type="range" min="1" step="1" value="1"><button id="databaseJumpNextBtn" type="button" class="icon-button" title="Next page">&gt;</button><button id="databaseJumpResetBtn" type="button" class="icon-button slider-reset-button" title="Reset to first page" aria-label="Reset to first page">↻</button></div>
     <label id="databaseJumpPageValue" class="page-slider-value">Page <input id="databaseJumpPageNumber" type="number" min="1" step="1" value="1"> of <span id="databaseJumpPageMax">1</span></label>
     <menu><button type="button" data-close="databaseJumpDialog">Cancel</button><button id="confirmDatabaseJumpBtn" class="primary">Go</button></menu>
   </form></dialog>
@@ -444,7 +444,7 @@
   <dialog id="positionDialog"><form method="dialog" class="dialog-form">
     <header><h3 id="positionDialogTitle">Change Position</h3><button type="button" class="icon-button" data-close="positionDialog">x</button></header>
     <p id="positionDialogName" class="dialog-note"></p>
-    <div class="page-slider-row"><button id="positionPrevBtn" type="button" class="icon-button" title="Previous position">&lt;</button><input id="positionInput" type="range" min="1" step="1" value="1"><button id="positionNextBtn" type="button" class="icon-button" title="Next position">&gt;</button></div>
+    <div class="page-slider-row"><button id="positionPrevBtn" type="button" class="icon-button" title="Previous position">&lt;</button><input id="positionInput" type="range" min="1" step="1" value="1"><button id="positionNextBtn" type="button" class="icon-button" title="Next position">&gt;</button><button id="positionResetBtn" type="button" class="icon-button slider-reset-button" title="Reset to first position" aria-label="Reset to first position">↻</button></div>
     <label id="positionValue" class="page-slider-value">Position <input id="positionNumber" type="number" min="1" step="1" value="1"> of <span id="positionMax">1</span></label>
     <menu><button type="button" data-close="positionDialog">Cancel</button><button id="confirmPositionBtn" class="primary">Move</button></menu>
   </form></dialog>
@@ -462,6 +462,7 @@
     <header><h3>Settings</h3><button type="button" class="icon-button" data-close="customizationDialog">x</button></header>
     <div class="settings-tabs" role="tablist">
       <button id="settingsCustomizationTab" type="button" class="active">Customization</button>
+      <button id="settingsKeybindsTab" type="button">Keybinds</button>
       <button id="settingsOverlayTab" type="button">Overlay</button>
       <button id="settingsSyncTab" type="button">Sync</button>
       <button id="settingsBackupsTab" type="button">Backups</button>
@@ -473,12 +474,21 @@
       <div class="settings-panel-actions"><button id="openBackgroundFolderBtn" type="button">Edit Global Background</button><button id="resetThemeBtn" type="button">Reset Theme</button><select id="bgEffectSelect" hidden><option value="">None</option><option value="aurora">Aurora</option><option value="aurorasnow">Aurora 2</option><option value="blizzard">Blizzard</option><option value="embers">Embers</option><option value="fog">Fog</option><option value="pulse">Gradient pulse</option><option value="lowpoly">Low-poly</option><option value="matrix">Matrix rain</option><option value="nebula">Nebula</option><option value="particles">Particles</option><option value="flow">Perlin flow</option><option value="rain">Rain</option><option value="snow">Snowfall</option><option value="stars">Starfield</option><option value="thunderstorm">Thunderstorm</option><option value="noise">White noise</option><option value="noise2">White noise 2</option></select></div>
       <div class="color-row"><label class="theme-control">Background Color<input id="themeColorInput" type="color" value="#303735"></label><label class="sync-toggle-label">Sync colors<input id="panelColorSyncToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span></label></div>
       <label>Background opacity</label>
-      <div class="page-slider-row"><button id="backgroundOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="backgroundOpacityInput" type="range" min="0" max="100" value="20"><button id="backgroundOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button></div>
+      <div class="page-slider-row"><button id="backgroundOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="backgroundOpacityInput" type="range" min="0" max="100" value="20"><button id="backgroundOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button><button id="backgroundOpacityResetBtn" type="button" class="icon-button slider-reset-button" title="Reset to default" aria-label="Reset background opacity to default">↻</button></div>
       <label id="backgroundOpacityValue" class="page-slider-value">Opacity <input id="backgroundOpacityNumber" type="number" min="0" max="100" step="1" value="20">%</label>
       <label id="panelColorLabel" class="theme-control">Panel Color<input id="panelColorInput" type="color" value="#303735"><span id="panelColorOverlay" class="color-overlay" hidden></span></label>
       <label>Panel opacity</label>
-      <div class="page-slider-row"><button id="panelOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="panelOpacityInput" type="range" min="0" max="100" value="35"><button id="panelOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button></div>
+      <div class="page-slider-row"><button id="panelOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="panelOpacityInput" type="range" min="0" max="100" value="35"><button id="panelOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button><button id="panelOpacityResetBtn" type="button" class="icon-button slider-reset-button" title="Reset to default" aria-label="Reset panel opacity to default">↻</button></div>
       <label id="panelOpacityValue" class="page-slider-value">Opacity <input id="panelOpacityNumber" type="number" min="0" max="100" step="1" value="35">%</label>
+      <label class="sync-toggle-label blur-toggle-label">Enable blur<input id="blurEnabledToggle" type="checkbox" checked><span class="toggle-slider" aria-hidden="true"></span></label>
+    </section>
+    <section id="settingsKeybindsPanel" class="settings-panel keybinds-settings-panel" hidden>
+      <label>Overlay keybind</label>
+      <div class="overlay-hotkey-row"><input id="overlayHotkeyInput" type="text" value="F8" readonly><button id="resetOverlayHotkeyBtn" type="button">Reset</button></div>
+      <label>Desktop random database keybind</label>
+      <div class="overlay-hotkey-row"><input id="databaseRandomHotkeyInput" type="text" value="Ctrl+R" readonly><button id="resetDatabaseRandomHotkeyBtn" type="button">Reset</button></div>
+      <label>Desktop random favorite keybind</label>
+      <div class="overlay-hotkey-row"><input id="favoriteRandomHotkeyInput" type="text" value="Ctrl+Alt+R" readonly><button id="resetFavoriteRandomHotkeyBtn" type="button">Reset</button></div>
     </section>
     <section id="settingsOverlayPanel" class="settings-panel overlay-settings-panel" hidden>
       <div class="settings-panel-actions"><button id="openOverlayBtn" type="button" class="primary">Open Overlay</button><button id="closeOverlayBtn" type="button">Close Overlay</button><button id="resetOverlayLayoutBtn" type="button">Reset Layout</button></div>
@@ -490,12 +500,6 @@
         </article>
       </div>
       <label class="sync-toggle-label overlay-toggle-label">Enable overlay<input id="overlayEnabledToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span></label>
-      <label>Overlay keybind</label>
-      <div class="overlay-hotkey-row"><input id="overlayHotkeyInput" type="text" value="F8" readonly><button id="resetOverlayHotkeyBtn" type="button">Reset</button></div>
-      <label>Desktop random database keybind</label>
-      <div class="overlay-hotkey-row"><input id="databaseRandomHotkeyInput" type="text" value="Ctrl+R" readonly><button id="resetDatabaseRandomHotkeyBtn" type="button">Reset</button></div>
-      <label>Desktop random favorite keybind</label>
-      <div class="overlay-hotkey-row"><input id="favoriteRandomHotkeyInput" type="text" value="Ctrl+Alt+R" readonly><button id="resetFavoriteRandomHotkeyBtn" type="button">Reset</button></div>
       <label>Default panel
         <select id="overlayDefaultPanelSelect">
           <option value="avatars">Avatars</option>
@@ -503,11 +507,8 @@
         </select>
       </label>
       <label>Panel opacity</label>
-      <div class="page-slider-row"><button id="overlayOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="overlayOpacityInput" type="range" min="45" max="100" value="86"><button id="overlayOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button></div>
-      <label id="overlayOpacityValue" class="page-slider-value">Panel opacity <input id="overlayOpacityNumber" type="number" min="45" max="100" step="1" value="86">%</label>
-      <label>Overlay scale</label>
-      <div class="page-slider-row"><button id="overlayScalePrevBtn" type="button" class="icon-button" title="Smaller">&lt;</button><input id="overlayScaleInput" type="range" min="80" max="135" value="100"><button id="overlayScaleNextBtn" type="button" class="icon-button" title="Larger">&gt;</button></div>
-      <label id="overlayScaleValue" class="page-slider-value">Scale <input id="overlayScaleNumber" type="number" min="80" max="135" step="1" value="100">%</label>
+      <div class="page-slider-row"><button id="overlayOpacityPrevBtn" type="button" class="icon-button" title="Less opaque">&lt;</button><input id="overlayOpacityInput" type="range" min="45" max="100" value="85"><button id="overlayOpacityNextBtn" type="button" class="icon-button" title="More opaque">&gt;</button><button id="overlayOpacityResetBtn" type="button" class="icon-button slider-reset-button" title="Reset to default" aria-label="Reset overlay opacity to default">↻</button></div>
+      <label id="overlayOpacityValue" class="page-slider-value">Panel opacity <input id="overlayOpacityNumber" type="number" min="45" max="100" step="1" value="85">%</label>
     </section>
     <section id="settingsSyncPanel" class="settings-panel" hidden>
       <div class="settings-panel-actions"><button id="syncNowBtn" type="button">Sync Now</button><button id="refreshSyncCenterBtn" type="button">Refresh</button></div>
