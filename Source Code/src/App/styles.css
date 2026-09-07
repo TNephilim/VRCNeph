@@ -350,8 +350,9 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
 .social-sidebar-tabs button { min-height: 30px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--glass-soft); color: var(--muted); font-weight: 500; }
 .social-sidebar-tabs button:hover, .social-sidebar-tabs button.active { border-color: var(--accent); background: var(--glass-hover); color: var(--text); }
 .social-sidebar-select-label { display: grid; gap: 5px; margin-bottom: 10px; color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
-.social-sidebar-select { width: 100%; min-height: 34px; padding: 6px 32px 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--glass-soft); color: var(--text); font: inherit; font-weight: 500; outline: none; }
-.social-sidebar-select:hover, .social-sidebar-select:focus { border-color: var(--accent); background: var(--glass-hover); }
+.social-sidebar-group-control { width: 100%; height: 34px; }
+.social-sidebar-group-control > button { height: 34px; border-radius: 6px; font-weight: 500; }
+.social-sidebar-group-control .sort-menu { max-height: min(260px, 42vh); overflow-y: auto; }
 .group-list .social-list-section { display: grid; gap: 8px; }
 .group-list .social-list-section + .social-list-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 .group-list .social-list-section h4 { margin: 0; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
@@ -449,8 +450,8 @@ body.details-open #databasePage .empty-state { left: calc((100% - var(--avatar-d
   z-index: 2400;
 }
 .notification-details-panel.user-detail-popup > header {
-  min-height: 48px;
-  padding: 11px 16px;
+  min-height: 0;
+  padding: 6px 12px;
   background: var(--popup-surface);
 }
 .notification-details-panel.user-detail-popup .social-list,
@@ -826,7 +827,7 @@ body.details-open #databasePage .empty-state { left: calc((100% - var(--avatar-d
 .theme-control { grid-template-columns: auto 44px; width: 150px; position: relative; }
 .theme-control input { height: 30px; padding: 2px; cursor: pointer; }
 .avatar-grid { padding: 24px; display: grid; grid-template-columns: repeat(var(--avatar-columns), var(--avatar-card-size)); grid-auto-rows: max-content; align-content: start; gap: var(--avatar-grid-gap); min-height: 0; overflow-y: auto; overflow-x: hidden; }
-.avatar-card { position: relative; width: var(--avatar-card-size); border: 1px solid var(--line); border-radius: 8px; background: var(--glass); overflow: visible; content-visibility: auto; contain-intrinsic-size: 0 220px; transition: border-color 120ms ease, background-color 120ms ease, transform 150ms ease, opacity 120ms ease, box-shadow 150ms ease; padding-bottom: 34px; }
+.avatar-card { position: relative; width: var(--avatar-card-size); border: 1px solid var(--line); border-radius: 8px; background: var(--glass); overflow: visible; content-visibility: auto; contain-intrinsic-size: 0 220px; container-type: inline-size; transition: border-color 120ms ease, background-color 120ms ease, transform 150ms ease, opacity 120ms ease, box-shadow 150ms ease; padding-bottom: 34px; }
 .avatar-card:hover { border-color: var(--accent); background: var(--glass-hover); transform: translateY(-2px); }
 .avatar-card.selected, .avatar-card.details-selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 24%, var(--glass)); box-shadow: inset 0 0 0 1px var(--accent), 0 0 18px color-mix(in srgb, var(--accent) 18%, transparent); }
 .avatar-card.favorite-syncing { border-color: color-mix(in srgb, var(--blue) 58%, var(--line)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 36%, transparent); }
@@ -852,6 +853,24 @@ body.details-open #databasePage .empty-state { left: calc((100% - var(--avatar-d
 .avatar-card-save:hover { color: var(--text); border-color: color-mix(in srgb, var(--accent) 72%, var(--line)); background: var(--glass-hover); }
 .avatar-card-save.active { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 72%, var(--line)); background: color-mix(in srgb, var(--gold) 16%, var(--glass)); }
 .avatar-card-save.active svg { fill: currentColor; }
+@container (max-width: 128px) {
+  .avatar-card-footer { margin-inline: 2px; gap: 2px; }
+  .avatar-card-actions { gap: 2px; }
+  .avatar-card-footer button { padding-inline: 3px; }
+  .avatar-position { min-width: 27px; max-width: 30px; padding-inline: 4px; font-size: 10px; }
+  .avatar-card-save { flex-basis: 24px; width: 24px; }
+  .avatar-card-save svg { width: 13px; height: 13px; }
+  .avatar-card-equip { flex-basis: 36px; width: 36px; font-size: 10px; }
+}
+@container (max-width: 100px) {
+  .avatar-card-footer { margin-inline: 1px; gap: 1px; }
+  .avatar-card-actions { gap: 1px; }
+  .avatar-card-footer button { padding-inline: 2px; }
+  .avatar-position { min-width: 25px; max-width: 27px; padding-inline: 2px; }
+  .avatar-card-save { flex-basis: 23px; width: 23px; }
+  .avatar-card-save svg { width: 12px; height: 12px; }
+  .avatar-card-equip { flex-basis: 34px; width: 34px; }
+}
 .avatar-reorder-locked .avatar-position { opacity: .42; cursor: default; filter: grayscale(.75); }
 .avatar-reorder-enabled, .group-item[data-can-reorder="true"] { user-select: none; -webkit-user-drag: none; }
 .dragging { pointer-events: none; background: transparent !important; border-color: color-mix(in srgb, var(--line) 68%, transparent) !important; box-shadow: none !important; -webkit-backdrop-filter: none !important; backdrop-filter: none !important; transition: none !important; }
@@ -1909,7 +1928,7 @@ button.friend-profile-avatar, button.world-detail-image-card { min-height: 0; pa
 .favorite-group-dialog .favorite-group-fields textarea { min-height: 82px; max-height: min(180px, calc(100vh - 240px)); color: var(--text); resize: vertical; }
 .import-drop-zone { border: 1px dashed transparent; border-radius: 8px; padding: 8px; }
 .import-drop-zone.drag-over { border-color: var(--accent); background: var(--glass-hover); }
-#toast { position: fixed; right: 18px; bottom: 18px; max-width: 420px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--line)); border-radius: 8px; background: rgba(var(--panel-rgb), .9); backdrop-filter: var(--surface-filter); -webkit-backdrop-filter: var(--surface-filter); color: var(--text); box-shadow: 0 18px 44px rgba(0,0,0,.5); opacity: 0; transform: translateY(10px); transition: opacity 160ms ease, transform 160ms ease; pointer-events: none; }
+#toast { position: fixed; right: 18px; bottom: 18px; z-index: 2300; max-width: 420px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--line)); border-radius: 8px; background: rgba(var(--panel-rgb), .9); backdrop-filter: var(--surface-filter); -webkit-backdrop-filter: var(--surface-filter); color: var(--text); box-shadow: 0 18px 44px rgba(0,0,0,.5); opacity: 0; transform: translateY(10px); transition: opacity 160ms ease, transform 160ms ease; pointer-events: none; }
 #toast.visible { opacity: 1; transform: translateY(0); }
 .zoom-indicator { position: fixed; left: 50%; top: 18px; z-index: 2200; min-width: 78px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--popup-surface); backdrop-filter: var(--surface-filter); color: var(--text); font-weight: 800; text-align: center; box-shadow: 0 18px 40px rgba(0,0,0,.35); opacity: 0; transform: translate(-50%, -8px); transition: opacity 140ms ease, transform 140ms ease; pointer-events: none; }
 .zoom-indicator.visible { opacity: 1; transform: translate(-50%, 0); }

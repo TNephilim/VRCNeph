@@ -10,7 +10,6 @@
   <section id="equipNotice" class="overlay-equip-notice" hidden aria-live="polite">
     <div class="overlay-equip-notice-image"><img id="equipNoticeImage" alt="" hidden><span id="equipNoticeFallback">No thumbnail</span></div>
     <div class="overlay-equip-notice-copy">
-      <div class="overlay-equip-notice-status"><span aria-hidden="true">↻</span> Switching to</div>
       <h1 id="equipNoticeName">Avatar equipped</h1>
       <p id="equipNoticeAuthor">Author unavailable</p>
       <div id="equipNoticeBadges" class="overlay-equip-notice-badges"></div>
@@ -31,17 +30,13 @@
         <small id="panelCount">0 avatars</small>
       </button>
       <button id="nextGroupBtn" class="nav-button" type="button" title="Next group">&gt;</button>
-      <button id="splitPanelBtn" class="split-button" type="button">Split</button>
     </section>
     <section id="groupDropdown" class="group-dropdown" hidden></section>
     <section id="overlayActions" class="overlay-actions" hidden>
       <div id="overlayDatabaseControls" class="overlay-database-controls" hidden></div>
       <input id="overlaySearchInput" type="search" placeholder="Search">
-      <button id="saveCurrentAvatarOverlayBtn" type="button">Save Current Avatar</button>
-      <button id="saveCurrentWorldOverlayBtn" type="button" hidden>Save Current World</button>
     </section>
     <section id="content" class="overlay-list" aria-live="polite"></section>
-    <section id="detachedPanels" class="detached-panels" aria-label="Split overlay panels"></section>
     <section id="detailPanels" class="detail-panels" aria-label="Overlay detail panels"></section>
     <div id="resizeHandle" class="resize-handle" title="Resize overlay"></div>
   </main>
@@ -53,18 +48,6 @@
       <menu>
         <button id="confirmCancelBtn" type="button">Cancel</button>
         <button id="confirmOkBtn" class="danger" type="button">Confirm</button>
-      </menu>
-    </form>
-  </dialog>
-
-  <dialog id="saveCurrentDialog" class="overlay-dialog">
-    <form method="dialog">
-      <h2>Save Current Avatar</h2>
-      <p id="saveCurrentMessage">Choose a group for your current avatar.</p>
-      <label>Favorite group<select id="saveCurrentGroupInput"></select></label>
-      <menu>
-        <button id="saveCurrentCancelBtn" type="button">Cancel</button>
-        <button id="saveCurrentConfirmBtn" class="primary" type="button">Save</button>
       </menu>
     </form>
   </dialog>
@@ -93,19 +76,6 @@
     </form>
   </dialog>
 
-  <dialog id="groupDialog" class="overlay-dialog">
-    <form method="dialog">
-      <h2 id="groupTitle">Group</h2>
-      <p id="groupMessage">Create or edit an overlay group.</p>
-      <label>Name<input id="groupNameInput" type="text" maxlength="80"></label>
-      <label>Description<textarea id="groupDescriptionInput" rows="3" maxlength="220"></textarea></label>
-      <menu>
-        <button id="groupCancelBtn" type="button">Cancel</button>
-        <button id="groupOkBtn" class="primary" type="button">Save</button>
-      </menu>
-    </form>
-  </dialog>
-
   <dialog id="rouletteDialog" class="overlay-dialog">
     <form method="dialog">
       <h2 id="rouletteTitle">Avatar Roulette</h2>
@@ -121,6 +91,7 @@
       </menu>
     </form>
   </dialog>
+  <script src="social-shared.js"></script>
   <script src="overlay.js"></script>
 </body>
 </html>

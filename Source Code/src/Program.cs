@@ -284,7 +284,9 @@ internal static class Program
             try
             {
                 Logs.Info("Pipeline", $"Live event received: {evt.Type}");
-                TrySendWebMessage(window, JsonSerializer.Serialize(AppEvent.Push("vrchatPipeline", evt), ProgramJson.Options));
+                var eventMessage = JsonSerializer.Serialize(AppEvent.Push("vrchatPipeline", evt), ProgramJson.Options);
+                TrySendWebMessage(window, eventMessage);
+                SendOverlayEvent("vrchatPipeline", evt);
                 await Task.CompletedTask;
             }
             catch
@@ -297,7 +299,9 @@ internal static class Program
                 if (status.Connected) Logs.Info("Pipeline", "Live sync connected.");
                 else if (status.State.Equals("Connecting", StringComparison.OrdinalIgnoreCase)) Logs.Info("Pipeline", status.State);
                 else if (!status.State.Equals("Stopped", StringComparison.OrdinalIgnoreCase)) Logs.Warn("Pipeline", status.State);
-                TrySendWebMessage(window, JsonSerializer.Serialize(AppEvent.Push("vrchatPipelineStatus", status), ProgramJson.Options));
+                var statusMessage = JsonSerializer.Serialize(AppEvent.Push("vrchatPipelineStatus", status), ProgramJson.Options);
+                TrySendWebMessage(window, statusMessage);
+                SendOverlayEvent("vrchatPipelineStatus", status);
                 await Task.CompletedTask;
             }
             catch
@@ -760,6 +764,11 @@ internal static class Program
     private const int WsExToolWindow = 0x00000080;
     private const int WsExTransparent = 0x00000020;
     private const int WsExNoActivate = 0x08000000;
+    // Leave the native region almost rectangular so it does not cut through
+    // the WebView's antialiased CSS rounded edge. The page remains the
+    // authoritative visual clip; the native region only trims the extreme
+    // transparent corner pixels for hit-testing.
+    private const int OverlayHostCornerRadius = 1;
     private const uint SwpNoSize = 0x0001;
     private const uint SwpNoMove = 0x0002;
     private const uint SwpNoActivate = 0x0010;
@@ -907,7 +916,7 @@ internal static class Program
                 "overlaySnapshot" => await BuildOverlaySnapshotAsync(),
                 "overlaySettingsPreview" => PreviewOverlaySettings(GetPayload<AppSettings>(request)),
                 "overlayEquipNotice" => ShowEquipNotice(GetPayload<AvatarInput>(request)),
-                "overlayNoticeReady" => MarkOverlayNoticeReady(),
+                "overlayNoticeReady" => MarkOverlayNoticeReady(GetPayload<OverlayNoticeReadyInput>(request).Token),
                 "overlayHostState" => GetOverlayHostState(),
                 "overlayMoveWindow" => MoveOverlayWindow(GetPayload<OverlayMoveInput>(request)),
                 "overlayResizeWindow" => ResizeOverlayWindow(GetPayload<OverlayResizeInput>(request)),
@@ -1264,14 +1273,34 @@ internal static class Program
     {
         if (!Settings.Get().OverlayEnabled) return new { shown = false };
         var settings = Settings.Get();
-        var notice = new AvatarEquipNotice(avatar.Name?.Trim() ?? "", avatar.AuthorName?.Trim() ?? "", avatar.ThumbnailImageUrl?.Trim() ?? avatar.ImageUrl?.Trim() ?? "", avatar.ReleaseStatus?.Trim() ?? "", avatar.Platforms?.Trim() ?? "", settings.ThemeColor, settings.PanelColor, settings.OverlayOpacity);
+        var avatarId = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
+        var notice = new AvatarEquipNotice(
+            avatarId?.Trim() ?? "",
+            avatar.Name?.Trim() ?? "",
+            avatar.AuthorName?.Trim() ?? "",
+            avatar.ThumbnailImageUrl?.Trim() ?? "",
+            avatar.ImageUrl?.Trim() ?? "",
+            avatar.ReleaseStatus?.Trim() ?? "",
+            avatar.Platforms?.Trim() ?? "",
+            settings.ThemeColor,
+            settings.PanelColor,
+            settings.OverlayOpacity);
         OverlayHostStateStore.Write(new OverlayHostState("notice", notice, Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow.AddSeconds(5)));
         EnsureOverlayHost();
         return new { shown = true };
     }
 
-    private static object MarkOverlayNoticeReady()
+    private static object MarkOverlayNoticeReady(string token)
     {
+        var current = OverlayHostStateStore.Read();
+        if (string.IsNullOrWhiteSpace(token) ||
+            !string.Equals(token, current.Token, StringComparison.Ordinal) ||
+            !current.Mode.Equals("notice", StringComparison.OrdinalIgnoreCase) ||
+            current.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow)
+        {
+            return new { ready = false };
+        }
+        OverlayNoticeToken = token;
         OverlayNoticeContentReady = true;
         ApplyOverlayHostMode("notice");
         return new { ready = true };
@@ -1563,7 +1592,7 @@ internal static class Program
             // window while VRChat is in the foreground.
             ShowWindowAsync(OverlayWindowHandle, SwShowNoActivate);
             SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, width, height, SwpNoActivate | SwpShowWindow | SwpFrameChanged);
-            ApplyOverlayWindowRegion(width, height, mode == "notice" ? 14 : 9);
+            ApplyOverlayWindowRegion(width, height, OverlayHostCornerRadius);
         }
         catch (Exception ex)
         {
@@ -1728,13 +1757,7 @@ internal static class Program
             .Where(group => !ShouldHideOverlayAvatarGroup(group.Id, group.count, group.canAccess))
             .ToList();
 
-        var current = await BuildOverlayCurrentAsync();
-        var worldGroups = await TryOverlayFetchAsync(async () =>
-        {
-            var worldsResult = await VrChat.GetFavoriteWorldsAsync(new PageInput(80, 0));
-            var groupsResult = await TryFavoriteWorldGroupsAsync();
-            return BuildOverlayWorldGroups(worldsResult.Worlds, groupsResult.Groups, groupsResult.FavoriteGroupLimit, groupsResult.FavoritePerGroupLimit);
-        });
+        var sessionLocation = await BuildOverlayLocationAsync();
         var friendGroups = await TryOverlayFetchAsync(async () =>
         {
             var friendsResult = await VrChat.GetFriendsAsync(new PageInput(80, 0));
@@ -1747,12 +1770,9 @@ internal static class Program
             generatedAt = DateTimeOffset.Now,
             settings = Settings.Get(),
             avatarGroups = groups,
-            worldGroups,
-            worlds = worldGroups.SelectMany(GroupItems).Take(80).ToList(),
             friendGroups,
             friends = friendGroups.SelectMany(GroupItems).Take(80).ToList(),
-            current,
-            session = current.Location
+            session = sessionLocation
         };
     }
 
@@ -1803,62 +1823,21 @@ internal static class Program
             .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
             .Any(tag => tag.Contains("system_supporter", StringComparison.OrdinalIgnoreCase) || tag.Contains("supporter", StringComparison.OrdinalIgnoreCase));
 
-    private static object OverlayWorld(VrChatWorldSummary world)
-    {
-        return new
-        {
-            world.Id,
-            world.Name,
-            world.AuthorName,
-            world.Description,
-            world.ImageUrl,
-            world.Occupants,
-            world.Capacity,
-            world.Favorites,
-            world.ReleaseStatus,
-            world.FavoriteTags,
-            world.Visits,
-            world.CreatedAt,
-            world.UpdatedAt
-        };
-    }
-
-    private static object OverlayAvatar(AvatarInput avatar)
-    {
-        return new
-        {
-            id = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId,
-            localId = "",
-            avatar.Name,
-            avatar.AuthorName,
-            imageUrl = string.IsNullOrWhiteSpace(avatar.ThumbnailImageUrl) ? avatar.ImageUrl : avatar.ThumbnailImageUrl,
-            fullImageUrl = avatar.ImageUrl,
-            avatar.ReleaseStatus,
-            avatar.Platforms,
-            avatar.Source
-        };
-    }
-
     private sealed record OverlayLocation(bool Found, string Room, string Location, string WorldId, string InstanceId, string Timestamp, string Message);
-    private sealed record OverlayCurrent(object? Avatar, object? World, OverlayLocation Location);
 
-    private static async Task<OverlayCurrent> BuildOverlayCurrentAsync()
+    private static async Task<OverlayLocation> BuildOverlayLocationAsync()
     {
         var location = await TryOverlayValueAsync(async () => await VrChat.GetCurrentLocationAsync(), new VrChatCurrentLocationResult("", "", "", null))
             ?? new VrChatCurrentLocationResult("", "", "", null);
-        var avatar = await TryOverlayValueAsync(async () => await VrChat.CurrentAvatarAsync(), null as AvatarInput);
         var latest = SafeLatestWorldLocation();
-        return new OverlayCurrent(
-            avatar is null ? null : OverlayAvatar(avatar),
-            location.World is null ? null : OverlayWorld(location.World),
-            new OverlayLocation(
-                !string.IsNullOrWhiteSpace(location.WorldId) || latest.Found,
-                location.World?.Name ?? latest.Room,
-                string.IsNullOrWhiteSpace(location.Location) ? latest.Location : location.Location,
-                string.IsNullOrWhiteSpace(location.WorldId) ? latest.WorldId : location.WorldId,
-                location.InstanceId,
-                latest.Timestamp,
-                latest.Message));
+        return new OverlayLocation(
+            !string.IsNullOrWhiteSpace(location.WorldId) || latest.Found,
+            location.World?.Name ?? latest.Room,
+            string.IsNullOrWhiteSpace(location.Location) ? latest.Location : location.Location,
+            string.IsNullOrWhiteSpace(location.WorldId) ? latest.WorldId : location.WorldId,
+            location.InstanceId,
+            latest.Timestamp,
+            latest.Message);
     }
 
     private static object OverlayFriend(VrChatFriendSummary friend)
@@ -1907,31 +1886,6 @@ internal static class Program
         };
     }
 
-    private static List<object> BuildOverlayWorldGroups(List<VrChatWorldSummary> worlds, List<VrChatFavoriteGroupSummary> favoriteGroups, int favoriteGroupLimit, int favoritePerGroupLimit)
-    {
-        var groups = new List<object>
-        {
-            new { id = "all", name = "All Favorite Worlds", count = worlds.Count, worlds = worlds.Take(80).Select(OverlayWorld).ToList() }
-        };
-        var orderedTags = Enumerable.Range(1, Math.Max(4, favoriteGroupLimit)).Select(index => $"worlds{index}").ToList();
-        orderedTags.AddRange(favoriteGroups.Select(group => group.Name).Where(x => !string.IsNullOrWhiteSpace(x) && !orderedTags.Contains(x, StringComparer.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase));
-        orderedTags.AddRange(worlds.SelectMany(world => SplitTags(world.FavoriteTags)).Where(tag => !orderedTags.Contains(tag, StringComparer.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase));
-        foreach (var tag in orderedTags)
-        {
-            var items = worlds.Where(world => SplitTags(world.FavoriteTags).Contains(tag, StringComparer.OrdinalIgnoreCase)).ToList();
-            var label = favoriteGroups.FirstOrDefault(group => group.Name.Equals(tag, StringComparison.OrdinalIgnoreCase))?.DisplayName;
-            groups.Add(new { id = tag, name = string.IsNullOrWhiteSpace(label) ? FavoriteGroupLabel(tag, "Favorite Worlds") : label, count = items.Count, limit = favoritePerGroupLimit, canAccess = CanAccessOverlayWorldGroup(tag, favoriteGroupLimit), worlds = items.Take(80).Select(OverlayWorld).ToList() });
-        }
-        return groups;
-    }
-
-    private static bool CanAccessOverlayWorldGroup(string tag, int favoriteGroupLimit)
-    {
-        var match = System.Text.RegularExpressions.Regex.Match(tag, @"^worlds(?<index>\d+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        if (!match.Success || !int.TryParse(match.Groups["index"].Value, out var index)) return true;
-        return index <= Math.Max(4, favoriteGroupLimit);
-    }
-
     private static List<object> BuildOverlayFriendGroups(List<VrChatFriendSummary> friends, List<VrChatFriendSummary> favoriteFriends, List<VrChatFavoriteGroupSummary> favoriteGroups, int favoritePerGroupLimit)
     {
         var byId = new Dictionary<string, VrChatFriendSummary>(StringComparer.OrdinalIgnoreCase);
@@ -1964,8 +1918,7 @@ internal static class Program
     private static List<object> GroupItems(object group)
     {
         var type = group.GetType();
-        return type.GetProperty("worlds")?.GetValue(group) as List<object>
-            ?? type.GetProperty("friends")?.GetValue(group) as List<object>
+        return type.GetProperty("friends")?.GetValue(group) as List<object>
             ?? [];
     }
 
@@ -2000,12 +1953,6 @@ internal static class Program
             Logs.Warn("App", "Overlay live value fetch failed.", ex.Message);
             return fallback;
         }
-    }
-
-    private static async Task<VrChatFavoriteGroupsResult> TryFavoriteWorldGroupsAsync()
-    {
-        try { return await VrChat.GetFavoriteWorldGroupsAsync(new PageInput(100, 0)); }
-        catch { return new VrChatFavoriteGroupsResult([], false); }
     }
 
     private static async Task<VrChatFavoriteGroupsResult> TryFavoriteFriendGroupsAsync()
@@ -2058,7 +2005,7 @@ internal static class Program
         var height = Math.Clamp(input.Height, 420, 1000);
         OverlayWindow?.SetSize(new Size(width, height));
         SetWindowPos(OverlayWindowHandle, HwndTopmost, rect.Left, rect.Top, width, height, SwpNoActivate | SwpShowWindow);
-        ApplyOverlayWindowRegion(width, height, 9);
+        ApplyOverlayWindowRegion(width, height, OverlayHostCornerRadius);
         SaveOverlayBounds(rect.Left, rect.Top, width, height);
         return new { ok = true, width, height };
     }
@@ -4689,6 +4636,12 @@ internal sealed class AppStateStore
         lock (_gate)
         {
             EnsureInitialized();
+            if (!_items.TryGetValue("vrcneph.activityAvatarLogVersion", out var version) || version.ValueKind != JsonValueKind.Number || version.GetInt32() < 2)
+            {
+                _items["vrcneph.activityAvatarLogVersion"] = JsonSerializer.SerializeToElement(2, ProgramJson.Options);
+                _items["vrcneph.activityAvatarLog"] = JsonSerializer.SerializeToElement(Array.Empty<object>(), ProgramJson.Options);
+                PersistLocked();
+            }
             return _items.ToDictionary(x => x.Key, x => x.Value.Clone(), StringComparer.OrdinalIgnoreCase);
         }
     }
@@ -5003,44 +4956,7 @@ internal sealed class AppDataStore
                 existing.LogFile = string.IsNullOrWhiteSpace(item.LogFile) ? existing.LogFile : item.LogFile;
                 if (IsLater(item.Timestamp ?? "", existing.LastSeen)) existing.LastSeen = item.Timestamp ?? existing.LastSeen;
                 if (string.IsNullOrWhiteSpace(existing.FirstSeen) || IsEarlier(item.Timestamp ?? "", existing.FirstSeen)) existing.FirstSeen = item.Timestamp ?? existing.FirstSeen;
-                existing.SeenCount++;
-            }
-            SaveStateLocked();
-        }
-    }
-
-    public PasBrowseTracking GetPasBrowseTracking()
-    {
-        lock (_gate)
-        {
-            EnsureInitialized();
-            return new PasBrowseTracking(_state.PasBrowseBaseline, new Dictionary<string, string>(_state.PasAvatarAdditions, StringComparer.OrdinalIgnoreCase));
-        }
-    }
-
-    public void EnsurePasBrowseBaseline()
-    {
-        lock (_gate)
-        {
-            EnsureInitialized();
-            if (string.IsNullOrWhiteSpace(_state.PasBrowseBaseline))
-            {
-                _state.PasBrowseBaseline = DateTimeOffset.UtcNow.ToString("O");
-                SaveStateLocked();
-            }
-        }
-    }
-
-    public void RecordPasAdditions(IEnumerable<string> avatarIds)
-    {
-        var ids = avatarIds.Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        if (ids.Count == 0) return;
-        lock (_gate)
-        {
-            EnsureInitialized();
-            foreach (var id in ids)
-            {
-                if (!_state.PasAvatarAdditions.ContainsKey(id)) _state.PasAvatarAdditions[id] = DateTimeOffset.UtcNow.ToString("O");
+                existing.SeenCount = Math.Max(existing.SeenCount, 1);
             }
             SaveStateLocked();
         }
@@ -5053,14 +4969,10 @@ internal sealed class AppDataStore
             EnsureInitialized();
             var idValue = avatarId?.Trim() ?? "";
             var userValue = userId?.Trim() ?? "";
-            var displayValue = displayName?.Trim() ?? "";
-            var nameValue = avatarName?.Trim() ?? "";
             var match = _state.LocalAvatarEncounters.Values
                 .Where(x =>
                     (!string.IsNullOrWhiteSpace(idValue) && string.Equals(x.AvatarId, idValue, StringComparison.OrdinalIgnoreCase)) ||
-                    (!string.IsNullOrWhiteSpace(userValue) && string.Equals(x.UserId, userValue, StringComparison.OrdinalIgnoreCase)) ||
-                    (!string.IsNullOrWhiteSpace(displayValue) && string.Equals(x.DisplayName, displayValue, StringComparison.OrdinalIgnoreCase)) ||
-                    (!string.IsNullOrWhiteSpace(nameValue) && string.Equals(x.AvatarName, nameValue, StringComparison.OrdinalIgnoreCase)))
+                    (string.IsNullOrWhiteSpace(idValue) && !string.IsNullOrWhiteSpace(userValue) && string.Equals(x.UserId, userValue, StringComparison.OrdinalIgnoreCase)))
                 .OrderByDescending(x => ParseTimestamp(x.LastSeen))
                 .FirstOrDefault();
             if (match is null) return null;
@@ -5189,7 +5101,13 @@ internal sealed class AppDataStore
         if (_initialized) return;
         Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
         _state = LoadState();
-        if (!File.Exists(_path)) SaveStateLocked();
+        if (_state.LocalEncounterParserVersion < 2)
+        {
+            _state.LocalAvatarEncounters.Clear();
+            _state.LocalEncounterParserVersion = 2;
+            SaveStateLocked();
+        }
+        else if (!File.Exists(_path)) SaveStateLocked();
         _initialized = true;
     }
 
@@ -5207,7 +5125,6 @@ internal sealed class AppDataStore
                     loaded.SyncConflicts ??= [];
                     loaded.MetadataHistory ??= [];
                     loaded.LocalAvatarEncounters = new Dictionary<string, LocalEncounterState>(loaded.LocalAvatarEncounters ?? new(), StringComparer.OrdinalIgnoreCase);
-                    loaded.PasAvatarAdditions = new Dictionary<string, string>(loaded.PasAvatarAdditions ?? new(), StringComparer.OrdinalIgnoreCase);
                     return loaded;
                 }
             }
@@ -5243,8 +5160,7 @@ internal sealed class AppDataStore
         public List<SyncConflictState> SyncConflicts { get; set; } = [];
         public List<MetadataHistoryState> MetadataHistory { get; set; } = [];
         public Dictionary<string, LocalEncounterState> LocalAvatarEncounters { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-        public string PasBrowseBaseline { get; set; } = "";
-        public Dictionary<string, string> PasAvatarAdditions { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        public int LocalEncounterParserVersion { get; set; }
     }
 
     private sealed class SyncRunState { public long Sequence { get; set; } public string Timestamp { get; set; } = ""; public bool Succeeded { get; set; } public string Summary { get; set; } = ""; public string Error { get; set; } = ""; }
@@ -5548,8 +5464,12 @@ internal static class VrChatLogWatcher
         "VRChat");
     public static string LogDirectoryPath => LogDirectory;
     private static readonly System.Text.RegularExpressions.Regex AvatarIdRegex = new(@"avtr_[0-9a-fA-F-]{36}", System.Text.RegularExpressions.RegexOptions.Compiled);
-    private static readonly System.Text.RegularExpressions.Regex JoinedPlayerRegex = new(@"\[Behaviour\]\s+OnPlayerJoined\s+(.+?)\s+\((usr_[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{12})\)", System.Text.RegularExpressions.RegexOptions.Compiled);
-    private static readonly System.Text.RegularExpressions.Regex LeftPlayerRegex = new(@"\[Behaviour\]\s+OnPlayerLeft\s+(.+?)\s+\((usr_[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{12})\)", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex JoinedPlayerRegex = new(@"\[Behaviour\]\s+OnPlayerJoined\s+(?<name>.+?)(?:\s+\((?<id>usr_[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{12})\))?\s*$", System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    private static readonly System.Text.RegularExpressions.Regex LeftPlayerRegex = new(@"\[Behaviour\]\s+OnPlayerLeft\s+(?<name>.+?)(?:\s+\((?<id>usr_[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{12})\))?\s*$", System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    private static readonly System.Text.RegularExpressions.Regex AvatarSwitchRegex = new(@"\[Behaviour\]\s+Switching\s+(?<name>.+?)\s+to avatar\s+(?<avatar>.+?)\s*$", System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    private sealed record HistoricalAvatarSwitch(string Name, string AvatarName, string Timestamp, string Room, string Location, int LineNumber);
+    private sealed record HistoricalAvatarId(string AvatarId, int LineNumber);
+    private sealed record HistoricalAvatarDownload(bool IsRemote, int LineNumber);
 
     public static DiagnosticItem Diagnostic()
     {
@@ -5574,7 +5494,7 @@ internal static class VrChatLogWatcher
         {
             var room = "";
             var location = "";
-            foreach (var line in ReadTailLines(file, 6000))
+            foreach (var line in ReadAllLines(file))
             {
                 var timestamp = line.Length >= 19 ? line[..19] : "";
                 var entering = line.IndexOf("[Behaviour] Entering Room:", StringComparison.OrdinalIgnoreCase);
@@ -5590,8 +5510,8 @@ internal static class VrChatLogWatcher
                     action = "Left";
                 }
                 if (!match.Success) continue;
-                var name = match.Groups[1].Value.Trim();
-                var id = match.Groups[2].Value.Trim();
+                var name = match.Groups["name"].Value.Trim();
+                var id = match.Groups["id"].Value.Trim();
                 var idMatches = !string.IsNullOrWhiteSpace(userId) && id.Equals(userId, StringComparison.OrdinalIgnoreCase);
                 var nameMatches = !string.IsNullOrWhiteSpace(displayName) && name.Equals(displayName, StringComparison.OrdinalIgnoreCase);
                 if (!idMatches && !nameMatches) continue;
@@ -5617,7 +5537,7 @@ internal static class VrChatLogWatcher
         {
             var room = "";
             var location = "";
-            foreach (var line in ReadTailLines(file, 9000))
+            foreach (var line in ReadAllLines(file))
             {
                 var timestamp = line.Length >= 19 ? line[..19] : "";
                 var entering = line.IndexOf("[Behaviour] Entering Room:", StringComparison.OrdinalIgnoreCase);
@@ -5633,8 +5553,9 @@ internal static class VrChatLogWatcher
                     action = "Player left";
                 }
                 if (!match.Success) continue;
-                var name = match.Groups[1].Value.Trim();
-                var id = match.Groups[2].Value.Trim();
+                var name = match.Groups["name"].Value.Trim();
+                var id = match.Groups["id"].Value.Trim();
+                if (string.IsNullOrWhiteSpace(id) || name.StartsWith(":", StringComparison.Ordinal)) continue;
                 var key = $"{timestamp}|{action}|{id}|{room}|{location}";
                 if (!seen.Add(key)) continue;
                 items.Add(new PlayerActivityLogItem(timestamp, action, name, id, room, location, WorldIdFromLocation(location), Path.GetFileName(file)));
@@ -5650,32 +5571,49 @@ internal static class VrChatLogWatcher
         foreach (var file in Directory.EnumerateFiles(LogDirectory, "output_log*.txt", SearchOption.TopDirectoryOnly).OrderByDescending(File.GetLastWriteTimeUtc).Take(60).Reverse())
         {
             var users = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var pending = new List<(string Name, string AvatarName, string Timestamp, string Room, string Location, int Remaining)>();
+            var pending = new List<HistoricalAvatarSwitch>();
+            var analyses = new List<HistoricalAvatarId>();
+            var downloads = new List<HistoricalAvatarDownload>();
             var room = "";
             var location = "";
-            foreach (var line in ReadTailLines(file, 9000))
+            var lineNumber = 0;
+            foreach (var line in ReadAllLines(file))
             {
-                for (var i = pending.Count - 1; i >= 0; i--)
-                {
-                    var item = pending[i] with { Remaining = pending[i].Remaining - 1 };
-                    if (item.Remaining <= 0) pending.RemoveAt(i);
-                    else pending[i] = item;
-                }
+                lineNumber++;
+                downloads.RemoveAll(item => lineNumber - item.LineNumber > 24);
                 var timestamp = line.Length >= 19 ? line[..19] : "";
                 var entering = line.IndexOf("[Behaviour] Entering Room:", StringComparison.OrdinalIgnoreCase);
                 if (entering >= 0) room = line[(entering + "[Behaviour] Entering Room:".Length)..].Trim();
                 var joining = line.IndexOf("[Behaviour] Joining ", StringComparison.OrdinalIgnoreCase);
                 if (joining >= 0 && !line.Contains("Joining or Creating Room:", StringComparison.OrdinalIgnoreCase)) location = line[(joining + "[Behaviour] Joining ".Length)..].Trim();
                 var joined = JoinedPlayerRegex.Match(line);
-                if (joined.Success) users[joined.Groups[1].Value.Trim()] = joined.Groups[2].Value.Trim();
-                var switching = Regex.Match(line, @"\[Behaviour\]\s+Switching\s+(.+?)\s+to avatar\s+(.+)$", RegexOptions.IgnoreCase);
-                if (switching.Success) pending.Add((switching.Groups[1].Value.Trim(), switching.Groups[2].Value.Trim(), timestamp, room, location, 45));
-                var avatar = AvatarIdRegex.Match(line);
-                if (!avatar.Success || !line.Contains("Loading Avatar Data:", StringComparison.OrdinalIgnoreCase) || pending.Count == 0) continue;
-                var match = pending[^1];
-                pending.RemoveAt(pending.Count - 1);
-                if (!users.TryGetValue(match.Name, out var userId) || string.IsNullOrWhiteSpace(userId)) continue;
-                encounters.Add(new LocalAvatarEncounter(avatar.Value, match.AvatarName, userId, match.Name, match.Timestamp, match.Room, match.Location, WorldIdFromLocation(match.Location), Path.GetFileName(file)));
+                if (joined.Success)
+                {
+                    var name = joined.Groups["name"].Value.Trim();
+                    var id = joined.Groups["id"].Value.Trim();
+                    if (!string.IsNullOrWhiteSpace(id)) users[name] = id;
+                }
+                var switching = AvatarSwitchRegex.Match(line);
+                if (switching.Success) pending.Add(new HistoricalAvatarSwitch(switching.Groups["name"].Value.Trim(), switching.Groups["avatar"].Value.Trim(), timestamp, room, location, lineNumber));
+                var analysis = Regex.Match(line, @"Analysis complete.*?(?<id>avtr_[0-9a-fA-F-]{36})", RegexOptions.IgnoreCase);
+                if (analysis.Success) analyses.Add(new HistoricalAvatarId(analysis.Groups["id"].Value, lineNumber));
+                var download = Regex.Match(line, @"Download for avatar\s*\(Worn:(?<worn>[01])", RegexOptions.IgnoreCase);
+                if (download.Success) downloads.Add(new HistoricalAvatarDownload(download.Groups["worn"].Value == "0", lineNumber));
+                var unpack = Regex.Match(line, @"Unpacking Avatar\s*\((?<name>.+?)(?:\s+by\s+.*)?\)\s*$", RegexOptions.IgnoreCase);
+                if (!unpack.Success || downloads.Count == 0) continue;
+                var isRemote = downloads[^1].IsRemote;
+                downloads.RemoveAt(downloads.Count - 1);
+                if (!isRemote) continue;
+                var avatarName = unpack.Groups["name"].Value.Trim();
+                var pendingIndex = pending.FindLastIndex(x => string.Equals(x.AvatarName, avatarName, StringComparison.OrdinalIgnoreCase) && lineNumber - x.LineNumber <= 120);
+                if (pendingIndex < 0) pendingIndex = pending.FindLastIndex(x => lineNumber - x.LineNumber <= 120);
+                if (pendingIndex < 0) continue;
+                var switchItem = pending[pendingIndex];
+                pending.RemoveAt(pendingIndex);
+                var candidate = analyses.LastOrDefault(x => x.LineNumber >= switchItem.LineNumber && x.LineNumber <= lineNumber && lineNumber - x.LineNumber <= 120);
+                if (candidate is not null) analyses.Remove(candidate);
+                users.TryGetValue(switchItem.Name, out var userId);
+                encounters.Add(new LocalAvatarEncounter(candidate?.AvatarId ?? "", switchItem.AvatarName, userId ?? "", switchItem.Name, switchItem.Timestamp, switchItem.Room, switchItem.Location, WorldIdFromLocation(switchItem.Location), Path.GetFileName(file)));
             }
         }
         return encounters.OrderByDescending(x => x.Timestamp).Take(Math.Clamp(limit, 1, 5000)).ToList();
@@ -5747,11 +5685,12 @@ internal static class VrChatLogWatcher
             .Reverse()
             .ToList();
         var items = new List<WorldVisitHistoryItem>();
-        var currentLocation = "";
-        var room = "";
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in files)
         {
-            foreach (var line in ReadTailLines(file, 7000))
+            var currentLocation = "";
+            var room = "";
+            foreach (var line in ReadAllLines(file))
             {
                 var timestamp = line.Length >= 19 ? line[..19] : "";
                 var entering = line.IndexOf("[Behaviour] Entering Room:", StringComparison.OrdinalIgnoreCase);
@@ -5762,12 +5701,14 @@ internal static class VrChatLogWatcher
                     currentLocation = line[(joining + "[Behaviour] Joining ".Length)..].Trim();
                     if (LocationMatches(currentLocation, worldId, instanceId))
                     {
-                        items.Add(new WorldVisitHistoryItem(timestamp, "Joined", room, currentLocation, Path.GetFileName(file)));
+                        var key = $"{timestamp}|Joined|{currentLocation}";
+                        if (seen.Add(key)) items.Add(new WorldVisitHistoryItem(timestamp, "Joined", room, currentLocation, Path.GetFileName(file)));
                     }
                 }
                 if ((line.Contains("OnLeftRoom", StringComparison.OrdinalIgnoreCase) || line.Contains("Left Room", StringComparison.OrdinalIgnoreCase)) && LocationMatches(currentLocation, worldId, instanceId))
                 {
-                    items.Add(new WorldVisitHistoryItem(timestamp, "Left", room, currentLocation, Path.GetFileName(file)));
+                    var key = $"{timestamp}|Left|{currentLocation}";
+                    if (seen.Add(key)) items.Add(new WorldVisitHistoryItem(timestamp, "Left", room, currentLocation, Path.GetFileName(file)));
                 }
             }
         }
@@ -5783,10 +5724,10 @@ internal static class VrChatLogWatcher
             .Reverse()
             .ToList();
         var items = new List<LatestWorldLocationResult>();
-        var room = "";
         foreach (var file in files)
         {
-            foreach (var line in ReadTailLines(file, 7000))
+            var room = "";
+            foreach (var line in ReadAllLines(file))
             {
                 var timestamp = line.Length >= 19 ? line[..19] : "";
                 var entering = line.IndexOf("[Behaviour] Entering Room:", StringComparison.OrdinalIgnoreCase);
@@ -5837,6 +5778,22 @@ internal static class VrChatLogWatcher
                 while (lines.Count > maxLines) lines.Dequeue();
             }
             return lines.ToList();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static List<string> ReadAllLines(string path)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream, Encoding.UTF8, true);
+            var lines = new List<string>();
+            while (reader.ReadLine() is { } line) lines.Add(line);
+            return lines;
         }
         catch
         {
@@ -5894,6 +5851,11 @@ internal sealed class VrChatLiveLogWatcher : IDisposable
         public string Location = "";
         public Dictionary<string, string> UserIds { get; } = new(StringComparer.OrdinalIgnoreCase);
         public List<PendingAvatarSwitch> PendingAvatarSwitches { get; } = [];
+        public List<PendingAvatarDownload> PendingAvatarDownloads { get; } = [];
+        public List<LiveAvatarIdCandidate> AvatarIdCandidates { get; } = [];
+        public PendingAvatarSwitch? PendingLocalAvatar { get; set; }
+        public int LineNumber;
+        public int RoomClearCountdown;
 
         public void ResetParserState()
         {
@@ -5901,15 +5863,25 @@ internal sealed class VrChatLiveLogWatcher : IDisposable
             Location = "";
             UserIds.Clear();
             PendingAvatarSwitches.Clear();
+            PendingAvatarDownloads.Clear();
+            AvatarIdCandidates.Clear();
+            PendingLocalAvatar = null;
+            LineNumber = 0;
+            RoomClearCountdown = 0;
         }
     }
 
-    private sealed record PendingAvatarSwitch(string DisplayName, string AvatarName, string Timestamp, string RoomName, string Location, int Remaining);
+    private sealed record PendingAvatarSwitch(string DisplayName, string AvatarName, string Timestamp, string RoomName, string Location, int LineNumber, int Remaining);
+    private sealed record PendingAvatarDownload(bool IsRemote, int LineNumber);
+    private sealed record LiveAvatarIdCandidate(string AvatarId, int LineNumber);
 
     private static readonly Regex AvatarIdRegex = new(@"avtr_[0-9a-fA-F-]{36}", RegexOptions.Compiled);
     private static readonly Regex JoinedPlayerRegex = new(@"\[Behaviour\]\s+OnPlayerJoined\s+(?<name>.+?)(?:\s+\((?<id>usr_[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F]{12})\))?\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex LeftPlayerRegex = new(@"\[Behaviour\]\s+OnPlayerLeft\s+(?<name>.+?)(?:\s+\((?<id>usr_[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F]{12})\))?\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex AvatarSwitchRegex = new(@"\[Behaviour\]\s+Switching\s+(?<name>.+?)\s+to avatar\s+(?<avatar>.+?)\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex AvatarDownloadRegex = new(@"Download for avatar\s*\(Worn:(?<worn>[01])", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex AvatarUnpackRegex = new(@"Unpacking Avatar\s*\((?<name>.+?)(?:\s+by\s+.*)?\)\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex AvatarAnalysisRegex = new(@"Analysis complete.*?(?<id>avtr_[0-9a-fA-F-]{36})", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private readonly Action<VrChatLiveLogEvent> _onEvent;
     private readonly CancellationTokenSource _stop = new();
@@ -6025,20 +5997,20 @@ internal sealed class VrChatLiveLogWatcher : IDisposable
     {
         if (line.Length < 19) return;
         var timestamp = line[..19];
-
+        state.LineNumber++;
+        if (state.RoomClearCountdown > 0 && --state.RoomClearCountdown == 0)
+        {
+            state.RoomName = "";
+            state.Location = "";
+        }
         for (var i = state.PendingAvatarSwitches.Count - 1; i >= 0; i--)
         {
             var pending = state.PendingAvatarSwitches[i] with { Remaining = state.PendingAvatarSwitches[i].Remaining - 1 };
-            if (pending.Remaining <= 0)
-            {
-                state.PendingAvatarSwitches.RemoveAt(i);
-                Emit("avatar-changed", pending.Timestamp, pending.DisplayName, state.UserIds.GetValueOrDefault(pending.DisplayName, ""), pending.AvatarName, "", pending.RoomName, pending.Location, logFile);
-            }
-            else
-            {
-                state.PendingAvatarSwitches[i] = pending;
-            }
+            if (pending.Remaining <= 0) state.PendingAvatarSwitches.RemoveAt(i);
+            else state.PendingAvatarSwitches[i] = pending;
         }
+        state.PendingAvatarDownloads.RemoveAll(item => state.LineNumber - item.LineNumber > 24);
+        state.AvatarIdCandidates.RemoveAll(item => state.LineNumber - item.LineNumber > 140);
 
         var enteringIndex = line.IndexOf("[Behaviour] Entering Room:", StringComparison.OrdinalIgnoreCase);
         if (enteringIndex >= 0)
@@ -6050,14 +6022,14 @@ internal sealed class VrChatLiveLogWatcher : IDisposable
         if (joiningIndex >= 0 && !line.Contains("] Joining or Creating Room: ", StringComparison.OrdinalIgnoreCase) && !line.Contains("] Joining friend: ", StringComparison.OrdinalIgnoreCase))
         {
             state.Location = line[(joiningIndex + "[Behaviour] Joining ".Length)..].Trim();
+            state.RoomClearCountdown = 0;
             Emit("world-changed", timestamp, "", "", "", "", state.RoomName, state.Location, logFile);
         }
 
         if (line.Contains("[Behaviour] OnLeftRoom", StringComparison.OrdinalIgnoreCase) || line.Contains("[Behaviour] Successfully left room", StringComparison.OrdinalIgnoreCase))
         {
             Emit("world-left", timestamp, "", "", "", "", state.RoomName, state.Location, logFile);
-            state.RoomName = "";
-            state.Location = "";
+            state.RoomClearCountdown = 200;
         }
 
         var joined = JoinedPlayerRegex.Match(line);
@@ -6087,16 +6059,48 @@ internal sealed class VrChatLiveLogWatcher : IDisposable
                 timestamp,
                 state.RoomName,
                 state.Location,
+                state.LineNumber,
                 40));
+        }
+
+        var analysis = AvatarAnalysisRegex.Match(line);
+        if (analysis.Success) state.AvatarIdCandidates.Add(new LiveAvatarIdCandidate(analysis.Groups["id"].Value, state.LineNumber));
+
+        var download = AvatarDownloadRegex.Match(line);
+        if (download.Success) state.PendingAvatarDownloads.Add(new PendingAvatarDownload(download.Groups["worn"].Value == "0", state.LineNumber));
+
+        var unpack = AvatarUnpackRegex.Match(line);
+        if (unpack.Success && state.PendingAvatarDownloads.Count > 0)
+        {
+            var isRemote = state.PendingAvatarDownloads[^1].IsRemote;
+            state.PendingAvatarDownloads.RemoveAt(state.PendingAvatarDownloads.Count - 1);
+            var avatarName = unpack.Groups["name"].Value.Trim();
+            var pendingIndex = state.PendingAvatarSwitches.FindLastIndex(item => string.Equals(item.AvatarName, avatarName, StringComparison.OrdinalIgnoreCase) && state.LineNumber - item.LineNumber <= 120);
+            if (pendingIndex < 0) pendingIndex = state.PendingAvatarSwitches.FindLastIndex(item => state.LineNumber - item.LineNumber <= 120);
+            if (pendingIndex >= 0)
+            {
+                var pending = state.PendingAvatarSwitches[pendingIndex];
+                state.PendingAvatarSwitches.RemoveAt(pendingIndex);
+                if (isRemote)
+                {
+                    var candidate = state.AvatarIdCandidates.LastOrDefault(item => item.LineNumber >= pending.LineNumber && item.LineNumber <= state.LineNumber && state.LineNumber - item.LineNumber <= 120);
+                    if (candidate is not null) state.AvatarIdCandidates.Remove(candidate);
+                    Emit("avatar-changed", pending.Timestamp, pending.DisplayName, state.UserIds.GetValueOrDefault(pending.DisplayName, ""), pending.AvatarName, candidate?.AvatarId ?? "", pending.RoomName, pending.Location, logFile);
+                }
+                else
+                {
+                    state.PendingLocalAvatar = pending;
+                }
+            }
         }
 
         if (line.Contains("Loading Avatar Data:", StringComparison.OrdinalIgnoreCase))
         {
             var avatar = AvatarIdRegex.Match(line);
-            if (avatar.Success && state.PendingAvatarSwitches.Count > 0)
+            var pending = state.PendingLocalAvatar;
+            if (avatar.Success && pending is not null && state.LineNumber - pending.LineNumber <= 24)
             {
-                var pending = state.PendingAvatarSwitches[^1];
-                state.PendingAvatarSwitches.RemoveAt(state.PendingAvatarSwitches.Count - 1);
+                state.PendingLocalAvatar = null;
                 Emit("avatar-changed", pending.Timestamp, pending.DisplayName, state.UserIds.GetValueOrDefault(pending.DisplayName, ""), pending.AvatarName, avatar.Value, pending.RoomName, pending.Location, logFile);
             }
         }
@@ -8612,7 +8616,6 @@ internal sealed class AvatarDatabaseClient
                 var match = result.Results.FirstOrDefault(avatar =>
                     (!string.IsNullOrWhiteSpace(avatarId) && (string.Equals(avatar.AvatarId, avatarId, StringComparison.OrdinalIgnoreCase) || string.Equals(avatar.Id, avatarId, StringComparison.OrdinalIgnoreCase)))
                     || (!string.IsNullOrWhiteSpace(name) && string.Equals(avatar.Name, name, StringComparison.OrdinalIgnoreCase)));
-                match ??= result.Results.FirstOrDefault(avatar => !string.IsNullOrWhiteSpace(avatar.AuthorName) && !avatar.AuthorName.StartsWith("usr_", StringComparison.OrdinalIgnoreCase));
                 if (match is not null)
                 {
                     if (vrchat is not null) await HydrateVrChatResultsAsync(new List<AvatarInput> { match }, vrchat);
@@ -8676,16 +8679,8 @@ internal sealed class AvatarDatabaseClient
         {
             Directory.CreateDirectory(AppPaths.DatabaseDirectory);
             var path = PasDatabasePath();
-            PasDatabaseData? previous = null;
-            if (File.Exists(path) && new FileInfo(path).Length > 0)
-            {
-                try { previous = PasCache ?? ParsePasDatabase(await File.ReadAllBytesAsync(path), path); }
-                catch { }
-            }
             await DownloadPasDatabaseAsync(path);
             var current = ParsePasDatabase(await File.ReadAllBytesAsync(path), path);
-            AppDataStore.Shared.EnsurePasBrowseBaseline();
-            if (previous is not null) RecordPasNewAvatarIds(previous, current);
             PasCache = current;
             ClearAvatarDatabaseSearchCaches();
         }
@@ -9174,20 +9169,21 @@ internal sealed class AvatarDatabaseClient
 
         if (input.Sort is "nameAsc" or "authorAsc" or "createdDesc")
         {
-            var pasTracking = input.Sort == "createdDesc" ? AppDataStore.Shared.GetPasBrowseTracking() : null;
             var matchingIndexes = new List<int>();
-            for (var i = 0; i < database.FileAvatarCount; i++)
+            var start = input.Sort == "createdDesc" ? database.FileAvatarCount - 1 : 0;
+            var end = input.Sort == "createdDesc" ? -1 : database.FileAvatarCount;
+            var step = input.Sort == "createdDesc" ? -1 : 1;
+            for (var i = start; i != end; i += step)
             {
                 if ((i & 1023) == 0) cancellationToken.ThrowIfCancellationRequested();
                 if (PasRecordMatches(database, i, input)) matchingIndexes.Add(i);
             }
 
-            matchingIndexes.Sort((left, right) =>
+            if (input.Sort is "nameAsc" or "authorAsc") matchingIndexes.Sort((left, right) =>
             {
                 var comparison = input.Sort switch
                 {
                     "authorAsc" => string.Compare(PasAuthorName(database, left), PasAuthorName(database, right), StringComparison.OrdinalIgnoreCase),
-                    "createdDesc" => ParseDatabaseDate(PasBrowseAddedAt(database, right, pasTracking!)).CompareTo(ParseDatabaseDate(PasBrowseAddedAt(database, left, pasTracking!))),
                     _ => string.Compare(PasAvatarName(database, left), PasAvatarName(database, right), StringComparison.OrdinalIgnoreCase)
                 };
                 return comparison != 0
@@ -9244,57 +9240,29 @@ internal sealed class AvatarDatabaseClient
 
     private static AvatarDatabaseSearchResult QueryPasBrowsePage(PasDatabaseData database, int page, int limit, CancellationToken cancellationToken)
     {
-        var tracking = AppDataStore.Shared.GetPasBrowseTracking();
         var skip = (page - 1) * limit;
-        var targetCount = checked(skip + limit + 1);
-
-        // The imported catalogue is the stable baseline. When there are no
-        // locally recorded additions, its file order is already the browse
-        // order, so return the requested slice immediately instead of walking
-        // and sorting every row before the first page can be displayed.
-        if (tracking.Additions.Count == 0)
+        var firstIndex = database.FileAvatarCount - 1 - skip;
+        if (firstIndex < 0)
         {
-            var firstIndex = Math.Min(skip, database.FileAvatarCount);
-            var take = Math.Min(limit, Math.Max(0, database.FileAvatarCount - firstIndex));
-            var browseResults = Enumerable.Range(firstIndex, take)
-                .Select(index => ReadPasAvatar(database, index))
-                .ToList();
-            return new AvatarDatabaseSearchResult(browseResults, page, database.FileAvatarCount > skip + limit, DateTimeOffset.UtcNow);
+            return new AvatarDatabaseSearchResult([], page, false, DateTimeOffset.UtcNow);
         }
 
-        var additions = new List<int>();
-        var baseline = new List<int>(Math.Min(database.FileAvatarCount, targetCount));
-
-        // Browse mode has no search predicate or platform filter. Keep the
-        // normal database order for the shared baseline and only sort the small
-        // set of avatars explicitly recorded as added since the baseline.
-        // This avoids sorting the entire catalogue before the first page can be
-        // returned while preserving the meaning of "recently added".
-        for (var index = 0; index < database.FileAvatarCount; index++)
+        // PAS does not include per-avatar creation dates. For blank browsing,
+        // "Recently added" follows the observed catalogue order from the end
+        // toward the beginning, where new records are placed by the importer.
+        var take = Math.Min(limit, firstIndex + 1);
+        var browseResults = new List<AvatarInput>(take);
+        for (var offset = 0; offset < take; offset++)
         {
-            if ((index & 4095) == 0) cancellationToken.ThrowIfCancellationRequested();
-            var avatarId = DecodePasAvatarId(database, index);
-            if (tracking.Additions.ContainsKey(avatarId)) additions.Add(index);
-            else if (baseline.Count < targetCount) baseline.Add(index);
+            cancellationToken.ThrowIfCancellationRequested();
+            browseResults.Add(ReadPasAvatar(database, firstIndex - offset));
         }
 
-        additions.Sort((left, right) =>
-        {
-            var comparison = ParseDatabaseDate(PasBrowseAddedAt(database, right, tracking))
-                .CompareTo(ParseDatabaseDate(PasBrowseAddedAt(database, left, tracking)));
-            return comparison != 0
-                ? comparison
-                : string.Compare(PasAvatarName(database, left), PasAvatarName(database, right), StringComparison.OrdinalIgnoreCase);
-        });
-
-        var ordered = additions.Concat(baseline).ToList();
-        var results = ordered
-            .Skip(skip)
-            .Take(limit)
-            .Select(index => ReadPasAvatar(database, index))
-            .ToList();
-        var hasMore = database.FileAvatarCount > skip + limit;
-        return new AvatarDatabaseSearchResult(results, page, hasMore, DateTimeOffset.UtcNow);
+        return new AvatarDatabaseSearchResult(
+            browseResults,
+            page,
+            database.FileAvatarCount > skip + limit,
+            DateTimeOffset.UtcNow);
     }
 
     private static int CountPasDatabase(PasDatabaseData database, AvatarSearchInput input, CancellationToken cancellationToken = default)
@@ -9381,12 +9349,6 @@ internal sealed class AvatarDatabaseClient
 
     private static string PasTagText(PasDatabaseData database, int index) =>
         index < database.AvatarTags.Length ? ReverseText(database.AvatarTags[index]) : "";
-
-    private static string PasBrowseAddedAt(PasDatabaseData database, int index, PasBrowseTracking tracking)
-    {
-        var id = DecodePasAvatarId(database, index);
-        return tracking.Additions.TryGetValue(id, out var addedAt) ? addedAt : tracking.BaselineAt;
-    }
 
     private static PasUpdateStatus BuildPasUpdateStatus(PasDatabaseInfo? local, PasDatabaseInfo? remote, bool hasUpdate, string message = "")
     {
@@ -9545,7 +9507,6 @@ internal sealed class AvatarDatabaseClient
         try
         {
             PasCache = ParsePasDatabase(await File.ReadAllBytesAsync(path, cancellationToken), path, cancellationToken);
-            AppDataStore.Shared.EnsurePasBrowseBaseline();
             return PasCache;
         }
         catch
@@ -9553,7 +9514,6 @@ internal sealed class AvatarDatabaseClient
             cancellationToken.ThrowIfCancellationRequested();
             await DownloadPasDatabaseAsync(path, cancellationToken);
             PasCache = ParsePasDatabase(await File.ReadAllBytesAsync(path, cancellationToken), path, cancellationToken);
-            AppDataStore.Shared.EnsurePasBrowseBaseline();
             return PasCache;
         }
     }
@@ -9648,19 +9608,6 @@ internal sealed class AvatarDatabaseClient
         }
 
         return new PasDatabaseData(path, PlatformLabelFromPas(platform), fileDate, avatarCount, authorCount, fileAvatars, fileAuthors, dynamicBytes, avatarIds, authorIds, avatarNames, authorNames, avatarDescriptions, avatarTags);
-    }
-
-    private static void RecordPasNewAvatarIds(PasDatabaseData previous, PasDatabaseData current)
-    {
-        var oldIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        for (var i = 0; i < previous.FileAvatarCount; i++) oldIds.Add(DecodePasAvatarId(previous, i));
-        var additions = new List<string>();
-        for (var i = 0; i < current.FileAvatarCount; i++)
-        {
-            var id = DecodePasAvatarId(current, i);
-            if (!oldIds.Contains(id)) additions.Add(id);
-        }
-        AppDataStore.Shared.RecordPasAdditions(additions);
     }
 
     private static uint PasAuthorIndexMask(int fileAuthorCount)
@@ -9784,7 +9731,15 @@ internal sealed class AvatarDatabaseClient
     private static IEnumerable<string> AvatarDuplicateKeys(AvatarInput avatar)
     {
         var id = string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId;
-        if (!string.IsNullOrWhiteSpace(id)) yield return "id:" + id.Trim();
+        // A real VRChat avatar ID is the authoritative identity. Do not also
+        // emit visual/name fallbacks for identified records: two different
+        // avatars can legitimately share a name, author, or thumbnail, and
+        // those fallback keys would collapse valid search results.
+        if (!string.IsNullOrWhiteSpace(id))
+        {
+            yield return "id:" + id.Trim();
+            yield break;
+        }
 
         var name = NormalizeDuplicateText(avatar.Name);
         var image = NormalizeDuplicateImageUrl(string.IsNullOrWhiteSpace(avatar.ThumbnailImageUrl) ? avatar.ImageUrl : avatar.ThumbnailImageUrl);
@@ -9905,31 +9860,36 @@ internal sealed class AvatarDatabaseClient
         try
         {
             // AVTR.zip page numbers are gateway transport, not VRCNeph's result pages.
-            // Start with one supported request. Only when duplicates leave a short local
-            // page do we make one best-effort follow-up request; its failure must never
-            // make the otherwise valid search fail.
+            // Keep requesting transport pages until the local page is full after
+            // matching and deduplication. A later gateway failure must not discard
+            // the valid results already collected.
             var gatewayPage = await QueryAvtrZipAvatarsAsync(query, page, cancellationToken);
             var unique = new List<AvatarInput>();
             var byDuplicateKey = new Dictionary<string, AvatarInput>(StringComparer.OrdinalIgnoreCase);
             AddDedupedAvatarResults([gatewayPage.Result with { Results = gatewayPage.Result.Results.Where(x => AvatarMatchesSearch(x, input)).ToList() }], unique, byDuplicateKey);
-            if (fillPage && unique.Count < limit && gatewayPage.Result.HasMore)
+            var gatewayHasMore = gatewayPage.Result.HasMore;
+            var nextGatewayPage = page + 1;
+            while (fillPage && unique.Count < limit && gatewayHasMore)
             {
                 try
                 {
-                    var followUp = await QueryAvtrZipAvatarsAsync(query, page + 1, cancellationToken);
+                    var followUp = await QueryAvtrZipAvatarsAsync(query, nextGatewayPage++, cancellationToken);
                     AddDedupedAvatarResults([followUp.Result with { Results = followUp.Result.Results.Where(x => AvatarMatchesSearch(x, input)).ToList() }], unique, byDuplicateKey);
+                    gatewayHasMore = followUp.Result.HasMore;
+                    if (followUp.Result.Results.Count == 0) break;
                 }
                 catch
                 {
-                    // The original page is still a usable answer. The gateway can reject
-                    // later transport pages even while its first page succeeds.
+                    // The collected results are still a usable answer. The gateway can
+                    // reject later transport pages even while the first page succeeds.
+                    break;
                 }
             }
 
             var results = unique.Take(limit).ToList();
             cancellationToken.ThrowIfCancellationRequested();
             if (vrchat is not null) await HydrateVrChatResultsAsync(results, vrchat, cancellationToken);
-            var result = gatewayPage.Result with { Results = results, Page = page, HasMore = gatewayPage.Result.HasMore || unique.Count > limit };
+            var result = gatewayPage.Result with { Results = results, Page = page, HasMore = gatewayHasMore || unique.Count > limit };
             Cache[cacheKey] = result;
             return result;
         }
@@ -11629,7 +11589,7 @@ internal sealed class GroupInput { public string Id { get; set; } = ""; public s
 internal sealed class GroupLockInput { public string Id { get; set; } = ""; public bool ReorderLocked { get; set; } = true; }
 internal sealed class CopyGroupToExistingInput { public string Id { get; set; } = ""; public string TargetGroupId { get; set; } = ""; public bool Replace { get; set; } }
 internal class AvatarInput { public string Id { get; set; } = ""; public string GroupId { get; set; } = ""; public string AvatarId { get; set; } = ""; public string Name { get; set; } = ""; public string Description { get; set; } = ""; public string AuthorId { get; set; } = ""; public string AuthorName { get; set; } = ""; public string ImageUrl { get; set; } = ""; public string ThumbnailImageUrl { get; set; } = ""; public string ImageOverridePath { get; set; } = ""; public string ReleaseStatus { get; set; } = ""; public string Version { get; set; } = ""; public string Platforms { get; set; } = ""; public string Tags { get; set; } = ""; public string SourceUrl { get; set; } = ""; public string Notes { get; set; } = ""; public string RawJson { get; set; } = ""; public string Source { get; set; } = ""; public string RemoteCreatedAt { get; set; } = ""; public string RemoteUpdatedAt { get; set; } = ""; public string RemoteFavoriteId { get; set; } = ""; }
-internal sealed record AvatarEquipNotice(string Name, string AuthorName, string ThumbnailImageUrl, string ReleaseStatus, string Platforms, string ThemeColor, string PanelColor, int PanelOpacity);
+internal sealed record AvatarEquipNotice(string AvatarId, string Name, string AuthorName, string ThumbnailImageUrl, string ImageUrl, string ReleaseStatus, string Platforms, string ThemeColor, string PanelColor, int PanelOpacity);
 internal sealed record OverlayHostState(string Mode, AvatarEquipNotice? Notice = null, string Token = "", DateTimeOffset? ExpiresAt = null)
 {
     public static OverlayHostState Hidden { get; } = new("hidden");
@@ -11669,6 +11629,7 @@ internal sealed class IdsInput { public List<long> Ids { get; set; } = []; }
 internal sealed class BackupRestoreInput { public string Path { get; set; } = ""; public string Mode { get; set; } = ""; }
 internal sealed record OverlayMoveInput(int Dx = 0, int Dy = 0);
 internal sealed record OverlayResizeInput(int Width = 500, int Height = 720);
+internal sealed record OverlayNoticeReadyInput(string Token = "");
 internal sealed class ExportJsonInput { public string FileName { get; set; } = ""; public JsonElement Payload { get; set; } }
 internal sealed class MoveAvatarInput { public string AvatarId { get; set; } = ""; public string GroupId { get; set; } = ""; }
 internal sealed class ReorderInput { public string Id { get; set; } = ""; public string GroupId { get; set; } = ""; public int Position { get; set; } = 1; }
@@ -11717,7 +11678,6 @@ internal sealed record PasUpdateStatus(bool HasLocalFile, bool HasUpdate, string
 internal sealed record AvtrZipSearchPage(AvatarDatabaseSearchResult Result, int TotalCount);
 internal sealed record AvtrZipRandomBatch(List<AvatarInput> Results, int TotalCount, uint Seed);
 internal sealed record PasDatabaseData(string Path, string PlatformLabel, string FileDate, int AvatarCount, int AuthorCount, int FileAvatarCount, int FileAuthorCount, byte[] DynamicBytes, byte[] AvatarIds, uint[] AuthorIds, string[] AvatarNames, string[] AuthorNames, string[] AvatarDescriptions, string[] AvatarTags);
-internal sealed record PasBrowseTracking(string BaselineAt, Dictionary<string, string> Additions);
 internal sealed record VrcxFeedAvatarRow(string CreatedAt, string UserId, string DisplayName, string OwnerId, string AvatarName, string CurrentImageUrl, string CurrentThumbnailImageUrl);
 internal sealed record PasDatabaseInfo(string Location, string FileDate, long ContentLength, DateTimeOffset? LastModifiedUtc, string ETag, int AvatarCount, int AuthorCount, int FileAvatarCount, int FileAuthorCount, bool HeaderVerified);
 internal sealed record LoginInput(string Username, string Password);
