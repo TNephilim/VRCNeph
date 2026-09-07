@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VRCNeph Overlay</title>
+  <link rel="stylesheet" href="ui-shared.css">
   <link rel="stylesheet" href="overlay.css">
 </head>
 <body>
@@ -38,7 +39,16 @@
     </section>
     <section id="content" class="overlay-list" aria-live="polite"></section>
     <section id="detailPanels" class="detail-panels" aria-label="Overlay detail panels"></section>
-    <div id="resizeHandle" class="resize-handle" title="Resize overlay"></div>
+    <div id="resizeHandles" class="resize-handles" aria-hidden="true">
+      <div class="resize-zone resize-n" data-resize-edge="n"></div>
+      <div class="resize-zone resize-ne" data-resize-edge="ne"></div>
+      <div class="resize-zone resize-e" data-resize-edge="e"></div>
+      <div class="resize-zone resize-se" data-resize-edge="se"></div>
+      <div class="resize-zone resize-s" data-resize-edge="s"></div>
+      <div class="resize-zone resize-sw" data-resize-edge="sw"></div>
+      <div class="resize-zone resize-w" data-resize-edge="w"></div>
+      <div class="resize-zone resize-nw" data-resize-edge="nw"></div>
+    </div>
   </main>
 
   <dialog id="confirmDialog" class="overlay-dialog">

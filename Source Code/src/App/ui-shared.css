@@ -1,0 +1,9 @@
+:root {
+  /* Shared semantic text and weight roles used by both the main app and overlay. */
+  --ui-text-primary: #f1f5f2;
+  --ui-text-secondary: #c5cec8;
+  --ui-text-tertiary: #a9b4ad;
+  --ui-weight-normal: 500;
+  --ui-weight-medium: 600;
+  --ui-weight-strong: 700;
+}

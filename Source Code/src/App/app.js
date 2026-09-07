@@ -774,6 +774,14 @@ async function fetchAvatarDetailsCached(avatarId = "") {
     return null;
   }
 }
+async function resolveEquipNoticeAvatar(avatar = {}) {
+  const base = avatar && typeof avatar === "object" ? { ...avatar } : {};
+  // The normal card may already have a local override or a usable remote URL.
+  // Only hydrate when the selected record has no displayable image at all.
+  if (avatarDisplayImage(base) || !avatarPublicId(base)) return base;
+  const details = await fetchAvatarDetailsCached(avatarPublicId(base));
+  return details ? mergeBetterAvatarDetails(base, details) : base;
+}
 function syncCurrentAvatarIntoOpenProfile() {
   if (state.social.selectedType !== "profile") return;
   state.social.selectedItem = {
@@ -3342,10 +3350,11 @@ async function equipRandomDatabaseAvatar({ quiet = false, showEquipNotice = fals
   }
   try {
     const avatar = await fetchRandomDatabaseAvatar();
-    openAvatarDialog(avatar);
-    if (showEquipNotice) void api("overlayEquipNotice", avatar).catch(() => {});
-    await equipAvatar(avatar.avatarId || avatar.id, avatar);
-    return avatar;
+    const selectedAvatar = showEquipNotice ? await resolveEquipNoticeAvatar(avatar) : avatar;
+    openAvatarDialog(selectedAvatar);
+    if (showEquipNotice) void api("overlayEquipNotice", selectedAvatar).catch(() => {});
+    await equipAvatar(selectedAvatar.avatarId || selectedAvatar.id, selectedAvatar);
+    return selectedAvatar;
   } catch (e) {
     if (!quiet) {
       const message = e?.message || String(e || "Random equip failed.");
@@ -3566,10 +3575,11 @@ async function equipRandomFavoriteAvatar({ quiet = false, showEquipNotice = fals
   try {
     const avatar = randomFavoriteAvatar();
     if (!avatar) throw new Error("No favorite avatars are available to equip.");
-    openAvatarDialog(avatar);
-    if (showEquipNotice) void api("overlayEquipNotice", avatar).catch(() => {});
-    await equipAvatar(avatar.avatarId || avatar.id, avatar);
-    return avatar;
+    const selectedAvatar = showEquipNotice ? await resolveEquipNoticeAvatar(avatar) : avatar;
+    openAvatarDialog(selectedAvatar);
+    if (showEquipNotice) void api("overlayEquipNotice", selectedAvatar).catch(() => {});
+    await equipAvatar(selectedAvatar.avatarId || selectedAvatar.id, selectedAvatar);
+    return selectedAvatar;
   } catch (e) {
     if (!quiet) {
       const message = e?.message || String(e || "Random favorite equip failed.");

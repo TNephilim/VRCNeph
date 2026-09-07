@@ -1280,6 +1280,7 @@ internal static class Program
             avatar.AuthorName?.Trim() ?? "",
             avatar.ThumbnailImageUrl?.Trim() ?? "",
             avatar.ImageUrl?.Trim() ?? "",
+            avatar.ImageOverridePath?.Trim() ?? "",
             avatar.ReleaseStatus?.Trim() ?? "",
             avatar.Platforms?.Trim() ?? "",
             settings.ThemeColor,
@@ -2001,13 +2002,28 @@ internal static class Program
     {
         if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return new { ok = false };
         if (!GetWindowRect(OverlayWindowHandle, out var rect)) return new { ok = false };
-        var width = Math.Clamp(input.Width, 360, 900);
-        var height = Math.Clamp(input.Height, 420, 1000);
+        var currentWidth = rect.Right - rect.Left;
+        var currentHeight = rect.Bottom - rect.Top;
+        var edges = (input.Edges ?? "").Trim().ToLowerInvariant();
+        var hasDelta = input.Dx != 0 || input.Dy != 0;
+        var leftEdge = edges.Contains('w');
+        var topEdge = edges.Contains('n');
+        var rightEdge = edges.Contains('e');
+        var bottomEdge = edges.Contains('s');
+        var width = hasDelta
+            ? Math.Clamp(currentWidth + (leftEdge ? -input.Dx : rightEdge ? input.Dx : 0), 360, 900)
+            : Math.Clamp(input.Width, 360, 900);
+        var height = hasDelta
+            ? Math.Clamp(currentHeight + (topEdge ? -input.Dy : bottomEdge ? input.Dy : 0), 420, 1000)
+            : Math.Clamp(input.Height, 420, 1000);
+        var x = hasDelta && leftEdge ? rect.Left + currentWidth - width : rect.Left;
+        var y = hasDelta && topEdge ? rect.Top + currentHeight - height : rect.Top;
         OverlayWindow?.SetSize(new Size(width, height));
-        SetWindowPos(OverlayWindowHandle, HwndTopmost, rect.Left, rect.Top, width, height, SwpNoActivate | SwpShowWindow);
+        if (hasDelta && (leftEdge || topEdge)) OverlayWindow?.SetLocation(new Point(x, y));
+        SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, width, height, SwpNoActivate | SwpShowWindow);
         ApplyOverlayWindowRegion(width, height, OverlayHostCornerRadius);
-        SaveOverlayBounds(rect.Left, rect.Top, width, height);
-        return new { ok = true, width, height };
+        SaveOverlayBounds(x, y, width, height);
+        return new { ok = true, x, y, width, height };
     }
 
     private static void ApplyOverlayWindowRegion(int width, int height, int radius)
@@ -4533,7 +4549,7 @@ internal sealed class AvatarStore
 
 internal sealed class AppSettingsStore
 {
-    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, true, "", true, "F8", "Ctrl+R", "Ctrl+Alt+R", "", "avatars", 85, 100, 8, 16, 360, 519, 17);
+    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, true, "", true, "F8", "Ctrl+R", "Ctrl+Alt+R", "", "avatars", 85, 100, 8, 8, 360, 519, 18);
     private readonly string _settingsPath = AppPaths.SettingsPath;
     public AppSettings Get()
     {
@@ -4572,9 +4588,10 @@ internal sealed class AppSettingsStore
         var databaseRandomVrBinding = SteamVrControllerPoller.NormalizeBinding(s.DatabaseRandomVrBinding);
         var overlayX = s.SchemaVersion < 11 && s.OverlayX == 0 ? DefaultSettings.OverlayX : Math.Clamp(s.OverlayX, -10000, 10000);
         var overlayY = s.SchemaVersion < 11 && s.OverlayY == 0 ? DefaultSettings.OverlayY : Math.Clamp(s.OverlayY, -10000, 10000);
+        if (s.SchemaVersion < 18 && overlayX == DefaultSettings.OverlayX && overlayY == 16) overlayY = DefaultSettings.OverlayY;
         var overlayWidth = s.SchemaVersion < 11 && s.OverlayWidth == 0 ? DefaultSettings.OverlayWidth : Math.Clamp(s.OverlayWidth, 360, 900);
         var overlayHeight = s.SchemaVersion < 11 && s.OverlayHeight == 0 ? DefaultSettings.OverlayHeight : Math.Clamp(s.OverlayHeight, 420, 1000);
-        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BlurEnabled, s.BackgroundEffect ?? "", s.OverlayEnabled, hotkey, databaseRandomHotkey, favoriteRandomHotkey, databaseRandomVrBinding, overlayPanel, overlayOpacity, overlayScale, overlayX, overlayY, overlayWidth, overlayHeight, 17);
+        return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BlurEnabled, s.BackgroundEffect ?? "", s.OverlayEnabled, hotkey, databaseRandomHotkey, favoriteRandomHotkey, databaseRandomVrBinding, overlayPanel, overlayOpacity, overlayScale, overlayX, overlayY, overlayWidth, overlayHeight, 18);
     }
 }
 
@@ -11589,7 +11606,7 @@ internal sealed class GroupInput { public string Id { get; set; } = ""; public s
 internal sealed class GroupLockInput { public string Id { get; set; } = ""; public bool ReorderLocked { get; set; } = true; }
 internal sealed class CopyGroupToExistingInput { public string Id { get; set; } = ""; public string TargetGroupId { get; set; } = ""; public bool Replace { get; set; } }
 internal class AvatarInput { public string Id { get; set; } = ""; public string GroupId { get; set; } = ""; public string AvatarId { get; set; } = ""; public string Name { get; set; } = ""; public string Description { get; set; } = ""; public string AuthorId { get; set; } = ""; public string AuthorName { get; set; } = ""; public string ImageUrl { get; set; } = ""; public string ThumbnailImageUrl { get; set; } = ""; public string ImageOverridePath { get; set; } = ""; public string ReleaseStatus { get; set; } = ""; public string Version { get; set; } = ""; public string Platforms { get; set; } = ""; public string Tags { get; set; } = ""; public string SourceUrl { get; set; } = ""; public string Notes { get; set; } = ""; public string RawJson { get; set; } = ""; public string Source { get; set; } = ""; public string RemoteCreatedAt { get; set; } = ""; public string RemoteUpdatedAt { get; set; } = ""; public string RemoteFavoriteId { get; set; } = ""; }
-internal sealed record AvatarEquipNotice(string AvatarId, string Name, string AuthorName, string ThumbnailImageUrl, string ImageUrl, string ReleaseStatus, string Platforms, string ThemeColor, string PanelColor, int PanelOpacity);
+internal sealed record AvatarEquipNotice(string AvatarId, string Name, string AuthorName, string ThumbnailImageUrl, string ImageUrl, string ImageOverridePath, string ReleaseStatus, string Platforms, string ThemeColor, string PanelColor, int PanelOpacity);
 internal sealed record OverlayHostState(string Mode, AvatarEquipNotice? Notice = null, string Token = "", DateTimeOffset? ExpiresAt = null)
 {
     public static OverlayHostState Hidden { get; } = new("hidden");
@@ -11628,7 +11645,7 @@ internal sealed class IdInput { public string Id { get; set; } = ""; public stri
 internal sealed class IdsInput { public List<long> Ids { get; set; } = []; }
 internal sealed class BackupRestoreInput { public string Path { get; set; } = ""; public string Mode { get; set; } = ""; }
 internal sealed record OverlayMoveInput(int Dx = 0, int Dy = 0);
-internal sealed record OverlayResizeInput(int Width = 500, int Height = 720);
+internal sealed record OverlayResizeInput(int Width = 500, int Height = 720, int Dx = 0, int Dy = 0, string Edges = "se");
 internal sealed record OverlayNoticeReadyInput(string Token = "");
 internal sealed class ExportJsonInput { public string FileName { get; set; } = ""; public JsonElement Payload { get; set; } }
 internal sealed class MoveAvatarInput { public string AvatarId { get; set; } = ""; public string GroupId { get; set; } = ""; }
@@ -11664,7 +11681,7 @@ internal sealed record DiagnosticsResult(List<DiagnosticItem> Items);
 internal sealed record ExportResult(string Path);
 internal sealed record GroupClearResult(LibraryData Library, int Removed, string BackupPath);
 internal sealed record SteamVrControllerBindingCapture(string Binding, string Display);
-internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, bool BlurEnabled = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayHotkey = "F8", string DatabaseRandomHotkey = "Ctrl+R", string FavoriteRandomHotkey = "Ctrl+Alt+R", string DatabaseRandomVrBinding = "", string OverlayDefaultPanel = "avatars", int OverlayOpacity = 85, int OverlayScale = 100, int OverlayX = 8, int OverlayY = 16, int OverlayWidth = 360, int OverlayHeight = 519, int SchemaVersion = 17);
+internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, bool BlurEnabled = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayHotkey = "F8", string DatabaseRandomHotkey = "Ctrl+R", string FavoriteRandomHotkey = "Ctrl+Alt+R", string DatabaseRandomVrBinding = "", string OverlayDefaultPanel = "avatars", int OverlayOpacity = 85, int OverlayScale = 100, int OverlayX = 8, int OverlayY = 8, int OverlayWidth = 360, int OverlayHeight = 519, int SchemaVersion = 18);
 internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx", string SearchMode = "phrase", List<string>? ExcludedAvatarIds = null, string Sort = "updatedDesc", bool ExactAuthorName = false);
 internal sealed record AvatarListResult(List<AvatarInput> Avatars);
 internal sealed record AvatarImageResolveInput(string AvatarId = "", string ImageUrl = "", string Name = "", string UserId = "", string DisplayName = "");

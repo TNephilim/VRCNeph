@@ -243,8 +243,17 @@ function resetEquipNoticeImage() {
   current.replaceWith(placeholder);
 }
 
+function equipNoticeImageSource(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^(?:https?|data|blob|file):/i.test(raw)) return raw;
+  if (/^[A-Za-z]:[\\/]/.test(raw)) return `file:///${encodeURI(raw.replace(/\\/g, "/"))}`;
+  if (/^\\\\/.test(raw)) return `file:${encodeURI(raw.replace(/\\/g, "/"))}`;
+  return raw;
+}
+
 function preloadEquipNoticeImage(urls, renderToken) {
-  const candidates = [...new Set((urls || []).map((url) => String(url || "").trim()).filter(Boolean))];
+  const candidates = [...new Set((urls || []).map(equipNoticeImageSource).filter(Boolean))];
   if (!candidates.length) return Promise.resolve(null);
 
   return new Promise((resolve) => {
@@ -326,7 +335,7 @@ async function showEquipNotice(notice = {}, hostToken = "") {
 
   const name = String(notice.name || "Avatar equipped").trim() || "Avatar equipped";
   const author = String(notice.authorName || "").trim();
-  const image = await preloadEquipNoticeImage([notice.thumbnailImageUrl, notice.imageUrl], renderToken);
+  const image = await preloadEquipNoticeImage([notice.imageOverridePath, notice.thumbnailImageUrl, notice.imageUrl], renderToken);
   if (renderToken !== equipNoticeImageToken) return;
   if (hostToken && overlayHostToken && hostToken !== overlayHostToken) return;
 
@@ -1303,6 +1312,7 @@ function render() {
   const searchable = OVERLAY_PANELS.includes(state.panel);
   const panelControls = panelControlsHtml(state.panel);
   $("overlayActions").hidden = !searchable;
+  $("overlayActions").classList.toggle("no-controls", !panelControls);
   $("overlaySearchInput").hidden = !searchable;
   $("overlaySearchInput").value = state.filters[state.panel] || "";
   $("overlaySearchInput").placeholder = state.panel === "friends" ? "Search friends" : "Search avatars";
@@ -1353,7 +1363,6 @@ function applySnapshotSettings() {
   const appPanel = mixRgb(appBase, panel, 0.16);
   const appPanel2 = mixRgb(appBase, panel, 0.28);
   const line = mixRgb(appBase, panel, 0.48);
-  const muted = mixRgb({ r: 255, g: 255, b: 255 }, panel, 0.34);
   document.documentElement.style.setProperty("--overlay-opacity", String(opacity));
   document.documentElement.style.setProperty("--overlay-scale", String(scale));
   document.documentElement.style.setProperty("--overlay-accent", settings.themeColor || "#303735");
@@ -1362,7 +1371,6 @@ function applySnapshotSettings() {
   document.documentElement.style.setProperty("--overlay-bg-soft", rgba(appPanel, opacity * 0.72));
   document.documentElement.style.setProperty("--overlay-line", rgba(line, 0.82));
   document.documentElement.style.setProperty("--overlay-line-strong", rgba(theme, 0.72));
-  document.documentElement.style.setProperty("--overlay-muted", rgba(muted, 1));
   document.documentElement.style.setProperty("--overlay-accent-soft", rgba(theme, opacity * 0.32));
   document.documentElement.style.setProperty("--overlay-accent-glow", rgba(theme, opacity * 0.18));
   if (!applySnapshotSettings.didChooseDefault && settings.overlayDefaultPanel) {
@@ -1375,7 +1383,7 @@ function applySnapshotSettings() {
 
 function installWindowControls() {
   const dragHandle = $("dragHandle");
-  const resizeHandle = $("resizeHandle");
+  const resizeZones = [...document.querySelectorAll(".resize-zone")];
   let drag = null;
   let resize = null;
   let lastMove = 0;
@@ -1400,22 +1408,29 @@ function installWindowControls() {
   dragHandle.addEventListener("pointerup", () => { drag = null; });
   dragHandle.addEventListener("pointercancel", () => { drag = null; });
 
-  resizeHandle.addEventListener("pointerdown", (event) => {
-    resize = { x: event.screenX, y: event.screenY, width: window.innerWidth, height: window.innerHeight };
-    resizeHandle.setPointerCapture(event.pointerId);
-    event.preventDefault();
+  resizeZones.forEach((zone) => {
+    zone.addEventListener("pointerdown", (event) => {
+      resize = { x: event.screenX, y: event.screenY, edges: zone.dataset.resizeEdge || "se" };
+      zone.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    zone.addEventListener("pointermove", (event) => {
+      if (!resize) return;
+      const now = performance.now();
+      if (now - lastMove < 16) return;
+      const dx = Math.round(event.screenX - resize.x);
+      const dy = Math.round(event.screenY - resize.y);
+      if (dx || dy) {
+        send("overlayResizeWindow", { edges: resize.edges, dx, dy });
+        resize = { ...resize, x: event.screenX, y: event.screenY };
+        lastMove = now;
+      }
+      event.preventDefault();
+    });
+    zone.addEventListener("pointerup", () => { resize = null; });
+    zone.addEventListener("pointercancel", () => { resize = null; });
   });
-  resizeHandle.addEventListener("pointermove", (event) => {
-    if (!resize) return;
-    const now = performance.now();
-    if (now - lastMove < 16) return;
-    const width = Math.round(resize.width + event.screenX - resize.x);
-    const height = Math.round(resize.height + event.screenY - resize.y);
-    send("overlayResizeWindow", { width, height });
-    lastMove = now;
-  });
-  resizeHandle.addEventListener("pointerup", () => { resize = null; });
-  resizeHandle.addEventListener("pointercancel", () => { resize = null; });
 }
 
 function confirmOverlay({ title = "Confirm", message = "", confirmLabel = "Confirm", danger = true } = {}) {
