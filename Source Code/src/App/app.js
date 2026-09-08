@@ -4532,6 +4532,10 @@ function renderSyncQueueStatus() {
 }
 function renderSocialSidebar() {
   if (state.activePage !== "friends" && state.activePage !== "worlds" && state.activePage !== "messages" && state.activePage !== "notifications") return;
+  // A portalized dropdown may be outside the sidebar when a live friend update
+  // causes this list to render again. Restore it before replacing the list so
+  // an orphaned open menu cannot steal the next dropdown interaction.
+  hideSortMenu("friendFavoriteGroupMenu", "friendFavoriteGroupMenuBtn");
   const list = $("groupList");
   const title = document.querySelector(".groups-header h2");
   document.querySelector(".groups-header-actions").hidden = state.activePage !== "worlds";
@@ -4668,6 +4672,7 @@ function renderSocialSidebar() {
   }));
 }
 function toggleSortMenu(event, selectId = "sortSelect", menuId = "sortMenu", buttonId = "sortMenuBtn", onChange = resetAvatarPageAndRender) {
+  event.preventDefault();
   event.stopPropagation();
   if (!$(menuId).hidden) return hideSortMenu(menuId, buttonId);
   closeOtherDropdownMenus(menuId);
@@ -10194,11 +10199,11 @@ function selectedFavoriteFriendGroup(groups = favoriteFriendGroupsModel(state.so
   return group;
 }
 function favoriteFriendGroupSelectHtml(groups, selectedKey) {
-  return `<label class="social-sidebar-select-label"><span>Favorite group</span><div class="sort-control social-sidebar-group-control">
+  return `<div class="social-sidebar-select-field"><span>Favorite group</span><div class="sort-control social-sidebar-group-control">
     <button id="friendFavoriteGroupMenuBtn" type="button" aria-expanded="false">${dropdownLabelHtml(`${groups.find((group) => group.key === selectedKey)?.label || "All Favorite Friends"} (${groups.find((group) => group.key === selectedKey)?.friends?.length || 0})`)}</button>
     <div id="friendFavoriteGroupMenu" class="sort-menu" hidden></div>
     <select id="friendFavoriteGroupSelect" hidden data-friend-favorite-group-select>${groups.map((group) => `<option value="${escapeAttr(group.key)}" ${group.key === selectedKey ? "selected" : ""}>${escapeHtml(group.label)} (${group.friends.length})</option>`).join("")}</select>
-  </div></label>`;
+  </div></div>`;
 }
 function favoriteFriendsSectionHtml(favorites = []) {
   if (!favorites.length) return "";
@@ -14394,6 +14399,18 @@ $("settingsLogFilterMenuBtn").addEventListener("click", (event) => toggleSortMen
 $("settingsLogFilterMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "settingsLogFilterSelect", "settingsLogFilterMenuBtn", () => { state.settingsLogFilter = $("settingsLogFilterSelect").value; loadSettingsLogs(); }), { passive: false });
 document.addEventListener("click", hideContextMenu);
 document.addEventListener("click", hideNotificationPopover);
+// Dismiss open custom dropdowns on the first outside press, before any page
+// handler can consume the later click event. This also handles portalized
+// menus that are no longer descendants of their original sidebar row.
+document.addEventListener("pointerdown", (event) => {
+  const target = event.target;
+  document.querySelectorAll(".sort-menu:not([hidden])").forEach((menu) => {
+    const buttonId = menu.id.replace(/Menu$/, "MenuBtn");
+    const button = $(buttonId);
+    if (!button || target?.closest?.(`#${menu.id}, #${buttonId}`)) return;
+    hideSortMenu(menu.id, buttonId);
+  });
+}, { capture: true });
 $("playerHistoryDialog").addEventListener("pointerdown", handlePlayerHistoryDialogPointerDown);
 $("playerHistoryDialog").addEventListener("close", () => document.body.classList.remove("group-details-popup-open"));
 document.addEventListener("pointerdown", handleGroupDetailsPopupPointerDown, { capture: true });

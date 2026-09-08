@@ -76,6 +76,8 @@ button { font: inherit; }
 }
 
 .drag-handle {
+  position: relative;
+  z-index: 130;
   height: 8px;
   display: flex;
   align-items: center;
@@ -85,6 +87,8 @@ button { font: inherit; }
   border-radius: 6px;
   background: rgba(255, 255, 255, .035);
   cursor: move;
+  touch-action: none;
+  user-select: none;
 }
 .drag-handle span {
   width: 3px;
@@ -96,7 +100,7 @@ button { font: inherit; }
 .resize-handles {
   position: absolute;
   inset: 0;
-  z-index: 120;
+  z-index: 5;
   pointer-events: none;
 }
 .resize-zone {
@@ -107,7 +111,7 @@ button { font: inherit; }
 .resize-s {
   left: 14px;
   right: 14px;
-  height: 7px;
+  height: 4px;
   cursor: ns-resize;
 }
 .resize-n { top: 0; }

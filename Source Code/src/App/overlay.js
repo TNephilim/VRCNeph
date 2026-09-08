@@ -1386,51 +1386,82 @@ function installWindowControls() {
   const resizeZones = [...document.querySelectorAll(".resize-zone")];
   let drag = null;
   let resize = null;
-  let lastMove = 0;
-
-  dragHandle.addEventListener("pointerdown", (event) => {
-    drag = { x: event.screenX, y: event.screenY };
-    dragHandle.setPointerCapture(event.pointerId);
-    event.preventDefault();
-  });
-  dragHandle.addEventListener("pointermove", (event) => {
-    if (!drag) return;
+  let lastMotionAt = 0;
+  const motionInterval = 12;
+  const canSendMotion = () => {
     const now = performance.now();
-    if (now - lastMove < 16) return;
+    if (now - lastMotionAt < motionInterval) return false;
+    lastMotionAt = now;
+    return true;
+  };
+  const finishDrag = (event) => {
+    if (!drag || (event.pointerId != null && event.pointerId !== drag.pointerId)) return;
     const dx = Math.round(event.screenX - drag.x);
     const dy = Math.round(event.screenY - drag.y);
-    if (dx || dy) {
-      send("overlayMoveWindow", { dx, dy });
-      drag = { x: event.screenX, y: event.screenY };
-      lastMove = now;
-    }
+    if ((dx || dy) && canSendMotion()) send("overlayMoveWindow", { dx, dy });
+    drag = null;
+  };
+  const finishResize = (event) => {
+    if (!resize || (event.pointerId != null && event.pointerId !== resize.pointerId)) return;
+    const dx = Math.round(event.screenX - resize.x);
+    const dy = Math.round(event.screenY - resize.y);
+    if ((dx || dy) && canSendMotion()) send("overlayResizeWindow", { edges: resize.edges, dx, dy });
+    resize = null;
+  };
+  const finishPointer = (event) => {
+    finishDrag(event);
+    finishResize(event);
+  };
+
+  dragHandle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    resize = null;
+    drag = { pointerId: event.pointerId, x: event.screenX, y: event.screenY };
+    lastMotionAt = 0;
+    try { dragHandle.setPointerCapture(event.pointerId); } catch { }
+    event.preventDefault();
+    event.stopPropagation();
   });
-  dragHandle.addEventListener("pointerup", () => { drag = null; });
-  dragHandle.addEventListener("pointercancel", () => { drag = null; });
 
   resizeZones.forEach((zone) => {
     zone.addEventListener("pointerdown", (event) => {
-      resize = { x: event.screenX, y: event.screenY, edges: zone.dataset.resizeEdge || "se" };
-      zone.setPointerCapture(event.pointerId);
+      if (event.button !== 0) return;
+      drag = null;
+      resize = { pointerId: event.pointerId, x: event.screenX, y: event.screenY, edges: zone.dataset.resizeEdge || "se" };
+      lastMotionAt = 0;
+      try { zone.setPointerCapture(event.pointerId); } catch { }
       event.preventDefault();
       event.stopPropagation();
     });
-    zone.addEventListener("pointermove", (event) => {
-      if (!resize) return;
-      const now = performance.now();
-      if (now - lastMove < 16) return;
+  });
+
+  // Keep the gesture alive at the document level. Native window resizing can
+  // move the edge element under the pointer, which otherwise loses its local
+  // pointer stream and leaves the next drag in a stale state.
+  document.addEventListener("pointermove", (event) => {
+    if (drag && event.pointerId === drag.pointerId) {
+      if (!canSendMotion()) return;
+      const dx = Math.round(event.screenX - drag.x);
+      const dy = Math.round(event.screenY - drag.y);
+      if (!(dx || dy)) return;
+      drag = { ...drag, x: event.screenX, y: event.screenY };
+      send("overlayMoveWindow", { dx, dy });
+      event.preventDefault();
+      return;
+    }
+    if (resize && event.pointerId === resize.pointerId) {
+      if (!canSendMotion()) return;
       const dx = Math.round(event.screenX - resize.x);
       const dy = Math.round(event.screenY - resize.y);
-      if (dx || dy) {
-        send("overlayResizeWindow", { edges: resize.edges, dx, dy });
-        resize = { ...resize, x: event.screenX, y: event.screenY };
-        lastMove = now;
-      }
+      if (!(dx || dy)) return;
+      resize = { ...resize, x: event.screenX, y: event.screenY };
+      send("overlayResizeWindow", { edges: resize.edges, dx, dy });
       event.preventDefault();
-    });
-    zone.addEventListener("pointerup", () => { resize = null; });
-    zone.addEventListener("pointercancel", () => { resize = null; });
-  });
+    }
+  }, true);
+  window.addEventListener("pointerup", finishPointer);
+  window.addEventListener("pointercancel", finishPointer);
+  window.addEventListener("blur", () => { drag = null; resize = null; });
 }
 
 function confirmOverlay({ title = "Confirm", message = "", confirmLabel = "Confirm", danger = true } = {}) {
@@ -1695,10 +1726,23 @@ function showFirstOpenTip() {
 }
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.groupDropdownOpen) {
+    state.groupDropdownOpen = false;
+    render();
+    return;
+  }
   if (event.key !== "Tab") return;
   event.preventDefault();
   event.stopPropagation();
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+}, true);
+
+document.addEventListener("pointerdown", (event) => {
+  if (!state.groupDropdownOpen) return;
+  const target = event.target;
+  if (target?.closest?.("#groupSelectBtn, #groupDropdown")) return;
+  state.groupDropdownOpen = false;
+  render();
 }, true);
 
 document.addEventListener("click", (event) => {
@@ -1717,6 +1761,10 @@ document.addEventListener("click", (event) => {
     return;
   }
   if (!event.target.closest(".overlay-select-control")) hideDatabaseMenus();
+  if (!event.target.closest("#groupSelectBtn, #groupDropdown") && state.groupDropdownOpen) {
+    state.groupDropdownOpen = false;
+    render();
+  }
 });
 
 document.addEventListener("wheel", (event) => {
@@ -1752,12 +1800,16 @@ document.addEventListener("wheel", (event) => {
 document.querySelectorAll(".overlay-tabs button").forEach((button) => button.addEventListener("click", () => setPanel(button.dataset.panel)));
 $("prevGroupBtn").addEventListener("click", () => { state.groupDropdownOpen = false; stepGroupIndex(state.panel, -1); render(); });
 $("nextGroupBtn").addEventListener("click", () => { state.groupDropdownOpen = false; stepGroupIndex(state.panel, 1); render(); });
-$("groupSelectBtn").addEventListener("click", () => {
+$("groupSelectBtn").addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
   if (!OVERLAY_PANELS.includes(state.panel)) return;
   state.groupDropdownOpen = !state.groupDropdownOpen;
   render();
 });
 $("groupDropdown").addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
   const button = event.target.closest("[data-group-index]");
   if (!button) return;
   state.groupIndex[state.panel] = Number(button.dataset.groupIndex) || 0;

@@ -163,6 +163,10 @@ internal static class Program
     private static PhotinoWindow? AppWindow;
     private static string OverlayAppPath = "";
     private static readonly object OverlayGate = new();
+    private static readonly object OverlayWindowManipulationGate = new();
+    private static readonly object OverlayBoundsSaveGate = new();
+    private static System.Threading.Timer? OverlayBoundsSaveTimer;
+    private static (int x, int y, int width, int height)? PendingOverlayBounds;
     private static readonly object AppEventGate = new();
     private static readonly Queue<string> PendingAppEvents = new();
     private static Process? OverlayProcess;
@@ -170,6 +174,7 @@ internal static class Program
     private static VrChatHotkeyInputBlocker? RandomHotkeyInputBlocker;
     private static PhotinoWindow? OverlayWindow;
     private static nint OverlayWindowHandle;
+    private static string OverlayAppliedHostMode = "";
     private static FileSystemWatcher? OverlayHostStateWatcher;
     private static System.Threading.Timer? OverlayHostStateTimer;
     private static FileSystemWatcher? OverlaySettingsPreviewWatcher;
@@ -398,15 +403,18 @@ internal static class Program
                 SendPendingOverlaySettingsPreview();
                 // The helper starts on a tiny, non-activating surface so WebView2
                 // can initialize even while the overlay is logically hidden. Once
-                // the page has sent its first bridge message, apply the real host
-                // state and remove that bootstrap surface.
-                _ = Task.Run(() => ApplyOverlayHostMode(OverlayHostStateStore.Read().Mode));
+                ApiRequest? request = null;
+                try { request = JsonSerializer.Deserialize<ApiRequest>(message, ProgramJson.Options); }
+                catch { }
+                var isWindowMotion = request?.Command is "overlayMoveWindow" or "overlayResizeWindow";
                 _ = Task.Run(async () =>
                 {
                     try
                     {
                         var response = await HandleMessageAsync(message);
-                        if (OverlayWindowClosing || !OverlayWebReady) return;
+                        // Motion requests are fire-and-forget. A response for
+                        // every frame only adds traffic back into the WebView.
+                        if (isWindowMotion || OverlayWindowClosing || !OverlayWebReady) return;
                         photino.SendWebMessage(JsonSerializer.Serialize(response, ProgramJson.Options));
                     }
                     catch
@@ -1402,7 +1410,13 @@ internal static class Program
             OverlayNoticeContentReady = false;
         }
 
-        ApplyOverlayHostMode(state.Mode);
+        // The overlay polls this endpoint frequently. Reapplying the full
+        // host bounds on every poll would overwrite an in-progress drag or
+        // resize with the last saved values.
+        if (!string.Equals(OverlayAppliedHostMode, state.Mode, StringComparison.OrdinalIgnoreCase))
+        {
+            ApplyOverlayHostMode(state.Mode);
+        }
         return state;
     }
 
@@ -1540,6 +1554,7 @@ internal static class Program
                 window?.SetSize(new Size(1, 1));
                 ShowWindowAsync(OverlayWindowHandle, SwShowNoActivate);
                 SetWindowPos(OverlayWindowHandle, HwndTopmost, 0, 0, 1, 1, SwpNoActivate | SwpShowWindow);
+                OverlayAppliedHostMode = mode;
                 return;
             }
 
@@ -1551,9 +1566,11 @@ internal static class Program
                     window?.SetSize(new Size(1, 1));
                     ShowWindowAsync(OverlayWindowHandle, SwShowNoActivate);
                     SetWindowPos(OverlayWindowHandle, HwndTopmost, 0, 0, 1, 1, SwpNoActivate | SwpShowWindow);
+                    OverlayAppliedHostMode = mode;
                     return;
                 }
                 ShowWindowAsync(OverlayWindowHandle, SwHide);
+                OverlayAppliedHostMode = mode;
                 return;
             }
 
@@ -1594,6 +1611,7 @@ internal static class Program
             ShowWindowAsync(OverlayWindowHandle, SwShowNoActivate);
             SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, width, height, SwpNoActivate | SwpShowWindow | SwpFrameChanged);
             ApplyOverlayWindowRegion(width, height, OverlayHostCornerRadius);
+            OverlayAppliedHostMode = mode;
         }
         catch (Exception ex)
         {
@@ -1603,6 +1621,7 @@ internal static class Program
 
     private static void CloseOverlay()
     {
+        FlushOverlayBounds();
         Process? process;
         lock (OverlayGate)
         {
@@ -1932,6 +1951,20 @@ internal static class Program
         {
             new { id = "all", name = "All Friends", count = all.Count, friends = all.Take(100).Select(OverlayFriend).ToList() }
         };
+        // Keep the aggregate favorites view available even when VRChat returns
+        // favorite membership without usable tag metadata. Named favorite
+        // groups are added below when their tags can be matched.
+        var favoriteIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var favoriteItems = favoriteFriends
+            .Where(friend => !string.IsNullOrWhiteSpace(friend.Id) && favoriteIds.Add(friend.Id))
+            .Select(friend => byId.TryGetValue(friend.Id, out var item) ? item : null)
+            .Where(friend => friend is not null)
+            .Cast<VrChatFriendSummary>()
+            .ToList();
+        if (favoriteItems.Count > 0)
+        {
+            groups.Add(new { id = "favorites", name = "All Favorite Friends", count = favoriteItems.Count, limit = favoritePerGroupLimit, friends = favoriteItems.Take(100).Select(OverlayFriend).ToList() });
+        }
         var orderedTags = favoriteGroups.Select(group => group.Name).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         orderedTags.AddRange(favoriteFriends.SelectMany(friend => SplitTags(friend.FavoriteTags)).Where(tag => !orderedTags.Contains(tag, StringComparer.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase));
         foreach (var tag in orderedTags)
@@ -2016,42 +2049,48 @@ internal static class Program
 
     private static object MoveOverlayWindow(OverlayMoveInput input)
     {
-        if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return new { ok = false };
-        if (!GetWindowRect(OverlayWindowHandle, out var rect)) return new { ok = false };
-        var x = rect.Left + Math.Clamp(input.Dx, -2000, 2000);
-        var y = rect.Top + Math.Clamp(input.Dy, -2000, 2000);
-        OverlayWindow?.SetLocation(new Point(x, y));
-        SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, 0, 0, SwpNoSize | SwpNoActivate | SwpShowWindow);
-        SaveOverlayBounds(x, y, rect.Right - rect.Left, rect.Bottom - rect.Top);
-        return new { ok = true, x, y };
+        lock (OverlayWindowManipulationGate)
+        {
+            if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return new { ok = false };
+            if (!GetWindowRect(OverlayWindowHandle, out var rect)) return new { ok = false };
+            var x = rect.Left + Math.Clamp(input.Dx, -2000, 2000);
+            var y = rect.Top + Math.Clamp(input.Dy, -2000, 2000);
+            OverlayWindow?.SetLocation(new Point(x, y));
+            SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, 0, 0, SwpNoSize | SwpNoActivate | SwpShowWindow);
+            SaveOverlayBounds(x, y, rect.Right - rect.Left, rect.Bottom - rect.Top);
+            return new { ok = true, x, y };
+        }
     }
 
     private static object ResizeOverlayWindow(OverlayResizeInput input)
     {
-        if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return new { ok = false };
-        if (!GetWindowRect(OverlayWindowHandle, out var rect)) return new { ok = false };
-        var currentWidth = rect.Right - rect.Left;
-        var currentHeight = rect.Bottom - rect.Top;
-        var edges = (input.Edges ?? "").Trim().ToLowerInvariant();
-        var hasDelta = input.Dx != 0 || input.Dy != 0;
-        var leftEdge = edges.Contains('w');
-        var topEdge = edges.Contains('n');
-        var rightEdge = edges.Contains('e');
-        var bottomEdge = edges.Contains('s');
-        var width = hasDelta
-            ? Math.Clamp(currentWidth + (leftEdge ? -input.Dx : rightEdge ? input.Dx : 0), 360, 900)
-            : Math.Clamp(input.Width, 360, 900);
-        var height = hasDelta
-            ? Math.Clamp(currentHeight + (topEdge ? -input.Dy : bottomEdge ? input.Dy : 0), 420, 1000)
-            : Math.Clamp(input.Height, 420, 1000);
-        var x = hasDelta && leftEdge ? rect.Left + currentWidth - width : rect.Left;
-        var y = hasDelta && topEdge ? rect.Top + currentHeight - height : rect.Top;
-        OverlayWindow?.SetSize(new Size(width, height));
-        if (hasDelta && (leftEdge || topEdge)) OverlayWindow?.SetLocation(new Point(x, y));
-        SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, width, height, SwpNoActivate | SwpShowWindow);
-        ApplyOverlayWindowRegion(width, height, OverlayHostCornerRadius);
-        SaveOverlayBounds(x, y, width, height);
-        return new { ok = true, x, y, width, height };
+        lock (OverlayWindowManipulationGate)
+        {
+            if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return new { ok = false };
+            if (!GetWindowRect(OverlayWindowHandle, out var rect)) return new { ok = false };
+            var currentWidth = rect.Right - rect.Left;
+            var currentHeight = rect.Bottom - rect.Top;
+            var edges = (input.Edges ?? "").Trim().ToLowerInvariant();
+            var hasDelta = input.Dx != 0 || input.Dy != 0;
+            var leftEdge = edges.Contains('w');
+            var topEdge = edges.Contains('n');
+            var rightEdge = edges.Contains('e');
+            var bottomEdge = edges.Contains('s');
+            var width = hasDelta
+                ? Math.Clamp(currentWidth + (leftEdge ? -input.Dx : rightEdge ? input.Dx : 0), 360, 900)
+                : Math.Clamp(input.Width, 360, 900);
+            var height = hasDelta
+                ? Math.Clamp(currentHeight + (topEdge ? -input.Dy : bottomEdge ? input.Dy : 0), 420, 1000)
+                : Math.Clamp(input.Height, 420, 1000);
+            var x = hasDelta && leftEdge ? rect.Left + currentWidth - width : rect.Left;
+            var y = hasDelta && topEdge ? rect.Top + currentHeight - height : rect.Top;
+            OverlayWindow?.SetSize(new Size(width, height));
+            if (hasDelta && (leftEdge || topEdge)) OverlayWindow?.SetLocation(new Point(x, y));
+            SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, width, height, SwpNoActivate | SwpShowWindow);
+            ApplyOverlayWindowRegion(width, height, OverlayHostCornerRadius);
+            SaveOverlayBounds(x, y, width, height);
+            return new { ok = true, x, y, width, height };
+        }
     }
 
     private static void ApplyOverlayWindowRegion(int width, int height, int radius)
@@ -2092,15 +2131,38 @@ internal static class Program
 
     private static void SaveOverlayBounds(int x, int y, int width, int height)
     {
+        lock (OverlayBoundsSaveGate)
+        {
+            PendingOverlayBounds = (
+                Math.Clamp(x, -10000, 10000),
+                Math.Clamp(y, -10000, 10000),
+                Math.Clamp(width, 360, 900),
+                Math.Clamp(height, 420, 1000));
+            OverlayBoundsSaveTimer ??= new System.Threading.Timer(_ => FlushOverlayBounds(), null, Timeout.Infinite, Timeout.Infinite);
+            OverlayBoundsSaveTimer.Change(180, Timeout.Infinite);
+        }
+    }
+
+    private static void FlushOverlayBounds()
+    {
+        (int x, int y, int width, int height)? pending;
+        lock (OverlayBoundsSaveGate)
+        {
+            pending = PendingOverlayBounds;
+            PendingOverlayBounds = null;
+            OverlayBoundsSaveTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+        }
+        if (!pending.HasValue) return;
         try
         {
+            var bounds = pending.Value;
             var settings = Settings.Get();
             Settings.Save(settings with
             {
-                OverlayX = Math.Clamp(x, -10000, 10000),
-                OverlayY = Math.Clamp(y, -10000, 10000),
-                OverlayWidth = Math.Clamp(width, 360, 900),
-                OverlayHeight = Math.Clamp(height, 420, 1000)
+                OverlayX = bounds.x,
+                OverlayY = bounds.y,
+                OverlayWidth = bounds.width,
+                OverlayHeight = bounds.height
             });
         }
         catch
