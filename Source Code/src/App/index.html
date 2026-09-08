@@ -382,11 +382,45 @@
             <label>Tags<input id="tagsInput"></label><label>Source URL<input id="sourceUrlInput"></label>
             <label class="detail-wide detail-description">Description<textarea id="descriptionInput" rows="3"></textarea></label><label class="detail-wide detail-notes">Notes<textarea id="notesInput" rows="3"></textarea></label><label class="detail-wide detail-raw">Raw JSON<textarea id="rawJsonInput" rows="5" spellcheck="false"></textarea></label>
           </div>
-          <menu><button id="unfavoriteAvatarBtn" class="danger">Unfavorite</button><button id="equipAvatarBtn" type="button" class="primary">Equip Avatar</button><button id="saveAvatarBtn" class="primary">Save Avatar</button></menu>
+          <menu><button id="unfavoriteAvatarBtn" class="danger">Unfavorite</button><button id="editUploadedAvatarBtn" type="button" hidden>Edit Details</button><button id="deleteUploadedAvatarBtn" type="button" class="danger" hidden>Delete</button><button id="equipAvatarBtn" type="button" class="primary">Equip Avatar</button><button id="saveAvatarBtn" class="primary">Save Avatar</button></menu>
         </form>
       </aside>
     </main>
   </div>
+
+  <dialog id="uploadedAvatarEditDialog" class="confirm-dialog profile-field-dialog uploaded-avatar-edit-dialog"><form method="dialog" class="dialog-form wide">
+    <header><h3>Edit Uploaded Avatar</h3><button type="button" class="icon-button" data-close="uploadedAvatarEditDialog">x</button></header>
+    <p id="uploadedAvatarEditMessage" class="dialog-note"></p>
+    <div class="form-grid uploaded-avatar-edit-grid">
+      <label>Name<input id="uploadedAvatarNameInput" maxlength="80" required></label>
+      <label>Visibility
+        <div class="sort-control dialog-select-control uploaded-avatar-select-control">
+          <button id="uploadedAvatarReleaseMenuBtn" type="button" aria-expanded="false">Private</button>
+          <div id="uploadedAvatarReleaseMenu" class="sort-menu" hidden></div>
+          <select id="uploadedAvatarReleaseInput" hidden><option value="public">Public</option><option value="private" selected>Private</option></select>
+        </div>
+      </label>
+      <label class="detail-wide">Description<textarea id="uploadedAvatarDescriptionInput" rows="4"></textarea></label>
+      <label class="detail-wide">Content tags<textarea id="uploadedAvatarContentTagsInput" rows="3" placeholder="One tag per line or comma-separated"></textarea></label>
+      <label>Primary style
+        <div class="sort-control dialog-select-control uploaded-avatar-select-control">
+          <button id="uploadedAvatarPrimaryStyleMenuBtn" type="button" aria-expanded="false">None</button>
+          <div id="uploadedAvatarPrimaryStyleMenu" class="sort-menu" hidden></div>
+          <select id="uploadedAvatarPrimaryStyleInput" hidden><option value="">None</option></select>
+        </div>
+      </label>
+      <label>Secondary style
+        <div class="sort-control dialog-select-control uploaded-avatar-select-control">
+          <button id="uploadedAvatarSecondaryStyleMenuBtn" type="button" aria-expanded="false">None</button>
+          <div id="uploadedAvatarSecondaryStyleMenu" class="sort-menu" hidden></div>
+          <select id="uploadedAvatarSecondaryStyleInput" hidden><option value="">None</option></select>
+        </div>
+      </label>
+      <label class="detail-wide">Author tags<textarea id="uploadedAvatarAuthorTagsInput" rows="3" placeholder="One tag per line or comma-separated"></textarea></label>
+      <label class="detail-wide">Avatar image<input id="uploadedAvatarImageInput" type="file" accept="image/png,image/jpeg,image/gif,image/bmp"></label>
+    </div>
+    <menu><button type="button" data-close="uploadedAvatarEditDialog">Cancel</button><button id="saveUploadedAvatarBtn" type="button" class="primary">Save to VRChat</button></menu>
+  </form></dialog>
 
   <dialog id="groupDialog" class="confirm-dialog favorite-group-dialog avatar-group-dialog"><form method="dialog" class="dialog-form">
     <header><h3 id="groupDialogTitle">Group</h3><div class="group-dialog-header-actions"><div id="groupIconWrap" class="group-icon-editor"><span id="groupIconPreview" class="custom-group-icon" hidden></span><button id="editGroupIconBtn" type="button">Edit Icon</button><input id="groupIconInput" type="hidden"></div><button id="editGroupBackgroundBtn" type="button">Edit Background</button><button type="button" class="icon-button" data-close="groupDialog">x</button></div></header>

@@ -634,7 +634,8 @@ function setBusy(button, busyText = "...") {
 }
 
 function isSyncedGroupId(groupId = "") {
-  return String(groupId || "").toLowerCase().startsWith("vrc_");
+  const id = String(groupId || "").toLowerCase();
+  return id.startsWith("vrc_") || id === "uploaded_avatars";
 }
 
 function isManagedAvatarGroup(groupId = "") {
