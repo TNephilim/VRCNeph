@@ -1665,8 +1665,7 @@ internal static class Program
         {
             try
             {
-                if (overlay.HasExited) continue;
-                if (!overlay.CloseMainWindow() || !overlay.WaitForExit(5000))
+                if (!TryCloseOverlayProcessForUpdate(overlay))
                 {
                     Logs.Warn("Updater", $"Overlay process {overlay.Id} did not close before update.");
                     return false;
@@ -1691,6 +1690,35 @@ internal static class Program
             }
         }
         return true;
+    }
+
+    private static bool TryCloseOverlayProcessForUpdate(Process overlay)
+    {
+        try
+        {
+            if (overlay.HasExited) return true;
+
+            // The overlay helper is intentionally hidden, so Windows may report
+            // no main window and CloseMainWindow() can return false even though
+            // this is the process we own. Give it a graceful close request when
+            // possible, then use the same force-close fallback as normal shutdown.
+            try { overlay.CloseMainWindow(); }
+            catch { }
+
+            if (!overlay.WaitForExit(1500))
+            {
+                try { overlay.Kill(entireProcessTree: true); }
+                catch { }
+                if (!overlay.WaitForExit(3000) && !overlay.HasExited) return false;
+            }
+
+            return overlay.HasExited;
+        }
+        catch
+        {
+            try { return overlay.HasExited; }
+            catch { return false; }
+        }
     }
 
     private static object OverlayStatus(bool open) => new
@@ -2714,10 +2742,6 @@ internal sealed class AvatarStore
         {
             var lib = Load();
             var avatar = lib.Avatars.FirstOrDefault(x => x.Id == id);
-            if (avatar is not null && ShouldArchiveUnfavoritedAvatar(avatar.GroupId))
-            {
-                ArchiveUnfavoritedAvatar(lib, avatar, DateTimeOffset.UtcNow);
-            }
             lib.Avatars.RemoveAll(x => x.Id == id);
             if (avatar is not null && !lib.Avatars.Any(item => item.ImageOverridePath.Equals(avatar.ImageOverridePath, StringComparison.OrdinalIgnoreCase))) DeleteAvatarImageFile(avatar.ImageOverridePath);
             Save(lib);
@@ -3133,8 +3157,11 @@ internal sealed class AvatarStore
             lib.Avatars.RemoveAll(x => x.GroupId.StartsWith("vrc_", StringComparison.OrdinalIgnoreCase));
             lib.Groups.RemoveAll(x => x.Id.Equals(UpdatedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
             lib.Avatars.RemoveAll(x => x.GroupId.Equals(UpdatedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
-            lib.Groups.RemoveAll(x => x.Id.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
-            lib.Avatars.RemoveAll(x => x.GroupId.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
+            if (uploadedAvatars is not null)
+            {
+                lib.Groups.RemoveAll(x => x.Id.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
+                lib.Avatars.RemoveAll(x => x.GroupId.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
+            }
             var now = DateTimeOffset.UtcNow;
             var newSyncedGroupOrder = lib.Groups.Count == 0 ? 0 : lib.Groups.Min(x => x.Order) - imported.Groups.Count;
             var newSyncedGroupIndex = 0;
@@ -3171,14 +3198,21 @@ internal sealed class AvatarStore
             ApplyStoredAvatarDetailRefreshes(lib, storedAvatarRefresh.UpdatedAvatars, now);
             var movedToDeleted = ArchiveDeletedVrChatAvatars(lib, imported.DeletedAvatars, previousSynced, previousDeleted, activeAvatarIds, now);
             movedToDeleted.AddRange(ArchiveUnavailableStoredFavoriteAvatars(lib, storedAvatarRefresh.UnavailableAvatars, previousDeleted, now));
-            AddUploadedAvatarGroup(lib, uploadedAvatars, now);
+            var unavailableAvatarIds = imported.DeletedAvatars
+                .Select(x => x.Avatar.AvatarId)
+                .Concat(storedAvatarRefresh.UnavailableAvatars.Select(x => x.AvatarId))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            ArchiveExternallyUnfavoritedAvatars(lib, previousSynced, activeAvatarIds, unavailableAvatarIds, now);
+            if (uploadedAvatars is not null) AddUploadedAvatarGroup(lib, uploadedAvatars, now);
             NormalizeOrders(lib);
             Save(lib, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { UploadedAvatarGroupId, UpdatedAvatarGroupId });
             AddUpdatedAvatarGroup(lib, storedAvatarRefresh.ChangedAvatars, now);
             NormalizeOrders(lib);
             _ = WriteAccountBackup(lib, "sync", socialBackup);
             PruneAccountBackups();
-            return new VrChatSyncResult(lib, imported.Groups.Count, imported.Avatars.Count, movedToDeleted.Count, movedToDeleted.Select(x => x.Name).ToList(), movedToDeleted, storedAvatarRefresh.ChangedAvatars.Count, storedAvatarRefresh.ChangedAvatars.Select(x => string.IsNullOrWhiteSpace(x.Name) ? x.AvatarId : x.Name).Where(x => !string.IsNullOrWhiteSpace(x)).ToList(), uploadedAvatars.Count, imported.FavoriteGroupLimit, 0, []);
+            var uploadedCount = uploadedAvatars?.Count ?? lib.Avatars.Count(x => x.GroupId.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
+            return new VrChatSyncResult(lib, imported.Groups.Count, imported.Avatars.Count, movedToDeleted.Count, movedToDeleted.Select(x => x.Name).ToList(), movedToDeleted, storedAvatarRefresh.ChangedAvatars.Count, storedAvatarRefresh.ChangedAvatars.Select(x => string.IsNullOrWhiteSpace(x.Name) ? x.AvatarId : x.Name).Where(x => !string.IsNullOrWhiteSpace(x)).ToList(), uploadedCount, imported.FavoriteGroupLimit, 0, []);
         }
     }
     private static async Task<AccountBackupSocialData> CaptureAccountBackupSocialDataAsync(VrChatClient client)
@@ -3275,7 +3309,7 @@ internal sealed class AvatarStore
             .ToList();
         return new StoredAvatarRefreshResult(updated, unavailable, uniqueChanged);
     }
-    private static async Task<List<AvatarInput>> TryGetUploadedAvatarsAsync(VrChatClient client)
+    private static async Task<List<AvatarInput>?> TryGetUploadedAvatarsAsync(VrChatClient client)
     {
         try
         {
@@ -3283,7 +3317,7 @@ internal sealed class AvatarStore
         }
         catch
         {
-            return [];
+            return null;
         }
     }
     private sealed record StoredAvatarRefreshResult(List<AvatarInput> UpdatedAvatars, List<AvatarInput> UnavailableAvatars, List<AvatarInput> ChangedAvatars);
@@ -4202,7 +4236,7 @@ internal sealed class AvatarStore
             {
                 Id = UnfavoriteAvatarGroupId,
                 Name = UnfavoriteAvatarGroupName,
-                Description = "Avatars removed from local or synced favorites, kept so accidental unfavorites can be recovered.",
+                Description = "Avatars removed from VRChat favorites outside VRCNeph, kept so accidental unfavorites can be recovered.",
                 Order = NextGroupOrder(lib),
                 ReorderLocked = true,
                 CreatedAt = now
@@ -4211,15 +4245,31 @@ internal sealed class AvatarStore
         }
 
         group.Name = UnfavoriteAvatarGroupName;
-        group.Description = "Avatars removed from local or synced favorites, kept so accidental unfavorites can be recovered.";
+        group.Description = "Avatars removed from VRChat favorites outside VRCNeph, kept so accidental unfavorites can be recovered.";
         group.ReorderLocked ??= true;
         group.UpdatedAt = now;
         return group;
     }
-    private static bool ShouldArchiveUnfavoritedAvatar(string groupId) =>
-        !string.IsNullOrWhiteSpace(groupId) &&
-        !groupId.Equals(UnfavoriteAvatarGroupId, StringComparison.OrdinalIgnoreCase) &&
-        !IsPinnedSystemGroupId(groupId);
+    private static void ArchiveExternallyUnfavoritedAvatars(
+        LibraryData lib,
+        Dictionary<string, AvatarFavorite> previousSynced,
+        HashSet<string> activeAvatarIds,
+        HashSet<string> unavailableAvatarIds,
+        DateTimeOffset now)
+    {
+        foreach (var avatar in previousSynced.Values)
+        {
+            var avatarId = avatar.AvatarId?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(avatarId)
+                || activeAvatarIds.Contains(avatarId)
+                || unavailableAvatarIds.Contains(avatarId))
+            {
+                continue;
+            }
+
+            ArchiveUnfavoritedAvatar(lib, avatar, now);
+        }
+    }
     private static void ArchiveUnfavoritedAvatar(LibraryData lib, AvatarFavorite avatar, DateTimeOffset now)
     {
         if (string.IsNullOrWhiteSpace(avatar.AvatarId)) return;
@@ -6799,15 +6849,16 @@ internal sealed class VrChatClient
         id = id.Trim();
         if (string.IsNullOrWhiteSpace(id)) throw new InvalidOperationException("User not found.");
         var owner = id.Equals("me", StringComparison.OrdinalIgnoreCase) ? "me" : id;
-        string[] paths = owner.Equals("me", StringComparison.OrdinalIgnoreCase)
-            ? ["avatars?user=me"]
+        var includeNonPublic = owner.Equals("me", StringComparison.OrdinalIgnoreCase);
+        string[] paths = includeNonPublic
+            ? ["avatars?user=me&releaseStatus=all"]
             :
             [
                 $"avatars?userId={WebUtility.UrlEncode(owner)}",
                 $"avatars?authorId={WebUtility.UrlEncode(owner)}",
                 $"avatars?user={WebUtility.UrlEncode(owner)}"
             ];
-        return new AvatarListResult(await ReadPagedAvatarsFromFirstWorkingPathAsync(paths, "VRChat user uploaded avatars"));
+        return new AvatarListResult(await ReadPagedAvatarsFromFirstWorkingPathAsync(paths, "VRChat user uploaded avatars", includeNonPublic));
     }
     public async Task<VrChatWorldSearchResult> GetUserWorldsAsync(string id)
     {
@@ -7368,7 +7419,7 @@ internal sealed class VrChatClient
     {
         return (await GetUserUploadedAvatarsAsync("me")).Avatars;
     }
-    private async Task<List<AvatarInput>> ReadPagedAvatarsFromFirstWorkingPathAsync(IEnumerable<string> pathBases, string label)
+    private async Task<List<AvatarInput>> ReadPagedAvatarsFromFirstWorkingPathAsync(IEnumerable<string> pathBases, string label, bool includeNonPublic = false)
     {
         foreach (var pathBase in pathBases)
         {
@@ -7395,7 +7446,11 @@ internal sealed class VrChatClient
                 foreach (var item in doc.RootElement.EnumerateArray())
                 {
                     var avatar = ReadAvatar(item);
-                    if (!string.IsNullOrWhiteSpace(avatar.AvatarId) && seen.Add(avatar.AvatarId) && !IsUnavailableAvatarStatus(avatar.ReleaseStatus))
+                    var keepAvatar = includeNonPublic
+                        ? !avatar.ReleaseStatus.Equals("deleted", StringComparison.OrdinalIgnoreCase)
+                            && !avatar.ReleaseStatus.Equals("unavailable", StringComparison.OrdinalIgnoreCase)
+                        : !IsUnavailableAvatarStatus(avatar.ReleaseStatus);
+                    if (!string.IsNullOrWhiteSpace(avatar.AvatarId) && seen.Add(avatar.AvatarId) && keepAvatar)
                     {
                         avatar.Source = "vrchat-uploaded";
                         avatars.Add(avatar);
