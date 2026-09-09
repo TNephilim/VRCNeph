@@ -10,7 +10,7 @@ VRCNeph is a desktop app for managing VRChat avatar favorites outside the in-gam
 - Saves your currently worn avatar into a local group.
 - Stores notes and metadata for each avatar.
 - Searches avatars by name, ID, author, description, tags, and notes.
-- Searches local and remote avatar databases from one tab.
+- Searches the supported AVTR.zip and Prismic avatar sources from one tab.
 - Provides an in-game overlay for avatars, worlds, friends, current info, and recent items.
 - Imports and exports your local library as JSON.
 - Checks GitHub releases for app updates.
@@ -54,12 +54,11 @@ The app stores VRChat session cookies locally after login. It does not store you
 
 The database tab can search:
 
-- Activity encounter history, built from VRChat player and avatar logs.
-- The remote VRCX-compatible avatar database.
 - AVTR.zip through the Crecross avatar gateway. The app receives only normalized
   search results; verification, action rotation, paging capabilities, and the
   24-hour authorization renewal stay on the server.
 - Prismic PAS.
+- The remote VRCX-compatible avatar database.
 
 Activity encounter history is stored in VRCNeph's local app data and is refreshed from VRChat logs while VRCNeph is open. The remote VRCX-compatible database is a separate search source and does not require VRCX to be installed.
 

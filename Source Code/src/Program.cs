@@ -13,7 +13,6 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
-using Microsoft.Data.Sqlite;
 using Photino.NET;
 using OpenFileDialog = System.Windows.Forms.OpenFileDialog;
 using DialogResult = System.Windows.Forms.DialogResult;
@@ -55,7 +54,6 @@ internal static class AppPaths
         NormalizeFolderName("Groups");
         NormalizeFolderName("Export");
         NormalizeFolderName("Backups");
-        MigrateOldAccountBackups();
         NormalizeFolderName("Account Avatars Backups");
         NormalizeFolderName("Custom Background");
         NormalizeFolderName("Database");
@@ -69,8 +67,6 @@ internal static class AppPaths
         Directory.CreateDirectory(DatabaseDirectory);
         Directory.CreateDirectory(ActivityDirectory);
         Directory.CreateDirectory(LogsDirectory);
-        MigrateOldBackups();
-
         EnsureJsonFile(MessageHistoryPath, "[]");
     }
 
@@ -86,40 +82,6 @@ internal static class AppPaths
         if (File.Exists(path)) return;
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, contents);
-    }
-
-    private static void MigrateOldBackups()
-    {
-        var oldBackupDirectory = Path.Combine(GroupsDirectory, "deleted groups backup");
-        if (!Directory.Exists(oldBackupDirectory)) return;
-        foreach (var file in Directory.EnumerateFiles(oldBackupDirectory))
-        {
-            var target = Path.Combine(BackupsDirectory, Path.GetFileName(file));
-            if (File.Exists(target))
-            {
-                target = Path.Combine(BackupsDirectory, $"{Path.GetFileNameWithoutExtension(file)}-{DateTimeOffset.Now:yyyyMMddHHmmssfff}{Path.GetExtension(file)}");
-            }
-            File.Move(file, target);
-        }
-
-        if (!Directory.EnumerateFileSystemEntries(oldBackupDirectory).Any()) Directory.Delete(oldBackupDirectory);
-    }
-    private static void MigrateOldAccountBackups()
-    {
-        var oldDirectory = Path.Combine(RootDirectory, "Account Backups");
-        if (!Directory.Exists(oldDirectory)) return;
-        var newDirectory = AccountBackupsDirectory;
-        Directory.CreateDirectory(newDirectory);
-        foreach (var file in Directory.EnumerateFiles(oldDirectory))
-        {
-            var target = Path.Combine(newDirectory, Path.GetFileName(file));
-            if (File.Exists(target))
-            {
-                target = Path.Combine(newDirectory, $"{Path.GetFileNameWithoutExtension(file)}-{DateTimeOffset.Now:yyyyMMddHHmmssfff}{Path.GetExtension(file)}");
-            }
-            File.Move(file, target);
-        }
-        if (!Directory.EnumerateFileSystemEntries(oldDirectory).Any()) Directory.Delete(oldDirectory);
     }
 
     private static void NormalizeFolderName(string desiredName)
@@ -163,7 +125,6 @@ internal static class Program
     private static PhotinoWindow? AppWindow;
     private static string OverlayAppPath = "";
     private static readonly object OverlayGate = new();
-    private static readonly object OverlayWindowManipulationGate = new();
     private static readonly object OverlayBoundsSaveGate = new();
     private static System.Threading.Timer? OverlayBoundsSaveTimer;
     private static (int x, int y, int width, int height)? PendingOverlayBounds;
@@ -174,6 +135,7 @@ internal static class Program
     private static VrChatHotkeyInputBlocker? RandomHotkeyInputBlocker;
     private static PhotinoWindow? OverlayWindow;
     private static nint OverlayWindowHandle;
+    private static readonly object OverlayWindowManipulationGate = new();
     private static string OverlayAppliedHostMode = "";
     private static FileSystemWatcher? OverlayHostStateWatcher;
     private static System.Threading.Timer? OverlayHostStateTimer;
@@ -318,9 +280,9 @@ internal static class Program
         OverlayHostStateStore.Write(OverlayHostState.Hidden);
         if (Settings.Get().OverlayEnabled)
         {
-            // Bring up one hidden helper after the main window is ready. F8 and
-            // equip notices then only change its state instead of racing a new
-            // Photino window into existence on the first user action.
+            // Keep the helper alive for F8 and equip notices, but let its own
+            // hidden bootstrap surface initialize off-screen instead of
+            // exposing the overlay panel during app startup.
             _ = Task.Run(EnsureOverlayHost);
         }
         StartLocalAvatarCache();
@@ -372,12 +334,12 @@ internal static class Program
                 Title = "VRCNeph Overlay",
                 UseOsDefaultSize = false,
                 UseOsDefaultLocation = false,
-                Size = new Size(overlaySettings.OverlayWidth, overlaySettings.OverlayHeight),
-                // Start on the desktop so WebView2 gets a real composition surface.
-                // The hidden host state immediately removes it from view until the
-                // panel or notice mode needs it.
-                Location = new Point(0, 0),
-                Resizable = true,
+                // Start as a tiny off-screen composition surface. The saved
+                // panel bounds are applied only after the host state requests
+                // the visible panel, so startup cannot flash the overlay.
+                Size = new Size(1, 1),
+                Location = new Point(-32000, -32000),
+                Resizable = false,
                 Chromeless = true,
                 // Photino's transparent host is required for the borderless
                 // WebView surface to render as a non-activating in-game overlay.
@@ -396,25 +358,27 @@ internal static class Program
                 }
                 Logs.Info("App", "Overlay helper window created.");
             })
-            .RegisterWebMessageReceivedHandler((sender, message) =>
-            {
-                if (sender is not PhotinoWindow photino) return;
-                OverlayWebReady = true;
-                SendPendingOverlaySettingsPreview();
+             .RegisterWebMessageReceivedHandler((sender, message) =>
+             {
+                 if (sender is not PhotinoWindow photino) return;
+                 var wasReady = OverlayWebReady;
+                 OverlayWebReady = true;
+                 // Photino can restore the host's last native bounds after the
+                 // window-created callback. Reapply the state once WebView2 is
+                 // ready so a hidden startup cannot expose that restored panel.
+                 if (!wasReady) ApplyOverlayHostMode(OverlayHostStateStore.Read().Mode);
+                 SendPendingOverlaySettingsPreview();
                 // The helper starts on a tiny, non-activating surface so WebView2
                 // can initialize even while the overlay is logically hidden. Once
                 ApiRequest? request = null;
                 try { request = JsonSerializer.Deserialize<ApiRequest>(message, ProgramJson.Options); }
                 catch { }
-                var isWindowMotion = request?.Command is "overlayMoveWindow" or "overlayResizeWindow";
                 _ = Task.Run(async () =>
                 {
                     try
                     {
                         var response = await HandleMessageAsync(message);
-                        // Motion requests are fire-and-forget. A response for
-                        // every frame only adds traffic back into the WebView.
-                        if (isWindowMotion || OverlayWindowClosing || !OverlayWebReady) return;
+                        if (OverlayWindowClosing || !OverlayWebReady) return;
                         photino.SendWebMessage(JsonSerializer.Serialize(response, ProgramJson.Options));
                     }
                     catch
@@ -771,12 +735,10 @@ internal static class Program
     private const int GwlExStyle = -20;
     private const int WsExToolWindow = 0x00000080;
     private const int WsExTransparent = 0x00000020;
+    private const int WsExLayered = 0x00080000;
     private const int WsExNoActivate = 0x08000000;
-    // Leave the native region almost rectangular so it does not cut through
-    // the WebView's antialiased CSS rounded edge. The page remains the
-    // authoritative visual clip; the native region only trims the extreme
-    // transparent corner pixels for hit-testing.
-    private const int OverlayHostCornerRadius = 1;
+    private const int OverlayPanelCornerRadius = 8;
+    private const int OverlayNoticeCornerRadius = 11;
     private const uint SwpNoSize = 0x0001;
     private const uint SwpNoMove = 0x0002;
     private const uint SwpNoActivate = 0x0010;
@@ -785,6 +747,9 @@ internal static class Program
     private const int SwShow = 5;
     private const int SwShowNoActivate = 4;
     private const int SwHide = 0;
+    private const int OverlayFixedWidth = 360;
+    private const int OverlayMinHeight = 420;
+    private const int OverlayMaxHeight = 900;
     private static readonly nint HwndTopmost = new(-1);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
@@ -862,6 +827,12 @@ internal static class Program
             && !progress.Stage.Equals("failed", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static async Task<ChatMessageResult> SendMainAppChatMessageAsync(ApiRequest request)
+    {
+        if (OverlayProcessMode) throw new InvalidOperationException("Chat messaging is available in the main app only.");
+        return await VrChat.SendChatMessageAsync(GetPayload<ChatMessageInput>(request));
+    }
+
     private static async Task<ApiResponse> HandleMessageAsync(string message)
     {
         ApiRequest? request = null;
@@ -876,6 +847,7 @@ internal static class Program
                 "logsClear" => Logs.Clear(),
                 "logsFolder" => new { path = AppPaths.LogsDirectory },
                 "appStateLoad" => AppState.Load(),
+                "appStateLoadFresh" => AppState.Reload(),
                 "appStateSave" => AppState.Save(GetPayload<AppStateSaveInput>(request)),
                 "appStateRemove" => AppState.Remove(GetPayload<IdInput>(request).Id),
                 "syncHealth" => AppData.GetSyncHealth(),
@@ -976,7 +948,7 @@ internal static class Program
                 "vrchatUpdateInviteMessage" => await VrChat.UpdateInviteMessageAsync(GetPayload<InviteMessageUpdateInput>(request)),
                 "vrchatInviteUser" => await VrChat.InviteUserAsync(GetPayload<InviteUserInput>(request)),
                 "vrchatRequestInvite" => await VrChat.RequestInviteAsync(GetPayload<RequestInviteInput>(request)),
-                "vrchatSendChatMessage" => await VrChat.SendChatMessageAsync(GetPayload<ChatMessageInput>(request)),
+                "mainSendChatMessage" => await SendMainAppChatMessageAsync(request),
                 "vrchatNotifications" => await VrChat.GetNotificationsAsync(GetPayload<PageInput>(request)),
                 "vrchatAcceptNotification" => await VrChat.AcceptNotificationAsync(GetPayload<IdInput>(request).Id),
                 "vrchatAcceptFriendRequest" => await VrChat.AcceptNotificationAsync(GetPayload<IdInput>(request).Id),
@@ -1079,7 +1051,7 @@ internal static class Program
                 break;
             case "vrchatTwoFactor": Logs.Info("VRChat", "VRChat two-factor verification completed."); break;
             case "vrchatLogout": Logs.Info("VRChat", "VRChat logout completed."); break;
-            case "vrchatSendChatMessage": Logs.Info("VRChat", "Message sent through invite system."); break;
+            case "mainSendChatMessage": Logs.Info("VRChat", "Message sent through invite system."); break;
             case "vrchatNotifications": Logs.Info("VRChat", "Notifications refreshed."); break;
             case "vrchatAcceptNotification": Logs.Info("VRChat", "Notification accepted."); break;
             case "vrchatAcceptFriendRequest": Logs.Info("VRChat", "Friend request accepted."); break;
@@ -1546,9 +1518,26 @@ internal static class Program
         try
         {
             var window = OverlayWindow;
+            const int bootstrapX = -32000;
+            const int bootstrapY = -32000;
             var exStyle = (long)GetWindowLongPtr(OverlayWindowHandle, GwlExStyle);
-            exStyle |= WsExToolWindow | WsExNoActivate;
-            exStyle = mode == "notice" ? exStyle | WsExTransparent : exStyle & ~WsExTransparent;
+            exStyle |= WsExToolWindow;
+            if (mode == "panel")
+            {
+                // Photino's Transparent host uses WS_EX_LAYERED. That native
+                // composition surface is hit-test transparent even after the
+                // child WebView's WS_EX_TRANSPARENT bit is cleared. The panel
+                // is a normal interactive window, so remove the transparent
+                // host style while it is shown.
+                exStyle &= ~(WsExTransparent | WsExLayered | WsExNoActivate);
+            }
+            else
+            {
+                exStyle |= WsExNoActivate;
+                exStyle = mode == "notice"
+                    ? exStyle | WsExTransparent | WsExLayered
+                    : exStyle & ~WsExTransparent;
+            }
             SetWindowLongPtr(OverlayWindowHandle, GwlExStyle, (nint)exStyle);
             if (mode == "notice" && !OverlayNoticeContentReady)
             {
@@ -1556,10 +1545,10 @@ internal static class Program
                 // until the WebView has painted the fully styled notice. This
                 // prevents the native host from exposing a transparent first
                 // frame before the card is ready.
-                window?.SetLocation(new Point(0, 0));
+                window?.SetLocation(new Point(bootstrapX, bootstrapY));
                 window?.SetSize(new Size(1, 1));
                 ShowWindowAsync(OverlayWindowHandle, SwShowNoActivate);
-                SetWindowPos(OverlayWindowHandle, HwndTopmost, 0, 0, 1, 1, SwpNoActivate | SwpShowWindow);
+                SetWindowPos(OverlayWindowHandle, HwndTopmost, bootstrapX, bootstrapY, 1, 1, SwpNoActivate | SwpShowWindow);
                 OverlayAppliedHostMode = mode;
                 return;
             }
@@ -1568,10 +1557,10 @@ internal static class Program
             {
                 if (!OverlayWebReady)
                 {
-                    window?.SetLocation(new Point(0, 0));
+                    window?.SetLocation(new Point(bootstrapX, bootstrapY));
                     window?.SetSize(new Size(1, 1));
                     ShowWindowAsync(OverlayWindowHandle, SwShowNoActivate);
-                    SetWindowPos(OverlayWindowHandle, HwndTopmost, 0, 0, 1, 1, SwpNoActivate | SwpShowWindow);
+                    SetWindowPos(OverlayWindowHandle, HwndTopmost, bootstrapX, bootstrapY, 1, 1, SwpNoActivate | SwpShowWindow);
                     OverlayAppliedHostMode = mode;
                     return;
                 }
@@ -1602,8 +1591,8 @@ internal static class Program
                 var settings = Settings.Get();
                 x = settings.OverlayX;
                 y = settings.OverlayY;
-                width = settings.OverlayWidth;
-                height = settings.OverlayHeight;
+                width = OverlayFixedWidth;
+                height = Math.Clamp(settings.OverlayHeight, OverlayMinHeight, OverlayMaxHeight);
             }
 
             // Keep Photino's embedded WebView child aligned with the native
@@ -1616,7 +1605,7 @@ internal static class Program
             // window while VRChat is in the foreground.
             ShowWindowAsync(OverlayWindowHandle, SwShowNoActivate);
             SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, width, height, SwpNoActivate | SwpShowWindow | SwpFrameChanged);
-            ApplyOverlayWindowRegion(width, height, OverlayHostCornerRadius);
+            ApplyOverlayWindowRegion(width, height, mode == "notice" ? OverlayNoticeCornerRadius : OverlayPanelCornerRadius);
             OverlayAppliedHostMode = mode;
         }
         catch (Exception ex)
@@ -1944,19 +1933,31 @@ internal static class Program
     private static List<object> BuildOverlayFriendGroups(List<VrChatFriendSummary> friends, List<VrChatFriendSummary> favoriteFriends, List<VrChatFavoriteGroupSummary> favoriteGroups, int favoritePerGroupLimit)
     {
         var byId = new Dictionary<string, VrChatFriendSummary>(StringComparer.OrdinalIgnoreCase);
-        foreach (var friend in favoriteFriends.Concat(friends))
+        foreach (var friend in friends)
         {
             if (string.IsNullOrWhiteSpace(friend.Id)) continue;
-            if (byId.TryGetValue(friend.Id, out var existing))
+            byId[friend.Id] = friend;
+        }
+        foreach (var favorite in favoriteFriends)
+        {
+            if (string.IsNullOrWhiteSpace(favorite.Id)) continue;
+            if (byId.TryGetValue(favorite.Id, out var existing))
             {
-                byId[friend.Id] = friend with { FavoriteTags = string.IsNullOrWhiteSpace(friend.FavoriteTags) ? existing.FavoriteTags : friend.FavoriteTags };
+                // The friends endpoint carries presence metadata, while the
+                // favorites endpoint carries the actual favorite-group tags.
+                // Keep the live friend record but restore those real tags so
+                // named groups can be populated in the overlay.
+                byId[favorite.Id] = existing with
+                {
+                    FavoriteTags = string.IsNullOrWhiteSpace(favorite.FavoriteTags) ? existing.FavoriteTags : favorite.FavoriteTags
+                };
             }
-            else byId[friend.Id] = friend;
+            else byId[favorite.Id] = favorite;
         }
         var all = byId.Values.ToList();
         var groups = new List<object>
         {
-            new { id = "all", name = "All Friends", count = all.Count, friends = all.Take(100).Select(OverlayFriend).ToList() }
+            new { id = "all", name = "All", count = all.Count, friends = all.Take(100).Select(OverlayFriend).ToList() }
         };
         // Keep the aggregate favorites view available even when VRChat returns
         // favorite membership without usable tag metadata. Named favorite
@@ -1970,7 +1971,7 @@ internal static class Program
             .ToList();
         if (favoriteItems.Count > 0)
         {
-            groups.Add(new { id = "favorites", name = "All Favorite Friends", count = favoriteItems.Count, limit = favoritePerGroupLimit, friends = favoriteItems.Take(100).Select(OverlayFriend).ToList() });
+            groups.Add(new { id = "favorites", name = "All", count = favoriteItems.Count, limit = favoritePerGroupLimit, friends = favoriteItems.Take(100).Select(OverlayFriend).ToList() });
         }
         var orderedTags = favoriteGroups.Select(group => group.Name).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         orderedTags.AddRange(favoriteFriends.SelectMany(friend => SplitTags(friend.FavoriteTags)).Where(tag => !orderedTags.Contains(tag, StringComparer.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase));
@@ -2075,28 +2076,22 @@ internal static class Program
         {
             if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return new { ok = false };
             if (!GetWindowRect(OverlayWindowHandle, out var rect)) return new { ok = false };
-            var currentWidth = rect.Right - rect.Left;
             var currentHeight = rect.Bottom - rect.Top;
             var edges = (input.Edges ?? "").Trim().ToLowerInvariant();
             var hasDelta = input.Dx != 0 || input.Dy != 0;
-            var leftEdge = edges.Contains('w');
             var topEdge = edges.Contains('n');
-            var rightEdge = edges.Contains('e');
             var bottomEdge = edges.Contains('s');
-            var width = hasDelta
-                ? Math.Clamp(currentWidth + (leftEdge ? -input.Dx : rightEdge ? input.Dx : 0), 360, 900)
-                : Math.Clamp(input.Width, 360, 900);
             var height = hasDelta
-                ? Math.Clamp(currentHeight + (topEdge ? -input.Dy : bottomEdge ? input.Dy : 0), 420, 1000)
-                : Math.Clamp(input.Height, 420, 1000);
-            var x = hasDelta && leftEdge ? rect.Left + currentWidth - width : rect.Left;
-            var y = hasDelta && topEdge ? rect.Top + currentHeight - height : rect.Top;
-            OverlayWindow?.SetSize(new Size(width, height));
-            if (hasDelta && (leftEdge || topEdge)) OverlayWindow?.SetLocation(new Point(x, y));
-            SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, width, height, SwpNoActivate | SwpShowWindow);
-            ApplyOverlayWindowRegion(width, height, OverlayHostCornerRadius);
-            SaveOverlayBounds(x, y, width, height);
-            return new { ok = true, x, y, width, height };
+                ? Math.Clamp(currentHeight + (topEdge ? -input.Dy : bottomEdge ? input.Dy : 0), OverlayMinHeight, OverlayMaxHeight)
+                : Math.Clamp(input.Height, OverlayMinHeight, OverlayMaxHeight);
+            var x = rect.Left;
+            var y = hasDelta && topEdge ? rect.Bottom - height : rect.Top;
+            OverlayWindow?.SetSize(new Size(OverlayFixedWidth, height));
+            if (hasDelta && topEdge) OverlayWindow?.SetLocation(new Point(x, y));
+            SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, OverlayFixedWidth, height, SwpNoActivate | SwpShowWindow);
+            ApplyOverlayWindowRegion(OverlayFixedWidth, height, OverlayPanelCornerRadius);
+            SaveOverlayBounds(x, y, OverlayFixedWidth, height);
+            return new { ok = true, x, y, width = OverlayFixedWidth, height };
         }
     }
 
@@ -2115,9 +2110,12 @@ internal static class Program
         try
         {
             var exStyle = GetWindowLongPtr(OverlayWindowHandle, GwlExStyle);
+            var panelInteractive = OverlayAppliedHostMode.Equals("panel", StringComparison.OrdinalIgnoreCase);
             var value = active
                 ? (long)exStyle & ~WsExNoActivate
-                : (long)exStyle | WsExNoActivate | WsExToolWindow;
+                : panelInteractive
+                    ? (long)exStyle & ~WsExNoActivate | WsExToolWindow
+                    : (long)exStyle | WsExNoActivate | WsExToolWindow;
             SetWindowLongPtr(OverlayWindowHandle, GwlExStyle, (nint)value);
             if (active)
             {
@@ -2143,8 +2141,8 @@ internal static class Program
             PendingOverlayBounds = (
                 Math.Clamp(x, -10000, 10000),
                 Math.Clamp(y, -10000, 10000),
-                Math.Clamp(width, 360, 900),
-                Math.Clamp(height, 420, 1000));
+                OverlayFixedWidth,
+                Math.Clamp(height, OverlayMinHeight, OverlayMaxHeight));
             OverlayBoundsSaveTimer ??= new System.Threading.Timer(_ => FlushOverlayBounds(), null, Timeout.Infinite, Timeout.Infinite);
             OverlayBoundsSaveTimer.Change(180, Timeout.Infinite);
         }
@@ -2559,7 +2557,6 @@ internal sealed class AvatarStore
         {
             Save(Load());
         }
-        MigrateGroupBackupsToTypeFolders();
         PruneGroupBackups();
         PruneAccountBackups();
     }
@@ -2826,8 +2823,37 @@ internal sealed class AvatarStore
         lock (_gate)
         {
             var lib = Load();
-            var avatar = lib.Avatars.FirstOrDefault(x => x.GroupId.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase) && x.AvatarId.Equals(avatarId, StringComparison.OrdinalIgnoreCase))
-                ?? throw new InvalidOperationException("Uploaded avatar is not in the local synced group.");
+            var now = DateTimeOffset.UtcNow;
+            var avatar = lib.Avatars.FirstOrDefault(x => x.GroupId.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase) && x.AvatarId.Equals(avatarId, StringComparison.OrdinalIgnoreCase));
+            if (avatar is null)
+            {
+                var group = lib.Groups.FirstOrDefault(x => x.Id.Equals(UploadedAvatarGroupId, StringComparison.OrdinalIgnoreCase));
+                if (group is null)
+                {
+                    group = new AvatarGroup
+                    {
+                        Id = UploadedAvatarGroupId,
+                        Name = UploadedAvatarGroupName,
+                        Description = "Synced from your VRChat uploaded avatars.",
+                        SyncSource = VrChatUploadedAvatarsSyncSource,
+                        Order = 0,
+                        ReorderLocked = true,
+                        CreatedAt = now,
+                        UpdatedAt = now
+                    };
+                    lib.Groups.Add(group);
+                }
+                avatar = new AvatarFavorite
+                {
+                    Id = $"{UploadedAvatarGroupId}_{avatarId}",
+                    GroupId = UploadedAvatarGroupId,
+                    AvatarId = avatarId,
+                    Order = NextAvatarOrder(lib, UploadedAvatarGroupId),
+                    CreatedAt = now,
+                    Source = "vrchat-uploaded"
+                };
+                lib.Avatars.Add(avatar);
+            }
             FillAvatar(avatar, new AvatarInput
             {
                 GroupId = avatar.GroupId,
@@ -2850,7 +2876,7 @@ internal sealed class AvatarStore
                 RemoteCreatedAt = input.RemoteCreatedAt,
                 RemoteUpdatedAt = input.RemoteUpdatedAt,
                 RemoteFavoriteId = input.RemoteFavoriteId
-            }, DateTimeOffset.UtcNow);
+            }, now);
             Save(lib);
             return lib;
         }
@@ -3039,7 +3065,6 @@ internal sealed class AvatarStore
     public BackupListResult ListGroupBackups()
     {
         Directory.CreateDirectory(_backupDirectory);
-        MigrateGroupBackupsToTypeFolders();
         PruneGroupBackups();
         var files = GroupBackupFiles()
             .OrderByDescending(file => file.LastWriteTimeUtc)
@@ -3818,7 +3843,6 @@ internal sealed class AvatarStore
     }
     public void PruneGroupBackups()
     {
-        MigrateGroupBackupsToTypeFolders();
         var cutoff = DateTime.UtcNow.AddDays(-BackupMaxAgeDays);
         foreach (var file in GroupBackupFiles().Where(file => file.LastWriteTimeUtc < cutoff))
         {
@@ -3866,28 +3890,6 @@ internal sealed class AvatarStore
     {
         foreach (var file in files) DeleteBackupFile(file.Path);
     }
-    private void MigrateGroupBackupsToTypeFolders()
-    {
-        Directory.CreateDirectory(_backupDirectory);
-        foreach (var path in Directory.EnumerateFiles(_backupDirectory, "*.json", SearchOption.TopDirectoryOnly).ToList())
-        {
-            var summary = TryReadGroupBackupSummary(path);
-            if (summary is null || string.IsNullOrWhiteSpace(summary.Id)) continue;
-            var reason = BackupReasonFromName(Path.GetFileName(path));
-            if (string.IsNullOrWhiteSpace(reason)) continue;
-
-            var targetDirectory = GroupBackupDirectory(summary.Id, reason);
-            var targetPath = UniqueBackupPath(targetDirectory, Path.GetFileName(path));
-            if (Path.GetFullPath(path).Equals(Path.GetFullPath(targetPath), StringComparison.OrdinalIgnoreCase)) continue;
-            try
-            {
-                Directory.CreateDirectory(targetDirectory);
-                File.Move(path, targetPath);
-                MoveBackupBackgroundFolder(path, targetPath);
-            }
-            catch { }
-        }
-    }
     private static void DeleteBackupFile(string path)
     {
         try { File.Delete(path); }
@@ -3897,19 +3899,6 @@ internal sealed class AvatarStore
         try
         {
             if (Directory.Exists(backgroundFolder)) Directory.Delete(backgroundFolder, true);
-        }
-        catch { }
-    }
-    private static void MoveBackupBackgroundFolder(string oldBackupPath, string newBackupPath)
-    {
-        var oldBackgroundFolder = BackupBackgroundFolderPath(oldBackupPath);
-        if (!Directory.Exists(oldBackgroundFolder)) return;
-        var newBackgroundFolder = BackupBackgroundFolderPath(newBackupPath);
-        try
-        {
-            if (Directory.Exists(newBackgroundFolder)) Directory.Delete(newBackgroundFolder, true);
-            Directory.CreateDirectory(Path.GetDirectoryName(newBackgroundFolder)!);
-            Directory.Move(oldBackgroundFolder, newBackgroundFolder);
         }
         catch { }
     }
@@ -4732,7 +4721,7 @@ internal sealed class AvatarStore
 
 internal sealed class AppSettingsStore
 {
-    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, true, "", true, "F8", "Ctrl+R", "Ctrl+Alt+R", "", "avatars", 85, 100, 8, 8, 360, 519, 18);
+    private static readonly AppSettings DefaultSettings = new(10, 10, "#303735", 20, 35, "#303735", true, true, "", true, "F8", "Ctrl+R", "Ctrl+Alt+R", "", "avatars", 85, 100, 8, 8, 360, 522, 18);
     private readonly string _settingsPath = AppPaths.SettingsPath;
     public AppSettings Get()
     {
@@ -4772,8 +4761,8 @@ internal sealed class AppSettingsStore
         var overlayX = s.SchemaVersion < 11 && s.OverlayX == 0 ? DefaultSettings.OverlayX : Math.Clamp(s.OverlayX, -10000, 10000);
         var overlayY = s.SchemaVersion < 11 && s.OverlayY == 0 ? DefaultSettings.OverlayY : Math.Clamp(s.OverlayY, -10000, 10000);
         if (s.SchemaVersion < 18 && overlayX == DefaultSettings.OverlayX && overlayY == 16) overlayY = DefaultSettings.OverlayY;
-        var overlayWidth = s.SchemaVersion < 11 && s.OverlayWidth == 0 ? DefaultSettings.OverlayWidth : Math.Clamp(s.OverlayWidth, 360, 900);
-        var overlayHeight = s.SchemaVersion < 11 && s.OverlayHeight == 0 ? DefaultSettings.OverlayHeight : Math.Clamp(s.OverlayHeight, 420, 1000);
+        var overlayWidth = DefaultSettings.OverlayWidth;
+        var overlayHeight = s.SchemaVersion < 11 && s.OverlayHeight == 0 ? DefaultSettings.OverlayHeight : Math.Clamp(s.OverlayHeight, 420, 900);
         return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BlurEnabled, s.BackgroundEffect ?? "", s.OverlayEnabled, hotkey, databaseRandomHotkey, favoriteRandomHotkey, databaseRandomVrBinding, overlayPanel, overlayOpacity, overlayScale, overlayX, overlayY, overlayWidth, overlayHeight, 18);
     }
 }
@@ -4843,6 +4832,16 @@ internal sealed class AppStateStore
                 PersistLocked();
             }
             return _items.ToDictionary(x => x.Key, x => x.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    public Dictionary<string, JsonElement> Reload()
+    {
+        lock (_gate)
+        {
+            _initialized = false;
+            _items = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+            return Load();
         }
     }
 
@@ -8738,7 +8737,6 @@ internal sealed class VrChatRateLimitGate
 
 internal sealed class AvatarDatabaseClient
 {
-    private const string VrcxDatabaseFileName = "VRCX.sqlite3";
     private const string VrcxRemoteDatabaseUrl = "https://api.avtrdb.com/v3/avatar/search/vrcx";
     private const int VrcxRemotePageSize = 50;
     private const int VrcxRemoteRandomPageCeiling = 1000;
@@ -8843,12 +8841,6 @@ internal sealed class AvatarDatabaseClient
             throw new InvalidOperationException("VRCX is available for search, but is excluded from random results until it supports full-database random selection.");
 
         return result;
-    }
-
-    public VrcxDatabaseStatus GetVrcxStatus()
-    {
-        var path = ResolveVrcxDatabasePath();
-        return new VrcxDatabaseStatus(!string.IsNullOrWhiteSpace(path), path ?? "", AppPaths.DatabaseDirectory);
     }
 
     public List<DiagnosticItem> SourceDiagnostics() =>
@@ -10748,159 +10740,6 @@ internal sealed class AvatarDatabaseClient
         };
     }
 
-    private static async Task<AvatarInput?> ResolveLocalVrcxAvatarByImageAsync(string imageKey, string imageUrl)
-    {
-        var databasePath = ResolveVrcxDatabasePath();
-        if (string.IsNullOrWhiteSpace(databasePath) || !File.Exists(databasePath)) return null;
-        var terms = ResolveImageLookupTerms(imageKey, imageUrl).ToList();
-        if (terms.Count == 0) return null;
-
-        try
-        {
-            using var connection = OpenReadOnlyConnection(databasePath);
-            using var command = connection.CreateCommand();
-            var clauses = new List<string>();
-            for (var i = 0; i < terms.Count; i++)
-            {
-                var parameter = $"@image{i}";
-                command.Parameters.AddWithValue(parameter, $"%{EscapeLike(terms[i])}%");
-                clauses.Add($"a.image_url LIKE {parameter} ESCAPE '\\'");
-                clauses.Add($"a.thumbnail_image_url LIKE {parameter} ESCAPE '\\'");
-            }
-
-            command.CommandText = $"""
-                {SelectAvatarSql}
-                WHERE {string.Join(" OR ", clauses)}
-                ORDER BY coalesce(a.updated_at, a.created_at, a.added_at, '') DESC
-                LIMIT 1
-                """;
-
-            using var reader = await command.ExecuteReaderAsync();
-            return await reader.ReadAsync() ? ReadDatabaseAvatar(reader) : null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static async Task<AvatarInput?> ResolveLocalVrcxAvatarByFeedAsync(string userId, string displayName, string imageKey, string imageUrl)
-    {
-        var databasePath = ResolveVrcxDatabasePath();
-        if (string.IsNullOrWhiteSpace(databasePath) || !File.Exists(databasePath)) return null;
-        try
-        {
-            using var connection = OpenReadOnlyConnection(databasePath);
-            var feedTables = VrcxFeedAvatarTables(connection);
-            foreach (var table in feedTables)
-            {
-                var feed = await ReadLatestVrcxFeedAvatarAsync(connection, table, userId, displayName);
-                if (feed is null) continue;
-
-                var currentImage = FirstNonEmpty(feed.CurrentImageUrl, feed.CurrentThumbnailImageUrl, imageUrl);
-                var currentKey = FirstNonEmpty(ImageFileKey(currentImage), imageKey);
-                var byImage = await ResolveLocalVrcxAvatarByImageAsync(currentKey, currentImage);
-                if (byImage is not null) return byImage;
-
-                var byName = await ResolveLocalVrcxAvatarByNameAsync(connection, feed.AvatarName, feed.OwnerId);
-                if (byName is not null) return byName;
-
-                if (!string.IsNullOrWhiteSpace(feed.AvatarName) || !string.IsNullOrWhiteSpace(currentImage))
-                {
-                    return new AvatarInput
-                    {
-                        AvatarId = "",
-                        Name = string.IsNullOrWhiteSpace(feed.AvatarName) ? "Current Avatar" : feed.AvatarName,
-                        AuthorId = feed.OwnerId,
-                        ImageUrl = currentImage,
-                        ThumbnailImageUrl = FirstNonEmpty(feed.CurrentThumbnailImageUrl, currentImage),
-                        SourceUrl = currentImage,
-                        Description = "VRCX has seen this user's current avatar, but the avatar ID is not available in the local cache yet.",
-                        Notes = "Found in the local VRCX avatar feed.",
-                        RawJson = JsonSerializer.Serialize(feed, ProgramJson.Options),
-                        Source = "vrcx-feed",
-                        RemoteUpdatedAt = feed.CreatedAt
-                    };
-                }
-            }
-        }
-        catch
-        {
-        }
-
-        return null;
-    }
-
-    private static List<string> VrcxFeedAvatarTables(SqliteConnection connection)
-    {
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%\\_feed\\_avatar' ESCAPE '\\' ORDER BY name";
-        using var reader = command.ExecuteReader();
-        var tables = new List<string>();
-        while (reader.Read())
-        {
-            var name = Convert.ToString(reader["name"]) ?? "";
-            if (!string.IsNullOrWhiteSpace(name)) tables.Add(name);
-        }
-        return tables;
-    }
-
-    private static async Task<VrcxFeedAvatarRow?> ReadLatestVrcxFeedAvatarAsync(SqliteConnection connection, string table, string userId, string displayName)
-    {
-        if (string.IsNullOrWhiteSpace(userId) && string.IsNullOrWhiteSpace(displayName)) return null;
-        using var command = connection.CreateCommand();
-        var clauses = new List<string>();
-        if (!string.IsNullOrWhiteSpace(userId))
-        {
-            command.Parameters.AddWithValue("@userId", userId.Trim());
-            clauses.Add("user_id = @userId");
-        }
-        if (!string.IsNullOrWhiteSpace(displayName))
-        {
-            command.Parameters.AddWithValue("@displayName", displayName.Trim());
-            clauses.Add("lower(display_name) = lower(@displayName)");
-        }
-        command.CommandText = $"""
-            SELECT created_at, user_id, display_name, owner_id, avatar_name, current_avatar_image_url, current_avatar_thumbnail_image_url
-            FROM {QuoteSqliteIdentifier(table)}
-            WHERE {string.Join(" OR ", clauses)}
-            ORDER BY created_at DESC
-            LIMIT 1
-            """;
-        using var reader = await command.ExecuteReaderAsync();
-        if (!await reader.ReadAsync()) return null;
-        return new VrcxFeedAvatarRow(
-            ReadColumn(reader, "created_at"),
-            ReadColumn(reader, "user_id"),
-            ReadColumn(reader, "display_name"),
-            ReadColumn(reader, "owner_id"),
-            ReadColumn(reader, "avatar_name"),
-            ReadColumn(reader, "current_avatar_image_url"),
-            ReadColumn(reader, "current_avatar_thumbnail_image_url"));
-    }
-
-    private static async Task<AvatarInput?> ResolveLocalVrcxAvatarByNameAsync(SqliteConnection connection, string avatarName, string ownerId)
-    {
-        if (string.IsNullOrWhiteSpace(avatarName)) return null;
-        using var command = connection.CreateCommand();
-        command.Parameters.AddWithValue("@name", avatarName.Trim());
-        var ownerClause = "";
-        if (!string.IsNullOrWhiteSpace(ownerId))
-        {
-            command.Parameters.AddWithValue("@ownerId", ownerId.Trim());
-            ownerClause = "AND lower(coalesce(a.author_id, '')) = lower(@ownerId)";
-        }
-        command.CommandText = $"""
-            {SelectAvatarSql}
-            WHERE lower(coalesce(a.name, '')) = lower(@name)
-            {ownerClause}
-            ORDER BY coalesce(a.updated_at, a.created_at, a.added_at, '') DESC
-            LIMIT 1
-            """;
-        using var reader = await command.ExecuteReaderAsync();
-        return await reader.ReadAsync() ? ReadDatabaseAvatar(reader) : null;
-    }
-
     private static async Task<AvatarInput?> ResolveRemoteVrcxAvatarByImageAsync(string term, string imageKey, string imageUrl)
     {
         if (string.IsNullOrWhiteSpace(term) || term.Length < 3) return null;
@@ -10943,114 +10782,6 @@ internal sealed class AvatarDatabaseClient
     {
         var match = Regex.Match(url ?? "", @"file_[0-9a-f-]+", RegexOptions.IgnoreCase);
         return match.Success ? match.Value.ToLowerInvariant() : "";
-    }
-
-    private static string FirstNonEmpty(params string?[] values) =>
-        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "";
-
-    private static string QuoteSqliteIdentifier(string value) =>
-        "\"" + value.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
-
-    private const string SelectAvatarSql = """
-        SELECT
-            a.id,
-            a.author_id,
-            a.author_name,
-            a.created_at,
-            a.description,
-            a.image_url,
-            a.name,
-            a.release_status,
-            a.thumbnail_image_url,
-            a.updated_at,
-            a.version,
-            coalesce((SELECT group_concat(t.tag, ', ') FROM avatar_tags t WHERE t.avatar_id = a.id), '') AS tags,
-            coalesce((SELECT m.memo FROM avatar_memos m WHERE m.avatar_id = a.id), '') AS memo
-        FROM cache_avatar a
-        """;
-
-    private static SqliteConnection OpenReadOnlyConnection(string databasePath)
-    {
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = databasePath,
-            Mode = SqliteOpenMode.ReadOnly,
-            Cache = SqliteCacheMode.Shared,
-            Pooling = false
-        };
-        var connection = new SqliteConnection(builder.ToString());
-        connection.Open();
-        ExecuteNonQuery(connection, "PRAGMA query_only = ON");
-        ExecuteNonQuery(connection, "PRAGMA busy_timeout = 5000");
-        return connection;
-    }
-
-    private static void ExecuteNonQuery(SqliteConnection connection, string sql)
-    {
-        using var command = connection.CreateCommand();
-        command.CommandText = sql;
-        command.ExecuteNonQuery();
-    }
-
-    private static AvatarInput ReadDatabaseAvatar(SqliteDataReader reader)
-    {
-        var id = ReadColumn(reader, "id");
-        var name = ReadColumn(reader, "name");
-        var authorId = ReadColumn(reader, "author_id");
-        var authorName = ReadColumn(reader, "author_name");
-        var description = ReadColumn(reader, "description");
-        var imageUrl = ReadColumn(reader, "image_url");
-        var thumbnailImageUrl = ReadColumn(reader, "thumbnail_image_url");
-        var releaseStatus = ReadColumn(reader, "release_status");
-        var version = ReadColumn(reader, "version");
-        var createdAt = ReadColumn(reader, "created_at");
-        var updatedAt = ReadColumn(reader, "updated_at");
-        var tags = ReadColumn(reader, "tags");
-        var memo = ReadColumn(reader, "memo");
-
-        var raw = new Dictionary<string, string>
-        {
-            ["id"] = id,
-            ["name"] = name,
-            ["description"] = description,
-            ["authorId"] = authorId,
-            ["authorName"] = authorName,
-            ["imageUrl"] = imageUrl,
-            ["thumbnailImageUrl"] = thumbnailImageUrl,
-            ["releaseStatus"] = releaseStatus,
-            ["version"] = version,
-            ["tags"] = tags,
-            ["memo"] = memo,
-            ["createdAt"] = createdAt,
-            ["updatedAt"] = updatedAt
-        };
-
-        return new AvatarInput
-        {
-            AvatarId = id,
-            Name = string.IsNullOrWhiteSpace(name) ? id : name,
-            Description = description,
-            AuthorId = authorId,
-            AuthorName = authorName,
-            ImageUrl = imageUrl,
-            ThumbnailImageUrl = string.IsNullOrWhiteSpace(thumbnailImageUrl) ? imageUrl : thumbnailImageUrl,
-            ReleaseStatus = string.IsNullOrWhiteSpace(releaseStatus) ? "public" : releaseStatus,
-            Version = version,
-            Platforms = tags,
-            Tags = tags,
-            SourceUrl = $"https://vrchat.com/home/avatar/{id}",
-            Notes = string.IsNullOrWhiteSpace(memo) ? "Found in the local VRCX database." : memo,
-            RawJson = JsonSerializer.Serialize(raw, ProgramJson.Options),
-            Source = "avatar-database",
-            RemoteCreatedAt = createdAt,
-            RemoteUpdatedAt = updatedAt
-        };
-    }
-
-    private static string ReadColumn(SqliteDataReader reader, string name)
-    {
-        var value = reader[name];
-        return value == DBNull.Value ? "" : Convert.ToString(value) ?? "";
     }
 
     private static bool AvatarMatchesSearch(AvatarInput avatar, AvatarSearchInput input)
@@ -11137,58 +10868,6 @@ internal sealed class AvatarDatabaseClient
     private static bool HasSearchField(AvatarSearchInput input) => HasTextSearchField(input) || HasOptionFilter(input);
     private static bool IsAuthorIdOnlySearch(AvatarSearchInput input) =>
         input.SearchAuthor && !input.SearchAvatar && !input.SearchDescription && !input.SearchTags && !HasOptionFilter(input) && !string.IsNullOrWhiteSpace(input.AuthorId);
-    private static string EscapeLike(string value) =>
-        value.Replace(@"\", @"\\", StringComparison.Ordinal)
-            .Replace("%", @"\%", StringComparison.Ordinal)
-            .Replace("_", @"\_", StringComparison.Ordinal);
-
-    private static string? ResolveVrcxDatabasePath()
-    {
-        var candidates = new List<string>();
-        AddDatabaseCandidate(candidates, Path.Combine(AppPaths.DatabaseDirectory, VrcxDatabaseFileName));
-        foreach (var configured in ReadConfiguredDatabaseLocations())
-        {
-            AddDatabaseCandidate(candidates, configured);
-        }
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        AddDatabaseCandidate(candidates, Path.Combine(appData, "VRCX", VrcxDatabaseFileName));
-        AddDatabaseCandidate(candidates, Path.Combine(appData, "VRCX", "VRCX", VrcxDatabaseFileName));
-        return candidates.FirstOrDefault(File.Exists);
-    }
-
-    private static void AddDatabaseCandidate(List<string> candidates, string? path)
-    {
-        if (string.IsNullOrWhiteSpace(path)) return;
-        if (File.Exists(path))
-        {
-            candidates.Add(path);
-            return;
-        }
-        if (Directory.Exists(path))
-        {
-            candidates.Add(Path.Combine(path, VrcxDatabaseFileName));
-        }
-    }
-
-    private static IEnumerable<string> ReadConfiguredDatabaseLocations()
-    {
-        var configPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VRCX", "VRCX.json");
-        if (!File.Exists(configPath)) yield break;
-        string? configured = null;
-        try
-        {
-            using var document = JsonDocument.Parse(File.ReadAllText(configPath));
-            if (document.RootElement.TryGetProperty("VRCX_DatabaseLocation", out var value) && value.ValueKind == JsonValueKind.String)
-            {
-                configured = value.GetString();
-            }
-        }
-        catch
-        {
-        }
-
-        if (!string.IsNullOrWhiteSpace(configured)) yield return configured;
-    }
 }
 
 internal sealed class SteamVrControllerPoller : IDisposable
@@ -11977,10 +11656,10 @@ internal static class OverlayHostStateStore
 }
 internal static class AvatarInputExtensions { public static string NameOrId(this AvatarInput avatar) => string.IsNullOrWhiteSpace(avatar.Name) ? avatar.AvatarId : avatar.Name; }
 internal sealed class IdInput { public string Id { get; set; } = ""; public string Path { get; set; } = ""; }
+internal sealed record OverlayMoveInput(int Dx = 0, int Dy = 0);
+internal sealed record OverlayResizeInput(int Width = 360, int Height = 522, int Dx = 0, int Dy = 0, string Edges = "s");
 internal sealed class IdsInput { public List<long> Ids { get; set; } = []; }
 internal sealed class BackupRestoreInput { public string Path { get; set; } = ""; public string Mode { get; set; } = ""; }
-internal sealed record OverlayMoveInput(int Dx = 0, int Dy = 0);
-internal sealed record OverlayResizeInput(int Width = 500, int Height = 720, int Dx = 0, int Dy = 0, string Edges = "se");
 internal sealed record OverlayNoticeReadyInput(string Token = "");
 internal sealed class ExportJsonInput { public string FileName { get; set; } = ""; public JsonElement Payload { get; set; } }
 internal sealed class MoveAvatarInput { public string AvatarId { get; set; } = ""; public string GroupId { get; set; } = ""; }
@@ -12016,21 +11695,19 @@ internal sealed record DiagnosticsResult(List<DiagnosticItem> Items);
 internal sealed record ExportResult(string Path);
 internal sealed record GroupClearResult(LibraryData Library, int Removed, string BackupPath);
 internal sealed record SteamVrControllerBindingCapture(string Binding, string Display);
-internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, bool BlurEnabled = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayHotkey = "F8", string DatabaseRandomHotkey = "Ctrl+R", string FavoriteRandomHotkey = "Ctrl+Alt+R", string DatabaseRandomVrBinding = "", string OverlayDefaultPanel = "avatars", int OverlayOpacity = 85, int OverlayScale = 100, int OverlayX = 8, int OverlayY = 8, int OverlayWidth = 360, int OverlayHeight = 519, int SchemaVersion = 18);
+internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, bool BlurEnabled = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayHotkey = "F8", string DatabaseRandomHotkey = "Ctrl+R", string FavoriteRandomHotkey = "Ctrl+Alt+R", string DatabaseRandomVrBinding = "", string OverlayDefaultPanel = "avatars", int OverlayOpacity = 85, int OverlayScale = 100, int OverlayX = 8, int OverlayY = 8, int OverlayWidth = 360, int OverlayHeight = 522, int SchemaVersion = 18);
 internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx", string SearchMode = "phrase", List<string>? ExcludedAvatarIds = null, string Sort = "updatedDesc", bool ExactAuthorName = false);
 internal sealed record AvatarListResult(List<AvatarInput> Avatars);
 internal sealed record AvatarImageResolveInput(string AvatarId = "", string ImageUrl = "", string Name = "", string UserId = "", string DisplayName = "");
 internal sealed record AvatarDatabaseSearchResult(List<AvatarInput> Results, int Page, bool HasMore, DateTimeOffset CachedAt, int Total = 0);
 internal sealed record AvatarDatabaseCountResult(string Query, int Total, DateTimeOffset CachedAt);
 internal sealed record AvatarDatabaseCountProgress(int Discovered, bool Counting, bool Finished);
-internal sealed record VrcxDatabaseStatus(bool HasLocalDatabase, string Path, string DatabaseDirectory);
 internal sealed record DatabaseSourceStatus(string Provider, string Name, bool Available, string Message);
 internal sealed record DatabaseSourceStatusResult(DatabaseSourceStatus[] Sources);
 internal sealed record PasUpdateStatus(bool HasLocalFile, bool HasUpdate, string LocalFileDate, string RemoteFileDate, long LocalBytes, long RemoteBytes, string Url, string Message);
 internal sealed record AvtrZipSearchPage(AvatarDatabaseSearchResult Result, int TotalCount);
 internal sealed record AvtrZipRandomBatch(List<AvatarInput> Results, int TotalCount, uint Seed);
 internal sealed record PasDatabaseData(string Path, string PlatformLabel, string FileDate, int AvatarCount, int AuthorCount, int FileAvatarCount, int FileAuthorCount, byte[] DynamicBytes, byte[] AvatarIds, uint[] AuthorIds, string[] AvatarNames, string[] AuthorNames, string[] AvatarDescriptions, string[] AvatarTags);
-internal sealed record VrcxFeedAvatarRow(string CreatedAt, string UserId, string DisplayName, string OwnerId, string AvatarName, string CurrentImageUrl, string CurrentThumbnailImageUrl);
 internal sealed record PasDatabaseInfo(string Location, string FileDate, long ContentLength, DateTimeOffset? LastModifiedUtc, string ETag, int AvatarCount, int AuthorCount, int FileAvatarCount, int FileAuthorCount, bool HeaderVerified);
 internal sealed record LoginInput(string Username, string Password);
 internal sealed record TwoFactorInput(string Code, string Method);

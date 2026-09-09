@@ -64,8 +64,8 @@ button { font: inherit; }
   height: 100vh;
   display: grid;
   grid-template-rows: auto auto auto auto minmax(0, 1fr);
-  gap: 5px;
-  padding: calc(6px * var(--overlay-scale));
+  gap: 4px;
+  padding: calc(5px * var(--overlay-scale));
   border: 1px solid var(--overlay-line);
   border-radius: var(--overlay-radius);
   background:
@@ -78,7 +78,7 @@ button { font: inherit; }
 .drag-handle {
   position: relative;
   z-index: 130;
-  height: 8px;
+  height: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -105,39 +105,14 @@ button { font: inherit; }
 }
 .resize-zone {
   position: absolute;
-  pointer-events: auto;
-}
-.resize-n,
-.resize-s {
   left: 14px;
   right: 14px;
-  height: 4px;
+  height: 6px;
+  pointer-events: auto;
   cursor: ns-resize;
 }
 .resize-n { top: 0; }
 .resize-s { bottom: 0; }
-.resize-e,
-.resize-w {
-  top: 14px;
-  bottom: 14px;
-  width: 7px;
-  cursor: ew-resize;
-}
-.resize-e { right: 0; }
-.resize-w { left: 0; }
-.resize-ne,
-.resize-nw,
-.resize-se,
-.resize-sw {
-  width: 14px;
-  height: 14px;
-}
-.resize-ne { top: 0; right: 0; cursor: nesw-resize; }
-.resize-nw { top: 0; left: 0; cursor: nwse-resize; }
-.resize-se { right: 0; bottom: 0; cursor: nwse-resize; }
-.resize-sw { left: 0; bottom: 0; cursor: nesw-resize;
-}
-
 .overlay-tabs {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -211,10 +186,11 @@ button { font: inherit; }
 }
 .group-button {
   position: relative;
-  height: 36px;
+  height: 30px;
   display: grid;
-  align-content: center;
-  gap: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
   padding: 3px 32px 3px 8px;
   text-align: left;
   background: var(--overlay-bg-strong);
@@ -225,11 +201,12 @@ button { font: inherit; }
   content: "";
   position: absolute;
   right: 11px;
-  top: 12px;
-  width: 8px;
-  height: 8px;
+  top: 9px;
+  width: 7px;
+  height: 7px;
   border-right: 2px solid var(--overlay-text);
   border-bottom: 2px solid var(--overlay-text);
+  border-radius: 0 0 1px 0;
   transform: rotate(45deg);
   opacity: .9;
   pointer-events: none;
@@ -260,7 +237,7 @@ button { font: inherit; }
 }
 .group-button span {
   color: var(--overlay-text);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: var(--ui-weight-strong);
   line-height: 1.15;
 }
@@ -269,37 +246,45 @@ button { font: inherit; }
   font-size: 10px;
   font-weight: var(--ui-weight-normal);
   line-height: 1.2;
+  text-align: right;
 }
 
 .group-dropdown {
   position: absolute;
   z-index: 30;
-  left: calc(6px * var(--overlay-scale));
-  right: calc(6px * var(--overlay-scale));
-  top: calc((6px * var(--overlay-scale)) + 8px + 5px + 26px + 5px + 36px + 5px);
+  left: calc(5px * var(--overlay-scale));
+  right: calc(5px * var(--overlay-scale));
+  top: calc((5px * var(--overlay-scale)) + 16px + 4px + 26px + 4px + 30px + 4px);
   display: grid;
-  gap: 5px;
-  max-height: 158px;
-  padding: 6px;
+  gap: 4px;
+  max-height: 190px;
+  padding: 5px;
   border: 1px solid var(--overlay-line);
   border-radius: var(--overlay-radius);
   background: var(--overlay-bg-strong);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, .38);
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--overlay-line-strong) rgba(255, 255, 255, .04);
 }
 .group-dropdown.tall {
-  max-height: 260px;
+  max-height: 280px;
 }
+.group-dropdown::-webkit-scrollbar { width: 8px; }
+.group-dropdown::-webkit-scrollbar-track { background: rgba(255,255,255,.04); border-radius: 999px; }
+.group-dropdown::-webkit-scrollbar-thumb { background: var(--overlay-line-strong); border-radius: 999px; }
 .group-dropdown button {
   width: 100%;
   min-width: 0;
+  min-height: 30px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
-  padding: 7px 8px;
-  border: 1px solid transparent;
+  padding: 6px 8px;
+  border: 1px solid var(--overlay-line);
   border-radius: 7px;
-  background: transparent;
+  background: rgba(255, 255, 255, .018);
   color: var(--overlay-muted);
   text-align: left;
   cursor: pointer;
@@ -333,7 +318,7 @@ button { font: inherit; }
   z-index: 1;
   display: grid;
   align-content: start;
-  gap: 6px;
+  gap: 5px;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
@@ -549,13 +534,14 @@ button { font: inherit; }
 }
 
 .overlay-row {
+  position: relative;
   width: 100%;
   display: grid;
   grid-template-columns: 54px minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: 7px;
   align-items: center;
-  min-height: 72px;
-  padding: 6px;
+  min-height: 68px;
+  padding: 4px;
   border: 1px solid var(--overlay-line);
   border-radius: var(--overlay-radius);
   background: var(--overlay-bg-soft);
@@ -565,7 +551,7 @@ button { font: inherit; }
 .overlay-row.friend-row {
   grid-template-columns: 52px minmax(0, 1fr) auto;
   min-height: 64px;
-  padding: 4px 6px;
+  padding: 4px;
 }
 .overlay-row.no-actions {
   grid-template-columns: 54px minmax(0, 1fr);
@@ -743,7 +729,7 @@ button { font: inherit; }
 .row-main {
   min-width: 0;
   display: grid;
-  gap: 4px;
+  gap: 3px;
 }
 .row-title,
 .row-subtitle {
@@ -815,7 +801,6 @@ button { font: inherit; }
   color: var(--overlay-danger);
   border-color: rgba(255, 107, 107, .36);
 }
-.row-action.favorite-star,
 .detail-actions .favorite-star {
   width: 28px;
   min-width: 28px;
@@ -824,6 +809,30 @@ button { font: inherit; }
   place-items: center;
   color: var(--overlay-gold);
   border-color: rgba(241, 201, 100, .45);
+}
+.overlay-row.avatar-row > .favorite-star {
+  position: absolute;
+  right: 5px;
+  bottom: 1px;
+  z-index: 2;
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--overlay-gold);
+}
+.overlay-row.avatar-row > .favorite-star:hover {
+  border-color: transparent;
+  background: transparent;
+  color: color-mix(in srgb, var(--overlay-gold) 82%, var(--overlay-text));
+}
+.overlay-row.avatar-row > .favorite-star:focus-visible {
+  outline: 1px solid var(--overlay-line-strong);
+  outline-offset: 1px;
 }
 .row-action.favorite-star svg,
 .detail-actions .favorite-star svg {
@@ -837,6 +846,10 @@ button { font: inherit; }
 .row-action.favorite-star.active,
 .detail-actions .favorite-star.active {
   background: rgba(241, 201, 100, .16);
+}
+.overlay-row.avatar-row > .favorite-star.active,
+.overlay-row.avatar-row > .favorite-star.active:hover {
+  background: transparent;
 }
 .row-action.favorite-star.active svg,
 .detail-actions .favorite-star.active svg {

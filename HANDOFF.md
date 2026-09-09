@@ -47,7 +47,7 @@ Last known root exe SHA256:
 - `Hide older avatars` is a heuristic, not true SDK/avatar-descriptor inspection. It checks newest known date fields and some metadata text.
 - As of 2026-08-11, both configured Prismic PAS endpoints return HTTP 404. The local PAS file was last refreshed on 2026-06-05. The user plans to join Prismic's world later so the current database source can be identified.
 - When the Prismic source is repaired, show a visible error only when its update check/download fails. Do not warn merely because the local cache is old or because no update is available; creators can take breaks.
-- AVTRZIP and the remote VRCX-compatible endpoint were reachable on 2026-08-11. They are live search sources, not local databases that VRCNeph periodically downloads.
+- AVTRZIP was reachable on 2026-08-11. VRCX-compatible search/import remains a separate optional source and does not require VRCX to be installed.
 - Windows notifications were discussed but intentionally not implemented.
 - Broader speed/performance cleanup was discussed but not implemented.
 - GitHub upload/release update has not been done for these changes.

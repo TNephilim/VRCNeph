@@ -439,7 +439,10 @@ function applyOverlayHostState(host = {}) {
     const previousToken = overlayHostToken;
     overlayHostMode = mode;
     overlayHostToken = token;
-    if (mode === "panel" && previousMode !== "panel") void refresh();
+    if (mode === "panel" && previousMode !== "panel") {
+      void refresh();
+      if (appStateStore.ready) void showFirstOpenTipWhenReady();
+    }
     if (mode === "notice" && (previousMode !== "notice" || previousToken !== token)) {
       void showEquipNotice(host?.notice || {}, token);
     } else if (mode !== "notice") {
@@ -936,7 +939,7 @@ function avatarRow(avatar, index) {
   const favoriteAction = favoriteEntry
     ? favoriteStarButton({ active: true, action: "data-unfavorite-avatar", id: avatar.id || "", extraAttrs: `data-local-avatar="${escapeHtml(favoriteLocalId)}" data-avatar-group="${escapeHtml(favoriteGroupId)}"`, title: "Unfavorite avatar" })
     : favoriteStarButton({ active: false, action: "data-save-avatar", id: avatar.id || "", title: "Favorite avatar" });
-  return `<article class="overlay-row ${selected ? "selected" : ""}" data-avatar-id="${escapeHtml(avatar.id || "")}" data-avatar-local-id="${escapeHtml(avatar.localId || "")}">
+  return `<article class="overlay-row avatar-row ${selected ? "selected" : ""}" data-avatar-id="${escapeHtml(avatar.id || "")}" data-avatar-local-id="${escapeHtml(avatar.localId || "")}">
     ${imageHtml(avatar, title)}
     <div class="row-main">
       <div class="row-title">${escapeHtml(title)}</div>
@@ -945,8 +948,8 @@ function avatarRow(avatar, index) {
     </div>
     <div class="row-actions">
       <button class="row-action" type="button" data-equip-avatar="${escapeHtml(avatar.id || "")}">Equip</button>
-      ${favoriteAction}
     </div>
+    ${favoriteAction}
   </article>`;
 }
 
@@ -1032,7 +1035,6 @@ function friendRow(friend) {
   const actions = [
     `<button class="row-action" type="button" data-friend-action="join" data-friend-id="${escapeHtml(friend.id || "")}" ${joinLocation ? "" : "disabled"}>Join</button>`,
     `<button class="row-action" type="button" data-friend-action="invite" data-friend-id="${escapeHtml(friend.id || "")}">Invite</button>`,
-    `<button class="row-action" type="button" data-friend-action="message" data-friend-id="${escapeHtml(friend.id || "")}">Message</button>`
   ].filter(Boolean).join("");
   return `<article class="overlay-row friend-row ${selected ? "selected" : ""}" data-friend-id="${escapeHtml(friend.id || "")}">
     ${friendImage(friend)}
@@ -1259,8 +1261,6 @@ function userDetailBody(panel) {
   const presence = friendPresence(user);
   const statusLabel = userStatusLabel(user.status, presence);
   const avatarId = user.currentAvatarId || "";
-  const isFriend = user.isFriend === true;
-  const isBlocked = user.isBlocked === true;
   return `<div class="detail-hero">
     ${detailImageHtml(user, title)}
     <div class="detail-hero-main">
@@ -1272,10 +1272,7 @@ function userDetailBody(panel) {
   ${detailActionsHtml([
     user.id ? `<button type="button" data-friend-action="invite" data-friend-id="${escapeHtml(user.id)}">Invite</button>` : "",
     user.id ? `<button type="button" data-friend-action="request" data-friend-id="${escapeHtml(user.id)}">Request</button>` : "",
-    user.id ? `<button type="button" data-friend-action="message" data-friend-id="${escapeHtml(user.id)}">Message</button>` : "",
-    user.id && !isFriend && !isBlocked ? `<button type="button" data-friend-action="friend" data-friend-id="${escapeHtml(user.id)}">Friend</button>` : "",
-    user.id && isFriend ? `<button type="button" class="danger" data-friend-action="unfriend" data-friend-id="${escapeHtml(user.id)}">Unfriend</button>` : "",
-    user.id && isBlocked ? `<button type="button" data-friend-action="unblock" data-friend-id="${escapeHtml(user.id)}">Unblock</button>` : user.id ? `<button type="button" class="danger" data-friend-action="block" data-friend-id="${escapeHtml(user.id)}">Block</button>` : "",
+    user.id && !user.isFriend && !user.isBlocked ? `<button type="button" data-friend-action="friend" data-friend-id="${escapeHtml(user.id)}">Friend</button>` : "",
     user.id ? `<button type="button" data-copy-text="${escapeHtml(user.id)}">Copy ID</button>` : ""
   ])}
   ${panel.loading ? `<div class="detail-status">Loading user details...</div>` : ""}
@@ -1385,6 +1382,7 @@ function applySnapshotSettings() {
 function installWindowControls() {
   const dragHandle = $("dragHandle");
   const resizeZones = [...document.querySelectorAll(".resize-zone")];
+  if (!dragHandle) return;
   let drag = null;
   let resize = null;
   let lastMotionAt = 0;
@@ -1428,7 +1426,7 @@ function installWindowControls() {
     zone.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
       drag = null;
-      resize = { pointerId: event.pointerId, x: event.screenX, y: event.screenY, edges: zone.dataset.resizeEdge || "se" };
+      resize = { pointerId: event.pointerId, x: event.screenX, y: event.screenY, edges: zone.dataset.resizeEdge || "s" };
       lastMotionAt = 0;
       try { zone.setPointerCapture(event.pointerId); } catch { }
       event.preventDefault();
@@ -1436,9 +1434,6 @@ function installWindowControls() {
     });
   });
 
-  // Keep the gesture alive at the document level. Native window resizing can
-  // move the edge element under the pointer, which otherwise loses its local
-  // pointer stream and leaves the next drag in a stale state.
   document.addEventListener("pointermove", (event) => {
     if (drag && event.pointerId === drag.pointerId) {
       if (!canSendMotion()) return;
@@ -1518,32 +1513,6 @@ function chooseOverlay({ title = "Choose", message = "", label = "Option", optio
     dialog.addEventListener("cancel", onCancel, { once: true });
     dialog.addEventListener("close", onCancel, { once: true });
     dialog.showModal();
-  });
-}
-
-function textOverlay({ title = "Message", message = "", confirmLabel = "Send", value = "" } = {}) {
-  const dialog = $("textDialog");
-  $("textTitle").textContent = title;
-  $("textMessage").textContent = message;
-  $("textOkBtn").textContent = confirmLabel;
-  $("textInput").value = value;
-  return new Promise((resolve) => {
-    const cleanup = (result) => {
-      $("textOkBtn").removeEventListener("click", onOk);
-      $("textCancelBtn").removeEventListener("click", onCancel);
-      dialog.removeEventListener("cancel", onCancel);
-      dialog.removeEventListener("close", onCancel);
-      if (dialog.open) dialog.close();
-      resolve(result);
-    };
-    const onOk = () => cleanup($("textInput").value.trim());
-    const onCancel = () => cleanup("");
-    $("textOkBtn").addEventListener("click", onOk, { once: true });
-    $("textCancelBtn").addEventListener("click", onCancel, { once: true });
-    dialog.addEventListener("cancel", onCancel, { once: true });
-    dialog.addEventListener("close", onCancel, { once: true });
-    dialog.showModal();
-    $("textInput").focus();
   });
 }
 
@@ -1668,7 +1637,7 @@ async function runFriendAction(button) {
   const userId = button.dataset.friendId || "";
   const action = button.dataset.friendAction || "";
   if (!userId || !action) return;
-  const labels = { join: "Join", invite: "Invite", request: "Request", message: "Message", friend: "Friend", unfriend: "Unfriend", block: "Block", unblock: "Unblock" };
+  const labels = { join: "Join", invite: "Invite", request: "Request", friend: "Friend" };
   const restoreLabel = labels[action] || "Action";
   const restore = setBusy(button, "...");
   try {
@@ -1685,22 +1654,9 @@ async function runFriendAction(button) {
       const choice = await chooseOverlayInviteMessageSlot("request");
       if (!choice) { restore(restoreLabel); return; }
       await api("vrchatRequestInvite", { id: userId, messageSlot: choice.messageSlot }, 45000);
-    } else if (action === "message") {
-      const message = await textOverlay({ title: "Message Friend", message: "Send a VRChat invite/request message.", confirmLabel: "Send" });
-      if (!message) { restore(restoreLabel); return; }
-      await api("vrchatSendChatMessage", { userId, message, mode: "auto" }, 45000);
     } else if (action === "friend") {
       if (!await confirmOverlay({ title: "Friend Request", message: "Send this user a VRChat friend request?", confirmLabel: "Send Request", danger: false })) { restore(restoreLabel); return; }
       await api("vrchatFriendRequest", { id: userId }, 45000);
-    } else if (action === "unfriend") {
-      if (!await confirmOverlay({ title: "Unfriend", message: "Remove this user from your VRChat friends?", confirmLabel: "Unfriend", danger: true })) { restore(restoreLabel); return; }
-      await api("vrchatUnfriend", { id: userId }, 45000);
-    } else if (action === "block") {
-      if (!await confirmOverlay({ title: "Block User", message: "Block this user on VRChat?", confirmLabel: "Block", danger: true })) { restore(restoreLabel); return; }
-      await api("vrchatBlockUser", { id: userId, type: "block" }, 45000);
-    } else if (action === "unblock") {
-      if (!await confirmOverlay({ title: "Unblock User", message: "Unblock this user on VRChat?", confirmLabel: "Unblock", danger: false })) { restore(restoreLabel); return; }
-      await api("vrchatUnblockUser", { id: userId, type: "block" }, 45000);
     } else {
       return;
     }
@@ -1724,6 +1680,21 @@ function showFirstOpenTip() {
       danger: false
     });
   }, 250);
+}
+
+async function showFirstOpenTipWhenReady() {
+  try {
+    const latest = await api("appStateLoadFresh", {}, 3000);
+    if (latest && typeof latest === "object") {
+      if (Object.prototype.hasOwnProperty.call(latest, OVERLAY_TAB_TIP_SEEN_KEY)) {
+        appStateStore.values.set(OVERLAY_TAB_TIP_SEEN_KEY, latest[OVERLAY_TAB_TIP_SEEN_KEY]);
+      } else {
+        appStateStore.values.delete(OVERLAY_TAB_TIP_SEEN_KEY);
+        appStateStore.pending.delete(OVERLAY_TAB_TIP_SEEN_KEY);
+      }
+    }
+  } catch { }
+  showFirstOpenTip();
 }
 
 document.addEventListener("keydown", (event) => {
@@ -1945,7 +1916,9 @@ $("detailPanels").addEventListener("click", handleOverlayContentClick);
 installWindowControls();
   hydrateCachedSnapshot();
   render();
-  void hydrateOverlayAppState().then(() => showFirstOpenTip());
+  void hydrateOverlayAppState().then(() => {
+    if (overlayHostMode === "panel") void showFirstOpenTipWhenReady();
+  });
 refreshSettingsFast();
 refresh();
 void refreshOverlayHostMode();
