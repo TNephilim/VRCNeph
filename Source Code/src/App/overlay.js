@@ -72,6 +72,7 @@ const state = {
 
 let overlayHostMode = "";
 let overlayHostToken = "";
+let overlayPanelVisible = false;
 let overlayFriendRefreshTimer = null;
 
 const $ = (id) => document.getElementById(id);
@@ -96,6 +97,9 @@ function handleNativeMessage(message) {
     }
     if (response.event === "overlayEquipNotice") {
       void showEquipNotice(response.data, overlayHostToken);
+    }
+    if (response.event === "overlayLayout") {
+      applyOverlayLayout(response.data || {});
     }
     if (response.event === "overlayHostState") {
       applyOverlayHostState(response.data);
@@ -152,7 +156,7 @@ function applyOverlayPresenceOverrides(snapshot) {
 }
 
 function scheduleOverlayFriendRefresh() {
-  if (overlayHostMode !== "panel") return;
+  if (!overlayPanelVisible) return;
   clearTimeout(overlayFriendRefreshTimer);
   overlayFriendRefreshTimer = setTimeout(() => {
     overlayFriendRefreshTimer = null;
@@ -327,7 +331,6 @@ async function showEquipNotice(notice = {}, hostToken = "") {
   // same notice, so text and imagery can never come from different avatars.
   noticeElement.classList.remove("is-fading-out");
   noticeElement.hidden = true;
-  document.body.classList.add("equip-notice-mode");
   resetEquipNoticeImage();
 
   state.data.settings = { ...(state.data.settings || {}), themeColor: notice.themeColor || "", panelColor: notice.panelColor || "", panelColorSynced: false, overlayOpacity: notice.panelOpacity || 85, overlayScale: 100 };
@@ -362,11 +365,6 @@ async function showEquipNotice(notice = {}, hostToken = "") {
   }
 
   noticeElement.hidden = false;
-  const readyToken = hostToken || overlayHostToken;
-  requestAnimationFrame(() => {
-    if (renderToken !== equipNoticeImageToken || noticeElement.hidden) return;
-    send("overlayNoticeReady", { token: readyToken });
-  });
   equipNoticeFadeTimer = setTimeout(() => {
     if (renderToken === equipNoticeImageToken && !noticeElement.hidden) noticeElement.classList.add("is-fading-out");
   }, 4720);
@@ -433,28 +431,55 @@ async function hydrateOverlayAppState() {
 }
 
 function applyOverlayHostState(host = {}) {
-    const mode = String(host?.mode || "hidden").toLowerCase();
-    const token = String(host?.token || "");
-    const previousMode = overlayHostMode;
-    const previousToken = overlayHostToken;
-    overlayHostMode = mode;
-    overlayHostToken = token;
-    if (mode === "panel" && previousMode !== "panel") {
-      void refresh();
-      if (appStateStore.ready) void showFirstOpenTipWhenReady();
+  const mode = String(host?.mode || "hidden").toLowerCase();
+  const token = String(host?.token || "");
+  const panelVisible = host?.panelVisible === true || mode === "panel";
+  const previousPanelVisible = overlayPanelVisible;
+  const previousToken = overlayHostToken;
+  overlayHostMode = mode;
+  overlayHostToken = token;
+  overlayPanelVisible = panelVisible;
+  applyOverlayPanelVisibility();
+  if (panelVisible && !previousPanelVisible) {
+    void refresh();
+    if (appStateStore.ready) void showFirstOpenTipWhenReady();
+  }
+  if (mode === "notice" && previousToken !== token) {
+    void showEquipNotice(host?.notice || {}, token);
+  } else if (mode !== "notice") {
+    ++equipNoticeImageToken;
+    cancelEquipNoticeImageLoad();
+    if (equipNoticeFadeTimer) {
+      clearTimeout(equipNoticeFadeTimer);
+      equipNoticeFadeTimer = null;
     }
-    if (mode === "notice" && (previousMode !== "notice" || previousToken !== token)) {
-      void showEquipNotice(host?.notice || {}, token);
-    } else if (mode !== "notice") {
-      ++equipNoticeImageToken;
-      cancelEquipNoticeImageLoad();
-      if (equipNoticeFadeTimer) {
-        clearTimeout(equipNoticeFadeTimer);
-        equipNoticeFadeTimer = null;
-      }
-      $("equipNotice").hidden = true;
-      document.body.classList.remove("equip-notice-mode");
-    }
+    $("equipNotice").hidden = true;
+  }
+}
+function applyOverlayPanelVisibility() {
+  const shell = document.querySelector(".overlay-shell");
+  if (!shell) return;
+  shell.toggleAttribute("hidden", !overlayPanelVisible);
+}
+function applyOverlayLayout(layout = {}) {
+  const shell = document.querySelector(".overlay-shell");
+  const notice = $("equipNotice");
+  if (!shell || !layout || !Number.isFinite(Number(layout.hostWidth))) return;
+  const hostX = Number(layout.hostX) || 0;
+  const hostY = Number(layout.hostY) || 0;
+  if (layout.panelVisible) {
+    shell.style.left = `${(Number(layout.panelX) || 0) - hostX}px`;
+    shell.style.top = `${(Number(layout.panelY) || 0) - hostY}px`;
+    shell.style.width = `${Math.max(1, Number(layout.panelWidth) || 360)}px`;
+    shell.style.height = `${Math.max(1, Number(layout.panelHeight) || 522)}px`;
+  }
+  applyOverlayPanelVisibility();
+  if (layout.noticeVisible) {
+    notice.style.left = `${(Number(layout.noticeX) || 0) - hostX}px`;
+    notice.style.top = `${(Number(layout.noticeY) || 0) - hostY}px`;
+    notice.style.width = `${Math.max(1, Number(layout.noticeWidth) || 430)}px`;
+    notice.style.height = `${Math.max(1, Number(layout.noticeHeight) || 124)}px`;
+  }
 }
 async function refreshOverlayHostMode() {
   try {
@@ -1387,24 +1412,48 @@ function installWindowControls() {
   let resize = null;
   let lastMotionAt = 0;
   const motionInterval = 12;
+  let motionInFlight = false;
+  let queuedMotion = null;
   const canSendMotion = () => {
     const now = performance.now();
     if (now - lastMotionAt < motionInterval) return false;
     lastMotionAt = now;
     return true;
   };
+  const flushMotion = () => {
+    if (motionInFlight || !queuedMotion) return;
+    const motion = queuedMotion;
+    queuedMotion = null;
+    motionInFlight = true;
+    void api(motion.command, motion.payload, 3000)
+      .catch(() => {})
+      .finally(() => {
+        motionInFlight = false;
+        flushMotion();
+      });
+  };
+  const queueMotion = (command, payload) => {
+    if (queuedMotion && queuedMotion.command === command &&
+        (command !== "overlayResizeWindow" || queuedMotion.payload.edges === payload.edges)) {
+      queuedMotion.payload.dx += payload.dx || 0;
+      queuedMotion.payload.dy += payload.dy || 0;
+    } else {
+      queuedMotion = { command, payload: { ...payload } };
+    }
+    flushMotion();
+  };
   const finishDrag = (event) => {
     if (!drag || (event.pointerId != null && event.pointerId !== drag.pointerId)) return;
     const dx = Math.round(event.screenX - drag.x);
     const dy = Math.round(event.screenY - drag.y);
-    if ((dx || dy) && canSendMotion()) send("overlayMoveWindow", { dx, dy });
+    if ((dx || dy) && canSendMotion()) queueMotion("overlayMoveWindow", { dx, dy });
     drag = null;
   };
   const finishResize = (event) => {
     if (!resize || (event.pointerId != null && event.pointerId !== resize.pointerId)) return;
     const dx = Math.round(event.screenX - resize.x);
     const dy = Math.round(event.screenY - resize.y);
-    if ((dx || dy) && canSendMotion()) send("overlayResizeWindow", { edges: resize.edges, dx, dy });
+    if ((dx || dy) && canSendMotion()) queueMotion("overlayResizeWindow", { edges: resize.edges, dx, dy });
     resize = null;
   };
   const finishPointer = (event) => {
@@ -1426,7 +1475,20 @@ function installWindowControls() {
     zone.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
       drag = null;
-      resize = { pointerId: event.pointerId, x: event.screenX, y: event.screenY, edges: zone.dataset.resizeEdge || "s" };
+      const edges = zone.dataset.resizeEdge || "s";
+      // Let Windows own the normal panel-only sizing gesture. Unlike repeated
+      // WebView messages, the native gesture keeps the edge locked to the
+      // physical cursor. Keep the existing path only while a notice shares the
+      // same host window.
+      if ($("equipNotice").hidden) {
+        resize = null;
+        document.querySelector(".overlay-shell").style.height = "100vh";
+        send("overlayBeginNativeResize", { edges });
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      resize = { pointerId: event.pointerId, x: event.screenX, y: event.screenY, edges };
       lastMotionAt = 0;
       try { zone.setPointerCapture(event.pointerId); } catch { }
       event.preventDefault();
@@ -1441,7 +1503,7 @@ function installWindowControls() {
       const dy = Math.round(event.screenY - drag.y);
       if (!(dx || dy)) return;
       drag = { ...drag, x: event.screenX, y: event.screenY };
-      send("overlayMoveWindow", { dx, dy });
+      queueMotion("overlayMoveWindow", { dx, dy });
       event.preventDefault();
       return;
     }
@@ -1451,13 +1513,12 @@ function installWindowControls() {
       const dy = Math.round(event.screenY - resize.y);
       if (!(dx || dy)) return;
       resize = { ...resize, x: event.screenX, y: event.screenY };
-      send("overlayResizeWindow", { edges: resize.edges, dx, dy });
+      queueMotion("overlayResizeWindow", { edges: resize.edges, dx, dy });
       event.preventDefault();
     }
   }, true);
   window.addEventListener("pointerup", finishPointer);
   window.addEventListener("pointercancel", finishPointer);
-  window.addEventListener("blur", () => { drag = null; resize = null; });
 }
 
 function confirmOverlay({ title = "Confirm", message = "", confirmLabel = "Confirm", danger = true } = {}) {
@@ -1917,7 +1978,7 @@ installWindowControls();
   hydrateCachedSnapshot();
   render();
   void hydrateOverlayAppState().then(() => {
-    if (overlayHostMode === "panel") void showFirstOpenTipWhenReady();
+    if (overlayPanelVisible) void showFirstOpenTipWhenReady();
   });
 refreshSettingsFast();
 refresh();

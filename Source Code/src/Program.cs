@@ -151,8 +151,13 @@ internal static class Program
     private static volatile bool MainWebReady;
     private static volatile bool OverlayWindowClosing;
     private static volatile bool OverlayWebReady;
-    private static volatile bool OverlayNoticeContentReady;
-    private static string OverlayNoticeToken = "";
+    private static volatile bool OverlayNativeSizing;
+    private static bool OverlayWindowSubclassInstalled;
+    private static readonly OverlaySubclassProc OverlayWindowSubclassCallback = OverlayWindowSubclass;
+    private static Mutex? OverlayHelperMutex;
+    private static string OverlayAppliedHostToken = "";
+    private static bool OverlayAppliedPanelVisible;
+    private static OverlayLayout OverlayLayoutSnapshot = OverlayLayout.Empty;
     private static volatile bool SyncedOrderCloseBlocked;
     private static bool OverlayProcessMode;
     private static CancellationTokenSource? OverlayBridgeCts;
@@ -162,6 +167,12 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        if (args.Any(arg => arg.Equals("--apply-update", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunUpdateHelper(args);
+            return;
+        }
+
         if (args.Any(arg => arg.Equals("--overlay", StringComparison.OrdinalIgnoreCase)))
         {
             OverlayProcessMode = true;
@@ -280,9 +291,8 @@ internal static class Program
         OverlayHostStateStore.Write(OverlayHostState.Hidden);
         if (Settings.Get().OverlayEnabled)
         {
-            // Keep the helper alive for F8 and equip notices, but let its own
-            // hidden bootstrap surface initialize off-screen instead of
-            // exposing the overlay panel during app startup.
+            // Keep the helper alive for F8 and equip notices. Its native host
+            // remains hidden until the requested surface is ready.
             _ = Task.Run(EnsureOverlayHost);
         }
         StartLocalAvatarCache();
@@ -322,8 +332,18 @@ internal static class Program
     {
         try
         {
+            OverlayHelperMutex = new Mutex(true, "Local\\VRCNeph.Overlay.Helper", out var createdNew);
+            if (!createdNew)
+            {
+                Logs.Info("App", "Overlay helper already exists; this helper will exit.");
+                return;
+            }
             OverlayWindowClosing = false;
             OverlayWebReady = false;
+            OverlayAppliedHostMode = "";
+            OverlayAppliedHostToken = "";
+            OverlayAppliedPanelVisible = false;
+            OverlayLayoutSnapshot = OverlayLayout.Empty;
             Logs.Info("App", "Overlay helper starting.");
             var overlaySettings = Settings.Get();
             var overlayPath = Path.Combine(AppContext.BaseDirectory, "src", "App", "overlay.html");
@@ -334,12 +354,13 @@ internal static class Program
                 Title = "VRCNeph Overlay",
                 UseOsDefaultSize = false,
                 UseOsDefaultLocation = false,
-                // Start as a tiny off-screen composition surface. The saved
-                // panel bounds are applied only after the host state requests
-                // the visible panel, so startup cannot flash the overlay.
-                Size = new Size(1, 1),
-                Location = new Point(-32000, -32000),
-                Resizable = false,
+                // Use the real overlay surface from the beginning.  Photino's
+                // transparent WebView needs a normal composition surface; the
+                // native host is hidden until the page is ready, so there is no
+                // reason to create a separate bootstrap surface.
+                Size = new Size(OverlayFixedWidth, Math.Clamp(overlaySettings.OverlayHeight, OverlayMinHeight, OverlayMaxHeight)),
+                Location = new Point(0, 0),
+                Resizable = true,
                 Chromeless = true,
                 // Photino's transparent host is required for the borderless
                 // WebView surface to render as a non-activating in-game overlay.
@@ -354,7 +375,6 @@ internal static class Program
                     OverlayWindow = photino;
                     OverlayWindowHandle = photino.WindowHandle;
                     ApplyOverlayWindowStyle(photino);
-                    ApplyOverlayHostMode(OverlayHostStateStore.Read().Mode);
                 }
                 Logs.Info("App", "Overlay helper window created.");
             })
@@ -363,13 +383,11 @@ internal static class Program
                  if (sender is not PhotinoWindow photino) return;
                  var wasReady = OverlayWebReady;
                  OverlayWebReady = true;
-                 // Photino can restore the host's last native bounds after the
-                 // window-created callback. Reapply the state once WebView2 is
-                 // ready so a hidden startup cannot expose that restored panel.
-                 if (!wasReady) ApplyOverlayHostMode(OverlayHostStateStore.Read().Mode);
+                 // Photino creates WebView2 after the native host is shown. Do
+                 // not hide or resize that host until this first page message;
+                 // doing so is what produced the blank black surface.
+                 if (!wasReady) ApplyOverlayHostState(OverlayHostStateStore.Read(), force: true);
                  SendPendingOverlaySettingsPreview();
-                // The helper starts on a tiny, non-activating surface so WebView2
-                // can initialize even while the overlay is logically hidden. Once
                 ApiRequest? request = null;
                 try { request = JsonSerializer.Deserialize<ApiRequest>(message, ProgramJson.Options); }
                 catch { }
@@ -379,7 +397,16 @@ internal static class Program
                     {
                         var response = await HandleMessageAsync(message);
                         if (OverlayWindowClosing || !OverlayWebReady) return;
-                        photino.SendWebMessage(JsonSerializer.Serialize(response, ProgramJson.Options));
+                        var responseMessage = JsonSerializer.Serialize(response, ProgramJson.Options);
+                        // Photino's WebView bridge must be called on the
+                        // window's UI thread. Requests arrive on the WebView
+                        // thread, while host-state updates arrive from the
+                        // file watcher; invoking here keeps both paths
+                        // reliable instead of silently dropping the message.
+                        photino.Invoke(() =>
+                        {
+                            if (!OverlayWindowClosing && OverlayWebReady) photino.SendWebMessage(responseMessage);
+                        });
                     }
                     catch
                     {
@@ -395,6 +422,8 @@ internal static class Program
                 StopLibraryChangeWatcher();
                 OverlayWindowHandle = IntPtr.Zero;
                 OverlayWindow = null;
+                OverlayHelperMutex?.Dispose();
+                OverlayHelperMutex = null;
                 return false;
             })
             .Load(overlayPath);
@@ -438,6 +467,7 @@ internal static class Program
                 }
             }, registerGlobally: false);
             OverlayHotkey.Start();
+            Logs.Info("App", $"Overlay hotkey ready ({(OverlayHotkey.UsingGlobalRegistration ? "system registration" : "key-state fallback")}).");
         }
         RandomHotkeyInputBlocker = new VrChatHotkeyInputBlocker(
             new (string Hotkey, Action Callback)[]
@@ -545,12 +575,18 @@ internal static class Program
 
     private static void SendOverlayEvent(string name, object data)
     {
-        if (OverlayWindowClosing || !OverlayWebReady) return;
+        if (OverlayWindowClosing) return;
         try
         {
+            var message = JsonSerializer.Serialize(AppEvent.Push(name, data), ProgramJson.Options);
             var window = OverlayWindow;
-            if (window is null) return;
-            window.SendWebMessage(JsonSerializer.Serialize(AppEvent.Push(name, data), ProgramJson.Options));
+            if (OverlayWebReady && window is not null)
+            {
+                window.Invoke(() =>
+                {
+                    if (!OverlayWindowClosing && OverlayWebReady) window.SendWebMessage(message);
+                });
+            }
         }
         catch
         {
@@ -737,8 +773,6 @@ internal static class Program
     private const int WsExTransparent = 0x00000020;
     private const int WsExLayered = 0x00080000;
     private const int WsExNoActivate = 0x08000000;
-    private const int OverlayPanelCornerRadius = 8;
-    private const int OverlayNoticeCornerRadius = 11;
     private const uint SwpNoSize = 0x0001;
     private const uint SwpNoMove = 0x0002;
     private const uint SwpNoActivate = 0x0010;
@@ -747,9 +781,16 @@ internal static class Program
     private const int SwShow = 5;
     private const int SwShowNoActivate = 4;
     private const int SwHide = 0;
+    private const int WmNcLButtonDown = 0x00A1;
+    private const int WmNcDestroy = 0x0082;
+    private const int WmSizing = 0x0214;
+    private const int WmszTop = 3;
+    private const int WmszBottom = 6;
+    private const int HtTop = 12;
+    private const int HtBottom = 15;
     private const int OverlayFixedWidth = 360;
     private const int OverlayMinHeight = 420;
-    private const int OverlayMaxHeight = 900;
+    private const int OverlayMaxHeight = 800;
     private static readonly nint HwndTopmost = new(-1);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
@@ -762,16 +803,36 @@ internal static class Program
     private static extern bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
 
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool ShowWindowAsync(nint hWnd, int nCmdShow);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern nint CreateRoundRectRgn(int left, int top, int right, int bottom, int width, int height);
+    private static extern bool ReleaseCapture();
 
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern int SetWindowRgn(nint hWnd, nint hRgn, bool redraw);
+    private static extern bool GetCursorPos(out NativePoint point);
 
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern bool DeleteObject(nint hObject);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern nint SendMessage(nint hWnd, int msg, nint wParam, nint lParam);
+
+    private delegate nint OverlaySubclassProc(nint hWnd, uint message, nint wParam, nint lParam, nuint subclassId, nuint referenceData);
+
+    [DllImport("comctl32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowSubclass(nint hWnd, OverlaySubclassProc callback, nuint subclassId, nuint referenceData);
+
+    [DllImport("comctl32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool RemoveWindowSubclass(nint hWnd, OverlaySubclassProc callback, nuint subclassId);
+
+    [DllImport("comctl32.dll")]
+    private static extern nint DefSubclassProc(nint hWnd, uint message, nint wParam, nint lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ShowWindowAsync(nint hWnd, int nCmdShow);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetForegroundWindow(nint hWnd);
@@ -807,6 +868,93 @@ internal static class Program
             return process.ProcessName.Equals("VRChat", StringComparison.OrdinalIgnoreCase);
         }
         catch { return false; }
+    }
+
+    private static Rectangle GetOverlayDisplayBounds()
+    {
+        var fallback = System.Windows.Forms.Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1920, 1080);
+        try
+        {
+            // With no game open, the overlay belongs on the monitor containing
+            // the main VRCNeph window rather than being forced to the primary
+            // display.
+            if (AppWindow is not null && AppWindow.WindowHandle != IntPtr.Zero)
+            {
+                var appScreen = System.Windows.Forms.Screen.FromHandle(AppWindow.WindowHandle);
+                if (appScreen is not null) fallback = appScreen.Bounds;
+            }
+        }
+        catch { }
+        if (!OperatingSystem.IsWindows()) return fallback;
+
+        try
+        {
+            // Prefer the foreground window when VRChat is focused. This handles
+            // borderless/fullscreen game windows and is the most direct signal
+            // for the monitor where the user is currently playing.
+            var foregroundWindow = GetForegroundWindow();
+            if (foregroundWindow != IntPtr.Zero)
+            {
+                GetWindowThreadProcessId(foregroundWindow, out var foregroundProcessId);
+                if (foregroundProcessId != 0)
+                {
+                    using var foregroundProcess = Process.GetProcessById((int)foregroundProcessId);
+                    if (foregroundProcess.ProcessName.Equals("VRChat", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var foregroundScreen = System.Windows.Forms.Screen.FromHandle(foregroundWindow);
+                        if (foregroundScreen is not null) return foregroundScreen.Bounds;
+                    }
+                }
+            }
+
+            // If VRCNeph is foreground while VRChat is still running, use
+            // VRChat's own top-level window instead of the overlay helper.
+            foreach (var process in Process.GetProcessesByName("VRChat"))
+            {
+                try
+                {
+                    process.Refresh();
+                    var gameWindow = process.MainWindowHandle;
+                    if (gameWindow == IntPtr.Zero) continue;
+                    var gameScreen = System.Windows.Forms.Screen.FromHandle(gameWindow);
+                    if (gameScreen is not null) return gameScreen.Bounds;
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+
+            // The overlay runs in a separate helper process, so its own
+            // AppWindow handle is not the user's VRCNeph window. Resolve the
+            // monitor from the visible main app window before falling back to
+            // the primary display. This keeps F8 usable when VRChat is closed
+            // and VRCNeph is on a secondary monitor.
+            foreach (var process in Process.GetProcessesByName("VRCNeph.App"))
+            {
+                try
+                {
+                    if (process.Id == Environment.ProcessId) continue;
+                    process.Refresh();
+                    if (!process.MainWindowTitle.Equals("VRCNeph", StringComparison.OrdinalIgnoreCase)) continue;
+                    var appWindow = process.MainWindowHandle;
+                    if (appWindow == IntPtr.Zero) continue;
+                    var appScreen = System.Windows.Forms.Screen.FromHandle(appWindow);
+                    if (appScreen is not null) return appScreen.Bounds;
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+        }
+        catch
+        {
+            // Monitor lookup is best-effort; the primary display is a safe
+            // fallback if VRChat is closing or its window is unavailable.
+        }
+
+        return fallback;
     }
 
     private static void UpdateSyncedOrderProgress(SyncedAvatarOrderProgress progress)
@@ -870,7 +1018,8 @@ internal static class Program
                 "setGroupReorderLock" => Store.SetGroupReorderLock(GetPayload<GroupLockInput>(request)),
                 "reorderGroup" => Store.ReorderGroup(GetPayload<ReorderInput>(request)),
                 "saveAvatar" => Store.SaveAvatar(GetPayload<AvatarInput>(request)),
-                "unfavoriteAvatar" or "deleteAvatar" => Store.UnfavoriteAvatar(GetPayload<IdInput>(request).Id),
+                "unfavoriteAvatar" => Store.UnfavoriteAvatar(GetPayload<IdInput>(request).Id),
+                "deleteAvatar" => Store.UnfavoriteAvatar(GetPayload<IdInput>(request).Id, archive: false),
                 "moveAvatar" => Store.MoveAvatar(GetPayload<MoveAvatarInput>(request)),
                 "copyAvatar" => Store.CopyAvatar(GetPayload<MoveAvatarInput>(request)),
                 "avatarImageReplace" => Store.ReplaceAvatarImage(GetPayload<IdInput>(request).Id),
@@ -890,15 +1039,17 @@ internal static class Program
                 "exportJson" => ExportJson(GetPayload<ExportJsonInput>(request)),
                 "openFolder" => OpenFolder(GetPayload<IdInput>(request).Path),
                 "openGame" => OpenGame(),
+                "vrchatRunning" => new { running = VrChatLogWatcher.IsVrChatRunning() },
+                "vrchatReady" => new { ready = VrChatLogWatcher.IsVrChatReady(GetPayload<VrChatReadinessInput>(request).LaunchedAt) },
                 "overlayShow" => ShowOverlay(),
                 "overlayHide" => HideOverlay(),
                 "overlayToggle" => ToggleOverlay(),
                 "overlaySnapshot" => await BuildOverlaySnapshotAsync(),
                 "overlaySettingsPreview" => PreviewOverlaySettings(GetPayload<AppSettings>(request)),
                 "overlayEquipNotice" => ShowEquipNotice(GetPayload<AvatarInput>(request)),
-                "overlayNoticeReady" => MarkOverlayNoticeReady(GetPayload<OverlayNoticeReadyInput>(request).Token),
                 "overlayHostState" => GetOverlayHostState(),
                 "overlayMoveWindow" => MoveOverlayWindow(GetPayload<OverlayMoveInput>(request)),
+                "overlayBeginNativeResize" => BeginNativeOverlayResize(GetPayload<OverlayResizeInput>(request)),
                 "overlayResizeWindow" => ResizeOverlayWindow(GetPayload<OverlayResizeInput>(request)),
                 "overlayBeginTextInput" => SetOverlayTextInputMode(true),
                 "overlayEndTextInput" => SetOverlayTextInputMode(false),
@@ -961,6 +1112,7 @@ internal static class Program
                 "vrchatFavoriteWorldRemove" => await VrChat.RemoveFavoriteWorldAsync(GetPayload<IdInput>(request).Id),
                 "vrchatWorldDetail" => await VrChat.GetWorldDetailAsync(GetPayload<IdInput>(request).Id),
                 "vrchatWorldVisitHistory" => VrChatLogWatcher.WorldVisitHistory(GetPayload<WorldVisitHistoryInput>(request)),
+                "vrchatRecentWorldLocations" => new { items = VrChatLogWatcher.RecentWorldLocations(GetPayload<PageInput>(request).Limit) },
                 "vrchatLatestLogLocation" => VrChatLogWatcher.LatestWorldLocation(),
                 "vrchatOpenWorld" => await VrChat.OpenWorldAsync(GetPayload<WorldLaunchInput>(request)),
                 "vrchatCreateWorldInstance" => await VrChat.CreateWorldInstanceAsync(GetPayload<WorldInstanceCreateInput>(request)),
@@ -1034,8 +1186,8 @@ internal static class Program
         switch (command)
         {
             case "deleteGroup": Logs.Warn("Groups", "Group deleted."); break;
-            case "unfavoriteAvatar":
-            case "deleteAvatar": Logs.Warn("Avatars", "Avatar unfavorited."); break;
+            case "unfavoriteAvatar": Logs.Warn("Avatars", "Avatar unfavorited."); break;
+            case "deleteAvatar": Logs.Warn("Avatars", "Avatar removed."); break;
             case "clearGroupAvatars":
                 if (result is GroupClearResult clear) Logs.Warn("Avatars", $"Cleared {clear.Removed} avatars from group.");
                 else Logs.Warn("Avatars", "Cleared group avatars.");
@@ -1250,7 +1402,10 @@ internal static class Program
     private static object ShowOverlay()
     {
         if (!Settings.Get().OverlayEnabled) return OverlayStatus(false);
-        OverlayHostStateStore.Write(OverlayHostState.Panel);
+        var current = OverlayHostStateStore.Read();
+        OverlayHostStateStore.Write(IsOverlayNoticeActive(current)
+            ? current with { PanelVisible = true }
+            : OverlayHostState.Panel);
         EnsureOverlayHost();
         return OverlayStatus(true);
     }
@@ -1272,30 +1427,23 @@ internal static class Program
             settings.ThemeColor,
             settings.PanelColor,
             settings.OverlayOpacity);
-        OverlayHostStateStore.Write(new OverlayHostState("notice", notice, Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow.AddSeconds(5)));
+        var current = OverlayHostStateStore.Read();
+        OverlayHostStateStore.Write(new OverlayHostState(
+            "notice",
+            notice,
+            Guid.NewGuid().ToString("N"),
+            DateTimeOffset.UtcNow.AddSeconds(5),
+            IsOverlayPanelVisible(current)));
         EnsureOverlayHost();
         return new { shown = true };
     }
 
-    private static object MarkOverlayNoticeReady(string token)
-    {
-        var current = OverlayHostStateStore.Read();
-        if (string.IsNullOrWhiteSpace(token) ||
-            !string.Equals(token, current.Token, StringComparison.Ordinal) ||
-            !current.Mode.Equals("notice", StringComparison.OrdinalIgnoreCase) ||
-            current.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow)
-        {
-            return new { ready = false };
-        }
-        OverlayNoticeToken = token;
-        OverlayNoticeContentReady = true;
-        ApplyOverlayHostMode("notice");
-        return new { ready = true };
-    }
-
     private static object HideOverlay()
     {
-        OverlayHostStateStore.Write(OverlayHostState.Hidden);
+        var current = OverlayHostStateStore.Read();
+        OverlayHostStateStore.Write(IsOverlayNoticeActive(current)
+            ? current with { PanelVisible = false }
+            : OverlayHostState.Hidden);
         return OverlayStatus(false);
     }
 
@@ -1304,14 +1452,21 @@ internal static class Program
         if (!Settings.Get().OverlayEnabled) return OverlayStatus(false);
         lock (OverlayGate)
         {
-            if (OverlayHostStateStore.Read().Mode.Equals("panel", StringComparison.OrdinalIgnoreCase))
+            if (IsOverlayPanelVisible(OverlayHostStateStore.Read()))
             {
-                OverlayHostStateStore.Write(OverlayHostState.Hidden);
-                return OverlayStatus(false);
+                return HideOverlay();
             }
         }
         return ShowOverlay();
     }
+
+    private static bool IsOverlayNoticeActive(OverlayHostState state) =>
+        state.Mode.Equals("notice", StringComparison.OrdinalIgnoreCase)
+        && state.Notice is not null
+        && (state.ExpiresAt is null || state.ExpiresAt > DateTimeOffset.UtcNow);
+
+    private static bool IsOverlayPanelVisible(OverlayHostState state) =>
+        state.PanelVisible || state.Mode.Equals("panel", StringComparison.OrdinalIgnoreCase);
 
     private static void EnsureOverlayHost()
     {
@@ -1343,11 +1498,10 @@ internal static class Program
                 }
             }
 
-              // Start the helper's native window normally so WebView2 gets a real
-              // visible surface to initialize. The helper itself creates that
-              // window at an off-screen location and the host state immediately
-              // hides it, so this does not flash a second user-facing window.
-              OverlayProcess = Process.Start(new ProcessStartInfo(exe) { Arguments = "--overlay", UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Path.GetDirectoryName(exe) ?? AppContext.BaseDirectory, WindowStyle = ProcessWindowStyle.Normal });
+            // Start one persistent helper process. Its normal transparent
+            // surface is initialized once, then the host state controls whether
+            // the panel or notice is shown.
+            OverlayProcess = Process.Start(new ProcessStartInfo(exe) { Arguments = "--overlay", UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Path.GetDirectoryName(exe) ?? AppContext.BaseDirectory, WindowStyle = ProcessWindowStyle.Normal });
             if (OverlayProcess is not null)
             {
                 OverlayProcess.EnableRaisingEvents = true;
@@ -1367,33 +1521,23 @@ internal static class Program
     private static OverlayHostState GetOverlayHostState()
     {
         var state = OverlayHostStateStore.Read();
-        if (state.Mode.Equals("notice", StringComparison.OrdinalIgnoreCase))
-        {
-            if (!string.Equals(OverlayNoticeToken, state.Token, StringComparison.Ordinal))
-            {
-                OverlayNoticeToken = state.Token;
-                OverlayNoticeContentReady = false;
-            }
-        }
-        else
-        {
-            OverlayNoticeToken = "";
-            OverlayNoticeContentReady = false;
-        }
         if (state.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow)
         {
-            state = OverlayHostState.Hidden;
+            state = IsOverlayPanelVisible(state) ? OverlayHostState.Panel : OverlayHostState.Hidden;
             OverlayHostStateStore.Write(state);
-            OverlayNoticeToken = "";
-            OverlayNoticeContentReady = false;
         }
 
-        // The overlay polls this endpoint frequently. Reapplying the full
-        // host bounds on every poll would overwrite an in-progress drag or
-        // resize with the last saved values.
-        if (!string.Equals(OverlayAppliedHostMode, state.Mode, StringComparison.OrdinalIgnoreCase))
+        // The overlay polls this endpoint frequently. Reapplying native bounds
+        // on every poll would overwrite an in-progress drag or resize, so only
+        // apply when visibility or the notice token actually changes.
+        var hostMode = IsOverlayPanelVisible(state) || IsOverlayNoticeActive(state) ? "visible" : "hidden";
+        var noticeToken = IsOverlayNoticeActive(state) ? state.Token : "";
+        var panelVisible = IsOverlayPanelVisible(state);
+        if (!string.Equals(OverlayAppliedHostMode, hostMode, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(OverlayAppliedHostToken, noticeToken, StringComparison.Ordinal) ||
+            OverlayAppliedPanelVisible != panelVisible)
         {
-            ApplyOverlayHostMode(state.Mode);
+            ApplyOverlayHostState(state);
         }
         return state;
     }
@@ -1508,110 +1652,178 @@ internal static class Program
         if (settings is not null) SendOverlayEvent("overlaySettingsPreview", settings);
     }
 
-    private static void ApplyOverlayHostMode(string? requestedMode)
+    private static void ApplyOverlayHostState(OverlayHostState state, bool force = false)
     {
         if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return;
 
-        var mode = requestedMode?.Trim().ToLowerInvariant();
-        if (mode is not "panel" and not "notice") mode = "hidden";
-
+        var hostMode = IsOverlayPanelVisible(state) || IsOverlayNoticeActive(state) ? "visible" : "hidden";
+        var noticeToken = IsOverlayNoticeActive(state) ? state.Token : "";
+        var panelVisible = IsOverlayPanelVisible(state);
+        // Keep the normal transparent host alive until the WebView has sent its
+        // first message. Hiding it before that handshake can prevent WebView2
+        // from completing initialization, leaving F8 with no usable surface.
+        // A requested panel/notice is allowed through immediately; the hidden
+        // state is applied as soon as the page is ready.
+        if (!OverlayWebReady && hostMode == "hidden") return;
+        if (!force && string.Equals(OverlayAppliedHostMode, hostMode, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(OverlayAppliedHostToken, noticeToken, StringComparison.Ordinal) &&
+            OverlayAppliedPanelVisible == panelVisible) return;
         try
         {
-            var window = OverlayWindow;
-            const int bootstrapX = -32000;
-            const int bootstrapY = -32000;
-            var exStyle = (long)GetWindowLongPtr(OverlayWindowHandle, GwlExStyle);
-            exStyle |= WsExToolWindow;
-            if (mode == "panel")
+            ApplyOverlayInteractionStyle(panelVisible, IsOverlayNoticeActive(state));
+            if (hostMode == "hidden")
             {
-                // Photino's Transparent host uses WS_EX_LAYERED. That native
-                // composition surface is hit-test transparent even after the
-                // child WebView's WS_EX_TRANSPARENT bit is cleared. The panel
-                // is a normal interactive window, so remove the transparent
-                // host style while it is shown.
-                exStyle &= ~(WsExTransparent | WsExLayered | WsExNoActivate);
-            }
-            else
-            {
-                exStyle |= WsExNoActivate;
-                exStyle = mode == "notice"
-                    ? exStyle | WsExTransparent | WsExLayered
-                    : exStyle & ~WsExTransparent;
-            }
-            SetWindowLongPtr(OverlayWindowHandle, GwlExStyle, (nint)exStyle);
-            if (mode == "notice" && !OverlayNoticeContentReady)
-            {
-                // Keep the transparent helper on its tiny bootstrap surface
-                // until the WebView has painted the fully styled notice. This
-                // prevents the native host from exposing a transparent first
-                // frame before the card is ready.
-                window?.SetLocation(new Point(bootstrapX, bootstrapY));
-                window?.SetSize(new Size(1, 1));
-                ShowWindowAsync(OverlayWindowHandle, SwShowNoActivate);
-                SetWindowPos(OverlayWindowHandle, HwndTopmost, bootstrapX, bootstrapY, 1, 1, SwpNoActivate | SwpShowWindow);
-                OverlayAppliedHostMode = mode;
-                return;
-            }
-
-            if (mode == "hidden")
-            {
-                if (!OverlayWebReady)
-                {
-                    window?.SetLocation(new Point(bootstrapX, bootstrapY));
-                    window?.SetSize(new Size(1, 1));
-                    ShowWindowAsync(OverlayWindowHandle, SwShowNoActivate);
-                    SetWindowPos(OverlayWindowHandle, HwndTopmost, bootstrapX, bootstrapY, 1, 1, SwpNoActivate | SwpShowWindow);
-                    OverlayAppliedHostMode = mode;
-                    return;
-                }
                 ShowWindowAsync(OverlayWindowHandle, SwHide);
-                OverlayAppliedHostMode = mode;
+                OverlayAppliedHostMode = hostMode;
+                OverlayAppliedHostToken = noticeToken;
+                OverlayAppliedPanelVisible = panelVisible;
+                OverlayLayoutSnapshot = OverlayLayout.Empty;
+                SendOverlayEvent("overlayLayout", OverlayLayout.Empty);
                 return;
             }
 
-            int x;
-            int y;
-            int width;
-            int height;
-            if (mode == "notice")
-            {
-                width = 430;
-                height = 124;
-                // Keep the companion card below VRChat's own equip toast. Use
-                // the full display bounds so fullscreen VRChat has room for the
-                // card, with the same small edge margin as the normal overlay.
-                var screen = System.Windows.Forms.Screen.FromHandle(OverlayWindowHandle);
-                var displayBounds = screen?.Bounds ?? new Rectangle(0, 0, 1920, 1080);
-                const int noticeEdgeMargin = 8;
-                x = displayBounds.Left + Math.Max(0, (displayBounds.Width - width) / 2);
-                y = displayBounds.Bottom - height - noticeEdgeMargin;
-            }
-            else
-            {
-                var settings = Settings.Get();
-                x = settings.OverlayX;
-                y = settings.OverlayY;
-                width = OverlayFixedWidth;
-                height = Math.Clamp(settings.OverlayHeight, OverlayMinHeight, OverlayMaxHeight);
-            }
-
-            // Keep Photino's embedded WebView child aligned with the native
-            // host. Moving only the outer HWND leaves the page rendered at its
-            // original off-screen location, producing a blank host rectangle.
-            window?.SetLocation(new Point(x, y));
-            window?.SetSize(new Size(width, height));
-
-            // Native show/position avoids Photino restoring or activating the helper
-            // window while VRChat is in the foreground.
-            ShowWindowAsync(OverlayWindowHandle, SwShowNoActivate);
-            SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, width, height, SwpNoActivate | SwpShowWindow | SwpFrameChanged);
-            ApplyOverlayWindowRegion(width, height, mode == "notice" ? OverlayNoticeCornerRadius : OverlayPanelCornerRadius);
-            OverlayAppliedHostMode = mode;
+            var layout = BuildOverlayLayout(state);
+            ApplyOverlayLayout(layout);
+            // Reassert the native hit-testing state after Photino applies the
+            // visible bounds. This is done only on a host-state transition,
+            // never for every drag/resize motion.
+            ApplyOverlayInteractionStyle(panelVisible, IsOverlayNoticeActive(state));
+            OverlayAppliedHostMode = hostMode;
+            OverlayAppliedHostToken = noticeToken;
+            OverlayAppliedPanelVisible = panelVisible;
+            OverlayLayoutSnapshot = layout;
+            SendOverlayEvent("overlayLayout", layout);
         }
         catch (Exception ex)
         {
             Logs.Warn("App", "Could not apply the overlay host mode.", ex.Message);
         }
+    }
+
+    private static OverlayLayout BuildOverlayLayout(OverlayHostState state, int? panelXOverride = null, int? panelYOverride = null, int? panelWidthOverride = null, int? panelHeightOverride = null)
+    {
+        var settings = Settings.Get();
+        var display = GetOverlayDisplayBounds();
+        var panelVisible = IsOverlayPanelVisible(state);
+        var noticeVisible = IsOverlayNoticeActive(state);
+        var panelWidth = Math.Clamp(panelWidthOverride ?? settings.OverlayWidth, 360, 900);
+        var panelHeight = Math.Clamp(panelHeightOverride ?? settings.OverlayHeight, OverlayMinHeight, OverlayMaxHeight);
+        var savedScreen = System.Windows.Forms.Screen.FromPoint(new Point(settings.OverlayX, settings.OverlayY));
+        var savedBounds = savedScreen?.Bounds ?? display;
+        var panelX = panelXOverride ?? display.Left + (settings.OverlayX - savedBounds.Left);
+        var panelY = panelYOverride ?? display.Top + (settings.OverlayY - savedBounds.Top);
+        var noticeWidth = 430;
+        var noticeHeight = 124;
+        var noticeX = display.Left + Math.Max(0, (display.Width - noticeWidth) / 2);
+        var noticeY = display.Bottom - noticeHeight - 8;
+
+        var hostLeft = int.MaxValue;
+        var hostTop = int.MaxValue;
+        var hostRight = int.MinValue;
+        var hostBottom = int.MinValue;
+        void Include(int x, int y, int width, int height)
+        {
+            hostLeft = Math.Min(hostLeft, x);
+            hostTop = Math.Min(hostTop, y);
+            hostRight = Math.Max(hostRight, x + width);
+            hostBottom = Math.Max(hostBottom, y + height);
+        }
+        // Keep the shared host anchored to the panel location while a notice
+        // is active, even when the panel itself is hidden.  This means F8 can
+        // toggle without moving the notice between two different host
+        // rectangles; the native region below still exposes only the visible
+        // surface for hit testing.
+        if (panelVisible || noticeVisible) Include(panelX, panelY, panelWidth, panelHeight);
+        if (noticeVisible) Include(noticeX, noticeY, noticeWidth, noticeHeight);
+        if (hostLeft == int.MaxValue) return OverlayLayout.Empty;
+
+        return new OverlayLayout(
+            hostLeft,
+            hostTop,
+            Math.Max(1, hostRight - hostLeft),
+            Math.Max(1, hostBottom - hostTop),
+            panelX,
+            panelY,
+            panelWidth,
+            panelHeight,
+            noticeX,
+            noticeY,
+            noticeWidth,
+            noticeHeight,
+            panelVisible,
+            noticeVisible);
+    }
+
+    private static OverlayLayout BuildOverlayMotionLayout(OverlayHostState state, OverlayLayout current, int panelX, int panelY, int panelWidth, int panelHeight)
+    {
+        // Motion updates already have the current screen/layout. Reusing it
+        // avoids rescanning every process and monitor on every pointer event.
+        var noticeVisible = IsOverlayNoticeActive(state);
+        var hostLeft = panelX;
+        var hostTop = panelY;
+        var hostRight = panelX + panelWidth;
+        var hostBottom = panelY + panelHeight;
+        if (noticeVisible)
+        {
+            hostLeft = Math.Min(hostLeft, current.NoticeX);
+            hostTop = Math.Min(hostTop, current.NoticeY);
+            hostRight = Math.Max(hostRight, current.NoticeX + current.NoticeWidth);
+            hostBottom = Math.Max(hostBottom, current.NoticeY + current.NoticeHeight);
+        }
+        return new OverlayLayout(
+            hostLeft,
+            hostTop,
+            Math.Max(1, hostRight - hostLeft),
+            Math.Max(1, hostBottom - hostTop),
+            panelX,
+            panelY,
+            panelWidth,
+            panelHeight,
+            current.NoticeX,
+            current.NoticeY,
+            current.NoticeWidth,
+            current.NoticeHeight,
+            true,
+            noticeVisible);
+    }
+
+    private static void ApplyOverlayLayout(OverlayLayout layout)
+    {
+        if (layout == OverlayLayout.Empty || OverlayWindowHandle == IntPtr.Zero) return;
+        var window = OverlayWindow;
+        var previous = OverlayLayoutSnapshot;
+        var hasPrevious = previous != OverlayLayout.Empty;
+        var positionChanged = !hasPrevious || previous.HostX != layout.HostX || previous.HostY != layout.HostY;
+        var sizeChanged = !hasPrevious || previous.HostWidth != layout.HostWidth || previous.HostHeight != layout.HostHeight;
+        if (positionChanged) window?.SetLocation(new Point(layout.HostX, layout.HostY));
+        if (sizeChanged) window?.SetSize(new Size(layout.HostWidth, layout.HostHeight));
+        SetWindowPos(OverlayWindowHandle, HwndTopmost, layout.HostX, layout.HostY, layout.HostWidth, layout.HostHeight, SwpNoActivate | SwpShowWindow);
+        ShowWindowAsync(OverlayWindowHandle, SwShowNoActivate);
+    }
+
+    private static void ApplyOverlayInteractionStyle(bool panelVisible, bool noticeVisible)
+    {
+        if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return;
+        // Keep Photino's layered host in both visible modes so the transparent
+        // page background and rounded CSS corners continue to composite with
+        // the desktop. The panel becomes interactive by dropping click-through
+        // and no-activate only; removing WS_EX_LAYERED exposes the native black
+        // host rectangle behind the WebView.
+        var exStyle = (long)GetWindowLongPtr(OverlayWindowHandle, GwlExStyle) | WsExToolWindow | WsExNoActivate;
+        if (panelVisible)
+        {
+            exStyle |= WsExLayered;
+            exStyle &= ~(long)(WsExTransparent | WsExNoActivate);
+        }
+        else if (noticeVisible)
+        {
+            // Keep the established transparent, pointer-pass-through notice
+            // path when the panel itself is hidden.
+            exStyle |= WsExTransparent | WsExLayered;
+        }
+        SetWindowLongPtr(OverlayWindowHandle, GwlExStyle, (nint)exStyle);
+        SetWindowPos(OverlayWindowHandle, HwndTopmost, 0, 0, 0, 0,
+            SwpNoMove | SwpNoSize | SwpNoActivate | SwpShowWindow | SwpFrameChanged);
     }
 
     private static void CloseOverlay()
@@ -2060,12 +2272,16 @@ internal static class Program
         lock (OverlayWindowManipulationGate)
         {
             if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return new { ok = false };
-            if (!GetWindowRect(OverlayWindowHandle, out var rect)) return new { ok = false };
-            var x = rect.Left + Math.Clamp(input.Dx, -2000, 2000);
-            var y = rect.Top + Math.Clamp(input.Dy, -2000, 2000);
-            OverlayWindow?.SetLocation(new Point(x, y));
-            SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, 0, 0, SwpNoSize | SwpNoActivate | SwpShowWindow);
-            SaveOverlayBounds(x, y, rect.Right - rect.Left, rect.Bottom - rect.Top);
+            var state = OverlayHostStateStore.Read();
+            if (!IsOverlayPanelVisible(state)) return new { ok = false };
+            var current = OverlayLayoutSnapshot == OverlayLayout.Empty ? BuildOverlayLayout(state) : OverlayLayoutSnapshot;
+            var x = current.PanelX + Math.Clamp(input.Dx, -2000, 2000);
+            var y = current.PanelY + Math.Clamp(input.Dy, -2000, 2000);
+            SaveOverlayBounds(x, y, current.PanelWidth, current.PanelHeight);
+            var layout = BuildOverlayMotionLayout(state, current, x, y, current.PanelWidth, current.PanelHeight);
+            ApplyOverlayLayout(layout);
+            OverlayLayoutSnapshot = layout;
+            SendOverlayEvent("overlayLayout", layout);
             return new { ok = true, x, y };
         }
     }
@@ -2075,8 +2291,10 @@ internal static class Program
         lock (OverlayWindowManipulationGate)
         {
             if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return new { ok = false };
-            if (!GetWindowRect(OverlayWindowHandle, out var rect)) return new { ok = false };
-            var currentHeight = rect.Bottom - rect.Top;
+            var state = OverlayHostStateStore.Read();
+            if (!IsOverlayPanelVisible(state)) return new { ok = false };
+            var current = OverlayLayoutSnapshot == OverlayLayout.Empty ? BuildOverlayLayout(state) : OverlayLayoutSnapshot;
+            var currentHeight = current.PanelHeight;
             var edges = (input.Edges ?? "").Trim().ToLowerInvariant();
             var hasDelta = input.Dx != 0 || input.Dy != 0;
             var topEdge = edges.Contains('n');
@@ -2084,24 +2302,93 @@ internal static class Program
             var height = hasDelta
                 ? Math.Clamp(currentHeight + (topEdge ? -input.Dy : bottomEdge ? input.Dy : 0), OverlayMinHeight, OverlayMaxHeight)
                 : Math.Clamp(input.Height, OverlayMinHeight, OverlayMaxHeight);
-            var x = rect.Left;
-            var y = hasDelta && topEdge ? rect.Bottom - height : rect.Top;
-            OverlayWindow?.SetSize(new Size(OverlayFixedWidth, height));
-            if (hasDelta && topEdge) OverlayWindow?.SetLocation(new Point(x, y));
-            SetWindowPos(OverlayWindowHandle, HwndTopmost, x, y, OverlayFixedWidth, height, SwpNoActivate | SwpShowWindow);
-            ApplyOverlayWindowRegion(OverlayFixedWidth, height, OverlayPanelCornerRadius);
-            SaveOverlayBounds(x, y, OverlayFixedWidth, height);
-            return new { ok = true, x, y, width = OverlayFixedWidth, height };
+            var x = current.PanelX;
+            var y = hasDelta && topEdge ? current.PanelY + currentHeight - height : current.PanelY;
+            SaveOverlayBounds(x, y, current.PanelWidth, height);
+            var layout = BuildOverlayMotionLayout(state, current, x, y, current.PanelWidth, height);
+            ApplyOverlayLayout(layout);
+            OverlayLayoutSnapshot = layout;
+            SendOverlayEvent("overlayLayout", layout);
+            return new { ok = true, x, y, width = current.PanelWidth, height };
         }
     }
 
-    private static void ApplyOverlayWindowRegion(int width, int height, int radius)
+    private static object BeginNativeOverlayResize(OverlayResizeInput input)
     {
-        if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero) return;
-        var diameter = Math.Max(2, radius * 2);
-        var region = CreateRoundRectRgn(0, 0, Math.Max(1, width + 1), Math.Max(1, height + 1), diameter, diameter);
-        if (region == IntPtr.Zero) return;
-        if (SetWindowRgn(OverlayWindowHandle, region, true) == 0) DeleteObject(region);
+        if (!OperatingSystem.IsWindows() || OverlayWindowHandle == IntPtr.Zero || OverlayWindow is null)
+            return new { ok = false };
+
+        var state = OverlayHostStateStore.Read();
+        // A native resize changes the host itself, so use it only when the host
+        // contains the panel alone. The short-lived notice keeps the existing
+        // shared-host fallback so its screen position cannot be dragged.
+        if (!IsOverlayPanelVisible(state) || IsOverlayNoticeActive(state))
+            return new { ok = false };
+
+        var edges = (input.Edges ?? "s").Trim().ToLowerInvariant();
+        var hitTest = edges.Contains('n') ? HtTop : HtBottom;
+        var window = OverlayWindow;
+        var handle = OverlayWindowHandle;
+        window.Invoke(() =>
+        {
+            lock (OverlayWindowManipulationGate)
+            {
+                try
+                {
+                    var current = OverlayLayoutSnapshot == OverlayLayout.Empty ? BuildOverlayLayout(state) : OverlayLayoutSnapshot;
+                    if (!GetCursorPos(out var cursor)) return;
+                    var cursorPosition = (nint)(unchecked((uint)(ushort)cursor.X) |
+                        (unchecked((uint)(ushort)cursor.Y) << 16));
+                    OverlayNativeSizing = true;
+                    ReleaseCapture();
+                    // WM_NCLBUTTONDOWN requires the real screen-space pointer
+                    // coordinates. Passing zero starts the native sizing loop
+                    // from (0,0), which eventually separates the tracked edge
+                    // from the physical cursor and can end the drag early.
+                    SendMessage(handle, WmNcLButtonDown, (nint)hitTest, cursorPosition);
+
+                    if (!GetWindowRect(handle, out var rect)) return;
+                    var height = Math.Clamp(rect.Bottom - rect.Top, OverlayMinHeight, OverlayMaxHeight);
+                    var x = rect.Left;
+                    var y = rect.Top;
+                    SaveOverlayBounds(x, y, current.PanelWidth, height);
+                    var layout = BuildOverlayMotionLayout(state, current, x, y, current.PanelWidth, height);
+                    OverlayLayoutSnapshot = layout;
+                    SendOverlayEvent("overlayLayout", layout);
+                }
+                catch (Exception ex)
+                {
+                    Logs.Warn("App", "Could not complete native overlay resize.", ex.Message);
+                }
+                finally
+                {
+                    OverlayNativeSizing = false;
+                }
+            }
+        });
+        return new { ok = true };
+    }
+
+    private static nint OverlayWindowSubclass(nint hWnd, uint message, nint wParam, nint lParam, nuint subclassId, nuint referenceData)
+    {
+        if (message == WmSizing && OverlayNativeSizing && lParam != IntPtr.Zero)
+        {
+            var rect = Marshal.PtrToStructure<WindowRect>(lParam);
+            var height = Math.Clamp(rect.Bottom - rect.Top, OverlayMinHeight, OverlayMaxHeight);
+            if ((int)wParam == WmszTop)
+                rect.Top = rect.Bottom - height;
+            else if ((int)wParam == WmszBottom)
+                rect.Bottom = rect.Top + height;
+            Marshal.StructureToPtr(rect, lParam, false);
+            return (nint)1;
+        }
+
+        if (message == WmNcDestroy)
+        {
+            RemoveWindowSubclass(hWnd, OverlayWindowSubclassCallback, subclassId);
+            OverlayWindowSubclassInstalled = false;
+        }
+        return DefSubclassProc(hWnd, message, wParam, lParam);
     }
 
     private static object SetOverlayTextInputMode(bool active)
@@ -2110,12 +2397,10 @@ internal static class Program
         try
         {
             var exStyle = GetWindowLongPtr(OverlayWindowHandle, GwlExStyle);
-            var panelInteractive = OverlayAppliedHostMode.Equals("panel", StringComparison.OrdinalIgnoreCase);
-            var value = active
-                ? (long)exStyle & ~WsExNoActivate
-                : panelInteractive
-                    ? (long)exStyle & ~WsExNoActivate | WsExToolWindow
-                    : (long)exStyle | WsExNoActivate | WsExToolWindow;
+            var panelInteractive = IsOverlayPanelVisible(OverlayHostStateStore.Read());
+            var value = active || panelInteractive
+                ? (long)exStyle & ~WsExNoActivate | WsExToolWindow
+                : (long)exStyle | WsExNoActivate | WsExToolWindow;
             SetWindowLongPtr(OverlayWindowHandle, GwlExStyle, (nint)value);
             if (active)
             {
@@ -2195,9 +2480,19 @@ internal static class Program
         {
             var handle = window.WindowHandle;
             if (handle == IntPtr.Zero) return;
+            if (!OverlayWindowSubclassInstalled)
+            {
+                OverlayWindowSubclassInstalled = SetWindowSubclass(handle, OverlayWindowSubclassCallback, 1, 0);
+                if (!OverlayWindowSubclassInstalled)
+                    Logs.Warn("App", "Could not install native overlay resize bounds.", Marshal.GetLastWin32Error().ToString());
+            }
             var exStyle = GetWindowLongPtr(handle, GwlExStyle);
             SetWindowLongPtr(handle, GwlExStyle, (nint)((long)exStyle | WsExToolWindow | WsExNoActivate));
-            SetWindowPos(handle, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate | SwpFrameChanged);
+            // Keep the real transparent surface alive while WebView2 starts.
+            // The first host-state message hides it again if no overlay is
+            // requested, so this is not a second visible overlay window.
+            ShowWindowAsync(handle, SwShowNoActivate);
+            SetWindowPos(handle, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate | SwpShowWindow | SwpFrameChanged);
         }
         catch
         {
@@ -2314,6 +2609,114 @@ internal static class Program
         }
     }
 
+    private static void RunUpdateHelper(string[] args)
+    {
+        string? newExe = null;
+        try
+        {
+            var marker = Array.FindIndex(args, arg => arg.Equals("--apply-update", StringComparison.OrdinalIgnoreCase));
+            if (marker < 0 || args.Length != marker + 5)
+            {
+                throw new InvalidOperationException("The update helper arguments were invalid.");
+            }
+
+            if (!int.TryParse(args[marker + 1], out var parentPid) || parentPid <= 0)
+            {
+                throw new InvalidOperationException("The update helper parent process was invalid.");
+            }
+
+            newExe = Path.GetFullPath(args[marker + 2]);
+            var targetExe = Path.GetFullPath(args[marker + 3]);
+            var expectedHash = args[marker + 4].Trim();
+            if (!File.Exists(newExe) || !Path.GetFileName(newExe).StartsWith("VRCNeph-update-", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("The downloaded update file was missing.");
+            }
+            var targetName = Path.GetFileName(targetExe);
+            if (!targetName.Equals("VRCNeph.exe", StringComparison.OrdinalIgnoreCase)
+                && !targetName.Equals("VRCNeph.App.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("The update target was invalid.");
+            }
+            if (!Regex.IsMatch(expectedHash, "^[0-9A-Fa-f]{64}$"))
+            {
+                throw new InvalidOperationException("The downloaded update hash was invalid.");
+            }
+
+            try
+            {
+                using var parent = Process.GetProcessById(parentPid);
+                parent.WaitForExit(TimeSpan.FromSeconds(15));
+            }
+            catch (ArgumentException)
+            {
+                // The main app already exited before the helper started.
+            }
+
+            const int attemptCount = 12;
+            Exception? lastError = null;
+            var updated = false;
+            for (var attempt = 1; attempt <= attemptCount; attempt++)
+            {
+                try
+                {
+                    File.Copy(newExe, targetExe, overwrite: true);
+                    var actualHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(targetExe)));
+                    if (!actualHash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException("The copied update did not match its downloaded hash.");
+                    }
+
+                    updated = true;
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                    if (attempt < attemptCount) Thread.Sleep(TimeSpan.FromSeconds(1));
+                }
+            }
+
+            if (updated)
+            {
+                try { File.Delete(AppPaths.UpdateFailureStatusPath); } catch { }
+            }
+            else
+            {
+                var detail = lastError?.Message ?? "unknown error";
+                try
+                {
+                    File.WriteAllText(AppPaths.UpdateFailureStatusPath,
+                        $"VRCNeph could not finish its update after {attemptCount} attempts. Close any VRCNeph windows and install the latest VRCNeph.exe from GitHub manually. Details: {detail}");
+                }
+                catch { }
+            }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo(targetExe)
+                {
+                    WorkingDirectory = Path.GetDirectoryName(targetExe) ?? AppContext.BaseDirectory,
+                    UseShellExecute = false,
+                    CreateNoWindow = false,
+                    WindowStyle = ProcessWindowStyle.Normal
+                });
+            }
+            catch { }
+        }
+        catch (Exception ex)
+        {
+            try { File.WriteAllText(AppPaths.UpdateFailureStatusPath, $"VRCNeph's update helper failed: {ex.Message}"); } catch { }
+        }
+        finally
+        {
+            if (!string.IsNullOrWhiteSpace(newExe))
+            {
+                try { File.Delete(newExe); } catch { }
+            }
+        }
+    }
+
     private static T GetPayload<T>(ApiRequest request) =>
         request.Payload.Deserialize<T>(ProgramJson.Options) ?? throw new InvalidOperationException("Could not parse request payload.");
 }
@@ -2410,50 +2813,21 @@ internal sealed class AppUpdateClient(string owner, string repository)
         {
             currentExe = Process.GetCurrentProcess().MainModule?.FileName ?? Path.Combine(AppContext.BaseDirectory, "VRCNeph.App.exe");
         }
-        var scriptPath = Path.Combine(Path.GetTempPath(), $"VRCNeph-update-{Guid.NewGuid():N}.ps1");
         var expectedHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(tempExe)));
-        var script = $$"""
-            $ErrorActionPreference = 'Continue'
-            $pidToWait = {{Environment.ProcessId}}
-            $newExe = {{PowerShellString(tempExe)}}
-            $targetExe = {{PowerShellString(currentExe)}}
-            $expectedHash = {{PowerShellString(expectedHash)}}
-            $statusPath = {{PowerShellString(AppPaths.UpdateFailureStatusPath)}}
-            $attemptCount = 12
-            $updated = $false
-            $lastError = ''
-            Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue
-            for ($attempt = 1; $attempt -le $attemptCount; $attempt++) {
-                try {
-                    Copy-Item -LiteralPath $newExe -Destination $targetExe -Force -ErrorAction Stop
-                    $actualHash = (Get-FileHash -LiteralPath $targetExe -Algorithm SHA256 -ErrorAction Stop).Hash
-                    if ($actualHash -eq $expectedHash) {
-                        $updated = $true
-                        break
-                    }
-                    $lastError = 'The copied file did not match the downloaded update.'
-                } catch {
-                    $lastError = $_.Exception.Message
-                }
-                Start-Sleep -Seconds 1
-            }
-            Remove-Item -LiteralPath $newExe -Force -ErrorAction SilentlyContinue
-            if ($updated) {
-                Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
-            } else {
-                $message = "VRCNeph could not finish its update after $attemptCount attempts. Close any VRCNeph windows and install the latest VRCNeph.exe from GitHub manually. Details: $lastError"
-                Set-Content -LiteralPath $statusPath -Value $message -Encoding UTF8 -ErrorAction SilentlyContinue
-            }
-            Start-Process -FilePath $targetExe -WorkingDirectory (Split-Path -Parent $targetExe) -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-            """;
-        await File.WriteAllTextAsync(scriptPath, script);
-        Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File {PowerShellArgument(scriptPath)}")
+        var helperExe = Process.GetCurrentProcess().MainModule?.FileName
+            ?? Path.Combine(AppContext.BaseDirectory, "VRCNeph.App.exe");
+        var helperStart = new ProcessStartInfo(helperExe)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
             WindowStyle = ProcessWindowStyle.Hidden
-        });
+        };
+        helperStart.ArgumentList.Add("--apply-update");
+        helperStart.ArgumentList.Add(Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        helperStart.ArgumentList.Add(tempExe);
+        helperStart.ArgumentList.Add(currentExe);
+        helperStart.ArgumentList.Add(expectedHash);
+        Process.Start(helperStart);
 
         _ = Task.Run(async () =>
         {
@@ -2491,9 +2865,6 @@ internal sealed class AppUpdateClient(string owner, string repository)
 
     private static string? ReadString(JsonElement root, string name) =>
         root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
-
-    private static string PowerShellString(string value) => $"'{value.Replace("'", "''")}'";
-    private static string PowerShellArgument(string value) => $"\"{value.Replace("\"", "\\\"")}\"";
 }
 
 internal sealed record AppVersionInfo(string CurrentVersion, string ReleaseUrl);
@@ -2804,12 +3175,17 @@ internal sealed class AvatarStore
             return lib;
         }
     }
-    public LibraryData UnfavoriteAvatar(string id)
+    public LibraryData UnfavoriteAvatar(string id, bool archive = true)
     {
         lock (_gate)
         {
             var lib = Load();
             var avatar = lib.Avatars.FirstOrDefault(x => x.Id == id);
+            var now = DateTimeOffset.UtcNow;
+            if (archive && avatar is not null && !IsPinnedSystemGroupId(avatar.GroupId))
+            {
+                ArchiveUnfavoritedAvatar(lib, avatar, now);
+            }
             lib.Avatars.RemoveAll(x => x.Id == id);
             if (avatar is not null && !lib.Avatars.Any(item => item.ImageOverridePath.Equals(avatar.ImageOverridePath, StringComparison.OrdinalIgnoreCase))) DeleteAvatarImageFile(avatar.ImageOverridePath);
             Save(lib);
@@ -4355,7 +4731,7 @@ internal sealed class AvatarStore
             {
                 Id = UnfavoriteAvatarGroupId,
                 Name = UnfavoriteAvatarGroupName,
-                Description = "Avatars removed from VRChat favorites outside VRCNeph, kept so accidental unfavorites can be recovered.",
+                Description = "Avatars removed from favorites, kept so accidental unfavorites can be recovered.",
                 Order = NextGroupOrder(lib),
                 ReorderLocked = true,
                 CreatedAt = now
@@ -4364,7 +4740,7 @@ internal sealed class AvatarStore
         }
 
         group.Name = UnfavoriteAvatarGroupName;
-        group.Description = "Avatars removed from VRChat favorites outside VRCNeph, kept so accidental unfavorites can be recovered.";
+        group.Description = "Avatars removed from favorites, kept so accidental unfavorites can be recovered.";
         group.ReorderLocked ??= true;
         group.UpdatedAt = now;
         return group;
@@ -4762,7 +5138,7 @@ internal sealed class AppSettingsStore
         var overlayY = s.SchemaVersion < 11 && s.OverlayY == 0 ? DefaultSettings.OverlayY : Math.Clamp(s.OverlayY, -10000, 10000);
         if (s.SchemaVersion < 18 && overlayX == DefaultSettings.OverlayX && overlayY == 16) overlayY = DefaultSettings.OverlayY;
         var overlayWidth = DefaultSettings.OverlayWidth;
-        var overlayHeight = s.SchemaVersion < 11 && s.OverlayHeight == 0 ? DefaultSettings.OverlayHeight : Math.Clamp(s.OverlayHeight, 420, 900);
+        var overlayHeight = s.SchemaVersion < 11 && s.OverlayHeight == 0 ? DefaultSettings.OverlayHeight : Math.Clamp(s.OverlayHeight, 420, 800);
         return new AppSettings(grid, databaseGrid, color, opacity, panelOpacity, panelColor, panelSynced, s.BlurEnabled, s.BackgroundEffect ?? "", s.OverlayEnabled, hotkey, databaseRandomHotkey, favoriteRandomHotkey, databaseRandomVrBinding, overlayPanel, overlayOpacity, overlayScale, overlayX, overlayY, overlayWidth, overlayHeight, 18);
     }
 }
@@ -5861,6 +6237,27 @@ internal static class VrChatLogWatcher
         try { return Process.GetProcessesByName("VRChat").Any(); }
         catch { return false; }
     }
+    public static bool IsVrChatReady(long launchedAt)
+    {
+        if (!IsVrChatRunning()) return false;
+        var log = LatestLogPath();
+        if (string.IsNullOrWhiteSpace(log)) return false;
+
+        // Ignore a previous session's log.  The client creates a fresh output
+        // log on launch, so its creation time is a reliable session boundary.
+        if (launchedAt > 0)
+        {
+            var launchTime = DateTimeOffset.FromUnixTimeMilliseconds(launchedAt).UtcDateTime;
+            if (File.GetCreationTimeUtc(log) < launchTime.AddSeconds(-5)) return false;
+        }
+
+        // This is the first definitive client-ready signal: authentication has
+        // completed and the Photon connection is established.  A world does not
+        // need to be loaded yet for VRChat to receive a self-invite.
+        return ReadTailLines(log, 2500).Any(line =>
+            line.Contains("OnConnectedToMaster", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Connected to master", StringComparison.OrdinalIgnoreCase));
+    }
     public static WorldVisitHistoryResult WorldVisitHistory(WorldVisitHistoryInput input)
     {
         var worldId = input.WorldId?.Trim() ?? "";
@@ -5911,7 +6308,9 @@ internal static class VrChatLogWatcher
                 }
             }
         }
-        return new WorldVisitHistoryResult(items.OrderByDescending(x => x.Timestamp).Take(20).ToList());
+        // Keep enough history for the UI to recover a recent leave marker even
+        // when the same world has been visited repeatedly in one session.
+        return new WorldVisitHistoryResult(items.OrderByDescending(x => x.Timestamp).Take(100).ToList());
     }
     public static List<LatestWorldLocationResult> RecentWorldLocations(int limit = 30)
     {
@@ -7375,6 +7774,10 @@ internal sealed class VrChatClient
             $"n={limit}",
             $"offset={offset}"
         };
+        if (string.Equals(sort, "random", StringComparison.OrdinalIgnoreCase))
+        {
+            parameters.Add("includeInstances=partial");
+        }
         if (!string.IsNullOrWhiteSpace(query)) parameters.Add($"search={WebUtility.UrlEncode(query)}");
         if (!string.IsNullOrWhiteSpace(input.ReleaseStatus)) parameters.Add($"releaseStatus={WebUtility.UrlEncode(input.ReleaseStatus.Trim())}");
         var path = $"{pathBase}?{string.Join("&", parameters)}";
@@ -7570,7 +7973,23 @@ internal sealed class VrChatClient
     public async Task<VrChatWorldSummary> GetWorldDetailAsync(string id)
     {
         if (string.IsNullOrWhiteSpace(id)) throw new InvalidOperationException("World not found.");
-        return await GetWorldAsync(id);
+        try
+        {
+            return await GetWorldAsync(id);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("VRChat world returned 404", StringComparison.OrdinalIgnoreCase))
+        {
+            return new VrChatWorldSummary(
+                id.Trim(),
+                "World unavailable",
+                "",
+                "VRChat no longer returned details for this world.",
+                "",
+                0,
+                0,
+                "unavailable",
+                Unavailable: true);
+        }
     }
     public async Task<object> OpenWorldAsync(WorldLaunchInput input)
     {
@@ -8481,10 +8900,10 @@ internal sealed class VrChatClient
         ReadWorldInstances(root, worldId),
         ReadString(root, "authorId") ?? "");
     }
-    private static List<VrChatWorldInstanceSummary> ReadWorldInstances(JsonElement root, string worldId)
+    private static List<VrChatWorldInstanceSummary>? ReadWorldInstances(JsonElement root, string worldId)
     {
         var instances = new List<VrChatWorldInstanceSummary>();
-        if (!root.TryGetProperty("instances", out var items) || items.ValueKind != JsonValueKind.Array) return instances;
+        if (!root.TryGetProperty("instances", out var items) || items.ValueKind != JsonValueKind.Array) return null;
         foreach (var item in items.EnumerateArray())
         {
             var id = "";
@@ -8800,6 +9219,7 @@ internal sealed class AvatarDatabaseClient
         cancellationToken.ThrowIfCancellationRequested();
         if (vrchat is not null) await HydrateVrChatResultsAsync(result.Results, vrchat, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
+        if (!IsAllProvider(input)) OrderAvatarSearchResults(result.Results, input);
         return result;
     }
 
@@ -9040,6 +9460,13 @@ internal sealed class AvatarDatabaseClient
     {
         var page = Math.Max(1, input.Page);
         var limit = Math.Clamp(input.Limit <= 0 ? 50 : input.Limit, 1, 50);
+        var cacheKey = AllSearchCacheKey(input, page, limit);
+        if (Cache.TryGetValue(cacheKey, out var cached) && DateTimeOffset.UtcNow - cached.CachedAt < TimeSpan.FromMinutes(3))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return cached with { CachedAt = DateTimeOffset.UtcNow };
+        }
+
         var targetCount = checked(page * limit + 1);
         var errors = new List<string>();
         var unique = new List<AvatarInput>();
@@ -9120,12 +9547,96 @@ internal sealed class AvatarDatabaseClient
             if (pageResults.All(x => x.Result.Results.Count == 0 && !x.Result.HasMore)) break;
         }
 
+        if (IsAvatarRelevanceSearch(input)) OrderAvatarSearchResults(unique, input);
         var skip = (page - 1) * limit;
         var visiblePage = unique.Skip(skip).Take(limit).ToList();
         var hasMore = unique.Count > skip + limit || providerHasMore.Values.Any(BooleanIdentity);
         if (visiblePage.Count == 0 && errors.Count == providerHasMore.Count) throw new InvalidOperationException(string.Join(" | ", errors));
-        return new AvatarDatabaseSearchResult(visiblePage, page, hasMore, DateTimeOffset.UtcNow);
+        var searchResult = new AvatarDatabaseSearchResult(visiblePage, page, hasMore, DateTimeOffset.UtcNow);
+        Cache[cacheKey] = searchResult;
+        return searchResult;
     }
+
+    private static bool IsAvatarRelevanceSearch(AvatarSearchInput input) =>
+        !string.IsNullOrWhiteSpace(input.Query)
+        && string.Equals(input.Sort, "relevance", StringComparison.OrdinalIgnoreCase);
+
+    private static void OrderAvatarSearchResults(List<AvatarInput> results, AvatarSearchInput input)
+    {
+        if (results.Count < 2 || !IsAvatarRelevanceSearch(input)) return;
+
+        var ordered = results
+            .Select(avatar => new
+            {
+                Avatar = avatar,
+                Score = AvatarSearchRelevanceScore(avatar, input),
+                Name = NormalizeSearchOrderText(avatar.Name),
+                Author = NormalizeSearchOrderText(avatar.AuthorName),
+                Id = NormalizeSearchOrderText(string.IsNullOrWhiteSpace(avatar.AvatarId) ? avatar.Id : avatar.AvatarId),
+                Source = NormalizeSearchOrderText(avatar.Source)
+            })
+            .OrderByDescending(item => item.Score)
+            .ThenBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.Author, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.Id, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.Source, StringComparer.OrdinalIgnoreCase)
+            .Select(item => item.Avatar)
+            .ToList();
+
+        results.Clear();
+        results.AddRange(ordered);
+    }
+
+    private static int AvatarSearchRelevanceScore(AvatarInput avatar, AvatarSearchInput input)
+    {
+        var query = input.Query?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(query)) return 0;
+
+        var score = 0;
+        if (input.SearchAvatar)
+        {
+            score = Math.Max(score, ScoreAvatarSearchField(avatar.Name, query, input.SearchMode, 6000));
+            score = Math.Max(score, ScoreAvatarSearchField(avatar.AvatarId, query, input.SearchMode, 5200));
+            if (string.IsNullOrWhiteSpace(avatar.AvatarId)) score = Math.Max(score, ScoreAvatarSearchField(avatar.Id, query, input.SearchMode, 5200));
+        }
+        if (input.SearchAuthor)
+        {
+            var authorBase = input.ExactAuthorName ? 6200 : 4100;
+            score = Math.Max(score, ScoreAvatarSearchField(avatar.AuthorName, query, input.SearchMode, authorBase));
+            score = Math.Max(score, ScoreAvatarSearchField(avatar.AuthorId, query, input.SearchMode, Math.Max(3000, authorBase - 300)));
+        }
+        if (input.SearchDescription) score = Math.Max(score, ScoreAvatarSearchField(avatar.Description, query, input.SearchMode, 2200));
+        if (input.SearchTags) score = Math.Max(score, ScoreAvatarSearchField($"{avatar.Tags} {avatar.Notes}", query, input.SearchMode, 1800));
+        return score;
+    }
+
+    private static int ScoreAvatarSearchField(string? value, string query, string? mode, int baseScore)
+    {
+        var text = value?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(text)) return 0;
+        var needle = query.Trim();
+        var comparison = StringComparison.OrdinalIgnoreCase;
+        var normalizedMode = NormalizeSearchMode(mode);
+
+        if (normalizedMode == "exact") return text.Equals(needle, comparison) ? baseScore + 500 : 0;
+        if (normalizedMode == "startsWith") return text.StartsWith(needle, comparison) ? baseScore + 400 : 0;
+        if (normalizedMode == "endsWith") return text.EndsWith(needle, comparison) ? baseScore + 300 : 0;
+        if (normalizedMode == "allWords")
+        {
+            var words = SearchWords(needle);
+            if (words.Count == 0 || !words.All(word => text.Contains(word, comparison))) return 0;
+            if (text.Equals(needle, comparison)) return baseScore + 500;
+            if (text.StartsWith(needle, comparison)) return baseScore + 400;
+            return baseScore + 200 + Math.Min(100, words.Count * 5);
+        }
+
+        if (text.Equals(needle, comparison)) return baseScore + 500;
+        if (text.StartsWith(needle, comparison)) return baseScore + 400;
+        return text.Contains(needle, comparison) ? baseScore + 200 : 0;
+    }
+
+    private static string NormalizeSearchOrderText(string? value) =>
+        string.Join(" ", (value ?? "").Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
 
     private async Task<AvatarDatabaseCountResult> CountAllAsync(AvatarSearchInput input, VrChatClient? vrchat, CancellationToken cancellationToken)
     {
@@ -10500,7 +11011,9 @@ internal sealed class AvatarDatabaseClient
     private static bool IsAuthorNameOnlySearch(AvatarSearchInput input) =>
         input.SearchAuthor && !input.SearchAvatar && !input.SearchDescription && !input.SearchTags && !HasOptionFilter(input) && !string.IsNullOrWhiteSpace(input.Query);
     private static string AvtrZipCacheKey(AvatarSearchInput input, int page, int limit) =>
-        $"avtrzip\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}\n{page}\n{limit}";
+        $"avtrzip\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}\n{input.Sort}\n{page}\n{limit}";
+    private static string AllSearchCacheKey(AvatarSearchInput input, int page, int limit) =>
+        $"all-avatar-search\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.ExactAuthorName}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}\n{input.Sort}\n{page}\n{limit}";
     private static async Task<AvatarDatabaseSearchResult> SearchRemoteVrcxAsync(AvatarSearchInput input, VrChatClient? vrchat, bool fillPage = true, CancellationToken cancellationToken = default)
     {
         var query = input.Query?.Trim() ?? "";
@@ -10658,7 +11171,7 @@ internal sealed class AvatarDatabaseClient
     }
 
     private static string RemoteVrcxCacheKey(AvatarSearchInput input, int page, int limit) =>
-        $"vrcx-remote\n{VrcxRemoteDatabaseUrl}\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}\n{page}\n{limit}";
+        $"vrcx-remote\n{VrcxRemoteDatabaseUrl}\n{input.Query?.Trim() ?? ""}\n{input.AuthorId?.Trim() ?? ""}\n{input.SearchAvatar}\n{input.SearchAuthor}\n{input.SearchDescription}\n{input.SearchTags}\n{input.SearchMode}\n{input.PlatformFilters}\n{input.Sort}\n{page}\n{limit}";
 
     private static string RemoteVrcxTags(JsonElement item)
     {
@@ -11197,6 +11710,8 @@ internal sealed class OverlayHotkeyPoller : IDisposable
     public static string NormalizeDisplayHotkey(string hotkey, string fallback = DefaultHotkey) =>
         (ParseHotkey(hotkey) ?? ParseHotkey(fallback) ?? ParseHotkey(DefaultHotkey)!).Display;
 
+    public bool UsingGlobalRegistration => _window?.Registered == true;
+
     public void Start()
     {
         _thread = new Thread(RunMessageLoop) { IsBackground = true, Name = "VRCNeph Overlay Hotkey" };
@@ -11216,6 +11731,17 @@ internal sealed class OverlayHotkeyPoller : IDisposable
         try
         {
             _window = new HotkeyWindow(_hotkey, _callback);
+            if (!_window.Registered)
+            {
+                // A different application may already own this combination.
+                // Keep the overlay usable with the edge-triggered sampler,
+                // but prefer RegisterHotKey whenever it is available because
+                // it delivers exactly one callback per press.
+                _window.Dispose();
+                _window = null;
+                RunNonBlockingPoller();
+                return;
+            }
             _ready.Set();
             Application.Run();
         }
@@ -11267,6 +11793,8 @@ internal sealed class OverlayHotkeyPoller : IDisposable
         private readonly HotkeyDefinition _hotkey;
         private readonly Action _callback;
         private bool _registered;
+
+        public bool Registered => _registered;
 
         public HotkeyWindow(HotkeyDefinition hotkey, Action callback)
         {
@@ -11621,10 +12149,10 @@ internal sealed class GroupLockInput { public string Id { get; set; } = ""; publ
 internal sealed class CopyGroupToExistingInput { public string Id { get; set; } = ""; public string TargetGroupId { get; set; } = ""; public bool Replace { get; set; } }
 internal class AvatarInput { public string Id { get; set; } = ""; public string GroupId { get; set; } = ""; public string AvatarId { get; set; } = ""; public string Name { get; set; } = ""; public string Description { get; set; } = ""; public string AuthorId { get; set; } = ""; public string AuthorName { get; set; } = ""; public string ImageUrl { get; set; } = ""; public string ThumbnailImageUrl { get; set; } = ""; public string ImageOverridePath { get; set; } = ""; public string ReleaseStatus { get; set; } = ""; public string Version { get; set; } = ""; public string Platforms { get; set; } = ""; public string Tags { get; set; } = ""; public string SourceUrl { get; set; } = ""; public string Notes { get; set; } = ""; public string RawJson { get; set; } = ""; public string Source { get; set; } = ""; public string RemoteCreatedAt { get; set; } = ""; public string RemoteUpdatedAt { get; set; } = ""; public string RemoteFavoriteId { get; set; } = ""; }
 internal sealed record AvatarEquipNotice(string AvatarId, string Name, string AuthorName, string ThumbnailImageUrl, string ImageUrl, string ImageOverridePath, string ReleaseStatus, string Platforms, string ThemeColor, string PanelColor, int PanelOpacity);
-internal sealed record OverlayHostState(string Mode, AvatarEquipNotice? Notice = null, string Token = "", DateTimeOffset? ExpiresAt = null)
+internal sealed record OverlayHostState(string Mode, AvatarEquipNotice? Notice = null, string Token = "", DateTimeOffset? ExpiresAt = null, bool PanelVisible = false)
 {
     public static OverlayHostState Hidden { get; } = new("hidden");
-    public static OverlayHostState Panel { get; } = new("panel");
+    public static OverlayHostState Panel { get; } = new("panel", PanelVisible: true);
 }
 internal static class OverlayHostStateStore
 {
@@ -11648,8 +12176,22 @@ internal static class OverlayHostStateStore
         lock (Gate)
         {
             Directory.CreateDirectory(AppPaths.RootDirectory);
+            var serialized = JsonSerializer.Serialize(state, ProgramJson.Options);
+            // FileSystemWatcher can report several events for one atomic
+            // replacement. Do not replace the file when the state is already
+            // identical; this keeps duplicate watcher notifications from
+            // feeding a state-application loop.
+            try
+            {
+                if (File.Exists(AppPaths.OverlayHostStatePath) &&
+                    string.Equals(File.ReadAllText(AppPaths.OverlayHostStatePath), serialized, StringComparison.Ordinal))
+                {
+                    return;
+                }
+            }
+            catch { }
             var temporaryPath = AppPaths.OverlayHostStatePath + "." + Environment.ProcessId + ".tmp";
-            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(state, ProgramJson.Options));
+            File.WriteAllText(temporaryPath, serialized);
             File.Move(temporaryPath, AppPaths.OverlayHostStatePath, true);
         }
     }
@@ -11658,9 +12200,26 @@ internal static class AvatarInputExtensions { public static string NameOrId(this
 internal sealed class IdInput { public string Id { get; set; } = ""; public string Path { get; set; } = ""; }
 internal sealed record OverlayMoveInput(int Dx = 0, int Dy = 0);
 internal sealed record OverlayResizeInput(int Width = 360, int Height = 522, int Dx = 0, int Dy = 0, string Edges = "s");
+internal sealed record OverlayLayout(
+    int HostX,
+    int HostY,
+    int HostWidth,
+    int HostHeight,
+    int PanelX,
+    int PanelY,
+    int PanelWidth,
+    int PanelHeight,
+    int NoticeX,
+    int NoticeY,
+    int NoticeWidth,
+    int NoticeHeight,
+    bool PanelVisible,
+    bool NoticeVisible)
+{
+    public static OverlayLayout Empty { get; } = new(0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, false, false);
+}
 internal sealed class IdsInput { public List<long> Ids { get; set; } = []; }
 internal sealed class BackupRestoreInput { public string Path { get; set; } = ""; public string Mode { get; set; } = ""; }
-internal sealed record OverlayNoticeReadyInput(string Token = "");
 internal sealed class ExportJsonInput { public string FileName { get; set; } = ""; public JsonElement Payload { get; set; } }
 internal sealed class MoveAvatarInput { public string AvatarId { get; set; } = ""; public string GroupId { get; set; } = ""; }
 internal sealed class ReorderInput { public string Id { get; set; } = ""; public string GroupId { get; set; } = ""; public int Position { get; set; } = 1; }
@@ -11696,7 +12255,7 @@ internal sealed record ExportResult(string Path);
 internal sealed record GroupClearResult(LibraryData Library, int Removed, string BackupPath);
 internal sealed record SteamVrControllerBindingCapture(string Binding, string Display);
 internal sealed record AppSettings(int GridSize = 10, int DatabaseGridSize = 10, string ThemeColor = "#303735", int BackgroundOpacity = 20, int PanelOpacity = 35, string PanelColor = "#303735", bool PanelColorSynced = true, bool BlurEnabled = true, string BackgroundEffect = "", bool OverlayEnabled = true, string OverlayHotkey = "F8", string DatabaseRandomHotkey = "Ctrl+R", string FavoriteRandomHotkey = "Ctrl+Alt+R", string DatabaseRandomVrBinding = "", string OverlayDefaultPanel = "avatars", int OverlayOpacity = 85, int OverlayScale = 100, int OverlayX = 8, int OverlayY = 8, int OverlayWidth = 360, int OverlayHeight = 522, int SchemaVersion = 18);
-internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx", string SearchMode = "phrase", List<string>? ExcludedAvatarIds = null, string Sort = "updatedDesc", bool ExactAuthorName = false);
+internal sealed record AvatarSearchInput(string Query, int Limit = 50, int Page = 1, string AuthorId = "", bool SearchAvatar = true, bool SearchAuthor = true, bool SearchDescription = true, bool SearchTags = true, string PlatformFilters = "", string Provider = "vrcx", string SearchMode = "phrase", List<string>? ExcludedAvatarIds = null, string Sort = "relevance", bool ExactAuthorName = false);
 internal sealed record AvatarListResult(List<AvatarInput> Avatars);
 internal sealed record AvatarImageResolveInput(string AvatarId = "", string ImageUrl = "", string Name = "", string UserId = "", string DisplayName = "");
 internal sealed record AvatarDatabaseSearchResult(List<AvatarInput> Results, int Page, bool HasMore, DateTimeOffset CachedAt, int Total = 0);
@@ -11722,6 +12281,7 @@ internal sealed record WorldFavoriteInput(string Id = "", string Tag = "");
 internal sealed record PageInput(int Limit = 100, int Offset = 0);
 internal sealed record WorldSearchInput(string Query = "", int Limit = 50, int Offset = 0, string Mode = "", string Sort = "popularity", string Order = "descending", string ReleaseStatus = "");
 internal sealed record WorldLaunchInput(string WorldId = "", string InstanceId = "", string Location = "");
+internal sealed record VrChatReadinessInput(long LaunchedAt = 0);
 internal sealed record WorldInstanceCreateInput(string WorldId = "", string Type = "private", string Region = "use", bool InviteCurrentInstanceFriends = false);
 internal sealed record FriendInstanceInviteResult(int Matched, int Sent, int Failed, List<string> Failures);
 internal sealed record WorldVisitHistoryInput(string WorldId = "", string InstanceId = "", string Location = "");
@@ -11746,7 +12306,7 @@ internal sealed record VrChatUserGroupsResult(List<VrChatUserGroupSummary> Group
 internal sealed record VrChatGroupDetail(string Id, string Name, string ShortCode, string MemberCount, string Description, string IconUrl, string BannerUrl, string OwnerId, string OwnerName, string Privacy, string JoinState, string CreatedAt, string RawJson);
 internal sealed record VrChatGroupMemberSummary(string UserId, string DisplayName, string Roles, string Status, string JoinedAt, string ImageUrl, string RawJson);
 internal sealed record VrChatGroupMembersResult(List<VrChatGroupMemberSummary> Members);
-internal sealed record VrChatWorldSummary(string Id, string Name, string AuthorName, string Description, string ImageUrl, int Occupants, int Favorites, string ReleaseStatus, int Capacity = 0, int Visits = 0, int PublicOccupants = 0, int PrivateOccupants = 0, string CreatedAt = "", string UpdatedAt = "", string RawJson = "", string FavoriteTags = "", List<VrChatWorldInstanceSummary>? Instances = null, string AuthorId = "");
+internal sealed record VrChatWorldSummary(string Id, string Name, string AuthorName, string Description, string ImageUrl, int Occupants, int Favorites, string ReleaseStatus, int Capacity = 0, int Visits = 0, int PublicOccupants = 0, int PrivateOccupants = 0, string CreatedAt = "", string UpdatedAt = "", string RawJson = "", string FavoriteTags = "", List<VrChatWorldInstanceSummary>? Instances = null, string AuthorId = "", bool Unavailable = false);
 internal sealed record VrChatWorldInstanceSummary(string Id, string Location, int Occupants, string Type, string Region, bool IsLocked, bool IsAgeRestricted, string GroupId = "", string GroupName = "");
 internal sealed record VrChatWorldSearchResult(List<VrChatWorldSummary> Worlds, bool HasMore);
 internal sealed record VrChatFavoriteGroupSummary(string Id, string Name, string DisplayName, string Type, string Visibility = "", string RawJson = "");
