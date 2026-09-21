@@ -6961,7 +6961,7 @@ internal sealed class VrChatClient
     }
     public async Task<VrChatSessionState> GetSessionAsync()
     {
-        try { var user = await GetCurrentUserAsync(); return new(true, false, [], user); }
+        try { var user = await GetCurrentUserAsync(includeProfile: true); return new(true, false, [], user); }
         catch { return new(false, false, [], null); }
     }
     public async Task<int> GetAvatarFavoriteGroupLimitAsync()
@@ -6994,7 +6994,7 @@ internal sealed class VrChatClient
         SaveCookies();
         using var doc = JsonDocument.Parse(json);
         if (doc.RootElement.TryGetProperty("requiresTwoFactorAuth", out var methods) && methods.ValueKind == JsonValueKind.Array) return new(false, true, methods.EnumerateArray().Select(x => x.GetString() ?? "totp").ToArray(), null);
-        return new(true, false, [], ReadUser(doc.RootElement));
+        return new(true, false, [], await EnrichUserProfileAsync(ReadUser(doc.RootElement)));
     }
     public async Task<VrChatSessionState> TwoFactorAsync(TwoFactorInput input)
     {
@@ -7024,16 +7024,26 @@ internal sealed class VrChatClient
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(10)
             .ToArray();
-        var payload = new Dictionary<string, object?>
+        var userPayload = new Dictionary<string, object?>
         {
             ["status"] = status,
             ["statusDescription"] = statusDescription,
+            ["pronouns"] = pronouns
+        };
+        using (var response = await _client.PutAsync($"users/{WebUtility.UrlEncode(current.Id)}", new StringContent(JsonSerializer.Serialize(userPayload, ProgramJson.Options), Encoding.UTF8, "application/json")))
+        {
+            await ReadActionResponseAsync(response, "Update profile failed.");
+        }
+
+        var profilePayload = new Dictionary<string, object?>
+        {
             ["bio"] = bio,
-            ["pronouns"] = pronouns,
             ["bioLinks"] = bioLinks
         };
-        using var response = await _client.PutAsync($"users/{WebUtility.UrlEncode(current.Id)}", new StringContent(JsonSerializer.Serialize(payload, ProgramJson.Options), Encoding.UTF8, "application/json"));
-        await ReadActionResponseAsync(response, "Update profile failed.");
+        using (var response = await _client.PutAsync($"profile/{WebUtility.UrlEncode(current.Id)}", new StringContent(JsonSerializer.Serialize(profilePayload, ProgramJson.Options), Encoding.UTF8, "application/json")))
+        {
+            await ReadActionResponseAsync(response, "Update profile failed.");
+        }
         return await GetSessionAsync();
     }
     public async Task<AvatarInput> FetchAvatarAsync(string id)
@@ -7362,7 +7372,13 @@ internal sealed class VrChatClient
         if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"VRChat user details returned {(int)response.StatusCode}.");
         using var doc = JsonDocument.Parse(json);
         var friend = ReadFriend(doc.RootElement);
-        return friend with { RawJson = JsonSerializer.Serialize(doc.RootElement, ProgramJson.Options) };
+        var profile = await GetPublicProfileAsync(id);
+        if (profile is null) return friend with { RawJson = JsonSerializer.Serialize(doc.RootElement, ProgramJson.Options) };
+        var enriched = MergePublicProfileIntoFriend(friend, profile.Value);
+        return enriched with
+        {
+            RawJson = JsonSerializer.Serialize(new { user = doc.RootElement, profile = profile.Value }, ProgramJson.Options)
+        };
     }
     public async Task<VrChatFriendListResult> GetFavoriteFriendsAsync(PageInput input)
     {
@@ -8600,12 +8616,104 @@ internal sealed class VrChatClient
         return match.Success && int.TryParse(match.Groups["index"].Value, out var index) ? Math.Max(0, index - 1) : -1;
     }
     private static string DefaultAvatarGroupName(int index) => index <= 1 ? "Favorite Avatars" : $"VRC+ Avatars {index - 1}";
-    private async Task<VrChatUserSummary> GetCurrentUserAsync()
+    private async Task<VrChatUserSummary> GetCurrentUserAsync(bool includeProfile = false)
     {
         using var response = await _client.GetAsync("auth/user");
         if (!response.IsSuccessStatusCode) throw new InvalidOperationException("Not signed in.");
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-        return ReadUser(doc.RootElement);
+        var user = ReadUser(doc.RootElement);
+        return includeProfile ? await EnrichUserProfileAsync(user) : user;
+    }
+    private async Task<VrChatUserSummary> EnrichUserProfileAsync(VrChatUserSummary user)
+    {
+        if (string.IsNullOrWhiteSpace(user.Id)) return user;
+        var profile = await GetPublicProfileAsync(user.Id);
+        return profile is null ? user : MergePublicProfileIntoUser(user, profile.Value);
+    }
+    private async Task<JsonElement?> GetPublicProfileAsync(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return null;
+        try
+        {
+            using var response = await _client.GetAsync($"profile/{WebUtility.UrlEncode(id.Trim())}");
+            if (!response.IsSuccessStatusCode) return null;
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            return doc.RootElement.Clone();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+    private static VrChatUserSummary MergePublicProfileIntoUser(VrChatUserSummary user, JsonElement profile)
+    {
+        var representedGroup = profile.TryGetProperty("representedGroup", out var group) && group.ValueKind == JsonValueKind.Object ? group : default;
+        var hasGroup = representedGroup.ValueKind == JsonValueKind.Object;
+        var bio = ReadString(profile, "bio");
+        var hasBioLinks = profile.TryGetProperty("bioLinks", out _);
+        var bioLinks = ReadStringArray(profile, "bioLinks");
+        var pronouns = ReadString(profile, "pronouns");
+        var iconUrl = ReadString(profile, "iconUrl");
+        var currentAvatarId = ReadString(profile, "currentAvatar") ?? ReadString(profile, "currentAvatarId");
+        var currentAvatarImageUrl = ReadString(profile, "currentAvatarImageUrl");
+        var currentAvatarThumbnailImageUrl = ReadString(profile, "currentAvatarThumbnailImageUrl");
+        return user with
+        {
+            CurrentAvatarId = string.IsNullOrWhiteSpace(currentAvatarId) ? user.CurrentAvatarId : currentAvatarId,
+            CurrentAvatarImageUrl = string.IsNullOrWhiteSpace(currentAvatarImageUrl) ? user.CurrentAvatarImageUrl : currentAvatarImageUrl,
+            CurrentAvatarThumbnailImageUrl = string.IsNullOrWhiteSpace(currentAvatarThumbnailImageUrl) ? user.CurrentAvatarThumbnailImageUrl : currentAvatarThumbnailImageUrl,
+            Bio = bio is not null ? bio : user.Bio,
+            BioLinks = hasBioLinks ? bioLinks : user.BioLinks,
+            Pronouns = pronouns is not null ? pronouns : user.Pronouns,
+            ProfileImageUrl = string.IsNullOrWhiteSpace(iconUrl) ? user.ProfileImageUrl : iconUrl,
+            UserIcon = string.IsNullOrWhiteSpace(iconUrl) ? user.UserIcon : iconUrl,
+            RepresentedGroupId = hasGroup ? ReadString(representedGroup, "id") ?? user.RepresentedGroupId : user.RepresentedGroupId,
+            RepresentedGroupName = hasGroup ? ReadString(representedGroup, "name") ?? user.RepresentedGroupName : user.RepresentedGroupName,
+            RepresentedGroupShortCode = hasGroup ? ReadString(representedGroup, "shortCode") ?? user.RepresentedGroupShortCode : user.RepresentedGroupShortCode,
+            RepresentedGroupMemberCount = hasGroup ? ProfileValue(representedGroup, "memberCount", user.RepresentedGroupMemberCount) : user.RepresentedGroupMemberCount,
+            RepresentedGroupImageUrl = hasGroup ? ReadString(representedGroup, "iconUrl") ?? ReadString(representedGroup, "bannerUrl") ?? user.RepresentedGroupImageUrl : user.RepresentedGroupImageUrl
+        };
+    }
+    private static VrChatFriendSummary MergePublicProfileIntoFriend(VrChatFriendSummary friend, JsonElement profile)
+    {
+        var representedGroup = profile.TryGetProperty("representedGroup", out var group) && group.ValueKind == JsonValueKind.Object ? group : default;
+        var hasGroup = representedGroup.ValueKind == JsonValueKind.Object;
+        var bio = ReadString(profile, "bio");
+        var hasBioLinks = profile.TryGetProperty("bioLinks", out _);
+        var bioLinks = ReadStringArray(profile, "bioLinks");
+        var pronouns = ReadString(profile, "pronouns");
+        var iconUrl = ReadString(profile, "iconUrl");
+        var trustTags = ReadStringArray(profile, "trustTags");
+        var currentAvatarId = ReadString(profile, "currentAvatar") ?? ReadString(profile, "currentAvatarId");
+        var currentAvatarName = ReadString(profile, "currentAvatarName");
+        var currentAvatarImageUrl = ReadString(profile, "currentAvatarImageUrl");
+        var currentAvatarThumbnailImageUrl = ReadString(profile, "currentAvatarThumbnailImageUrl");
+        var tags = string.Join(", ", new[] { friend.Tags, trustTags }.Where(value => !string.IsNullOrWhiteSpace(value)).SelectMany(value => value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)).Distinct(StringComparer.OrdinalIgnoreCase));
+        return friend with
+        {
+            CurrentAvatarId = string.IsNullOrWhiteSpace(currentAvatarId) ? friend.CurrentAvatarId : currentAvatarId,
+            CurrentAvatarName = string.IsNullOrWhiteSpace(currentAvatarName) ? friend.CurrentAvatarName : currentAvatarName,
+            CurrentAvatarImageUrl = string.IsNullOrWhiteSpace(currentAvatarImageUrl) ? friend.CurrentAvatarImageUrl : currentAvatarImageUrl,
+            CurrentAvatarThumbnailImageUrl = string.IsNullOrWhiteSpace(currentAvatarThumbnailImageUrl) ? friend.CurrentAvatarThumbnailImageUrl : currentAvatarThumbnailImageUrl,
+            Bio = bio is not null ? bio : friend.Bio,
+            BioLinks = hasBioLinks ? bioLinks : friend.BioLinks,
+            Pronouns = pronouns is not null ? pronouns : friend.Pronouns,
+            ImageUrl = string.IsNullOrWhiteSpace(iconUrl) ? friend.ImageUrl : iconUrl,
+            ProfileImageUrl = string.IsNullOrWhiteSpace(iconUrl) ? friend.ProfileImageUrl : iconUrl,
+            UserIcon = string.IsNullOrWhiteSpace(iconUrl) ? friend.UserIcon : iconUrl,
+            Tags = string.IsNullOrWhiteSpace(tags) ? friend.Tags : tags,
+            AgeVerificationStatus = ReadString(profile, "ageVerificationStatus") ?? friend.AgeVerificationStatus,
+            RepresentedGroupId = hasGroup ? ReadString(representedGroup, "id") ?? friend.RepresentedGroupId : friend.RepresentedGroupId,
+            RepresentedGroupName = hasGroup ? ReadString(representedGroup, "name") ?? friend.RepresentedGroupName : friend.RepresentedGroupName,
+            RepresentedGroupShortCode = hasGroup ? ReadString(representedGroup, "shortCode") ?? friend.RepresentedGroupShortCode : friend.RepresentedGroupShortCode,
+            RepresentedGroupMemberCount = hasGroup ? ProfileValue(representedGroup, "memberCount", friend.RepresentedGroupMemberCount) : friend.RepresentedGroupMemberCount,
+            RepresentedGroupImageUrl = hasGroup ? ReadString(representedGroup, "iconUrl") ?? ReadString(representedGroup, "bannerUrl") ?? friend.RepresentedGroupImageUrl : friend.RepresentedGroupImageUrl
+        };
+    }
+    private static string ProfileValue(JsonElement root, string name, string fallback)
+    {
+        var value = ReadString(root, name) ?? ReadValueString(root, name);
+        return string.IsNullOrWhiteSpace(value) ? fallback : value;
     }
     private static string CleanProfileStatus(string? status, string fallback)
     {
@@ -12298,7 +12406,7 @@ internal sealed record ChatMessageResult(string UserId, string Message, string M
 internal sealed record UserModerationInput(string Id = "", string Type = "block");
 internal sealed record EncounterHistoryInput(string UserId = "", string DisplayName = "");
 internal sealed record VrChatSessionState(bool IsLoggedIn, bool RequiresTwoFactor, string[] TwoFactorMethods, VrChatUserSummary? User);
-internal sealed record VrChatUserSummary(string Id, string DisplayName, string CurrentAvatarId, string CurrentAvatarImageUrl, string CurrentAvatarThumbnailImageUrl, string Status = "", string StatusDescription = "", string Location = "", string WorldId = "", string InstanceId = "", string HomeWorldId = "", string Bio = "", string DateJoined = "", string LastLogin = "", string DeveloperType = "", string Tags = "", string BioLinks = "", string Pronouns = "", string ProfileImageUrl = "", string UserIcon = "", string ProfilePicOverride = "", string ProfilePicOverrideThumbnail = "", string RawJson = "");
+internal sealed record VrChatUserSummary(string Id, string DisplayName, string CurrentAvatarId, string CurrentAvatarImageUrl, string CurrentAvatarThumbnailImageUrl, string Status = "", string StatusDescription = "", string Location = "", string WorldId = "", string InstanceId = "", string HomeWorldId = "", string Bio = "", string DateJoined = "", string LastLogin = "", string DeveloperType = "", string Tags = "", string BioLinks = "", string Pronouns = "", string ProfileImageUrl = "", string UserIcon = "", string ProfilePicOverride = "", string ProfilePicOverrideThumbnail = "", string RawJson = "", string RepresentedGroupId = "", string RepresentedGroupName = "", string RepresentedGroupShortCode = "", string RepresentedGroupMemberCount = "", string RepresentedGroupImageUrl = "");
 internal sealed record VrChatFriendSummary(string Id, string DisplayName, string Status, string StatusDescription, string Location, string WorldId, string ImageUrl, bool IsOnline = false, string Presence = "offline", string State = "", string Bio = "", string DateJoined = "", string LastLogin = "", string DeveloperType = "", string Tags = "", string RawJson = "", string ProfileImageUrl = "", string UserIcon = "", string ProfilePicOverride = "", string ProfilePicOverrideThumbnail = "", string CurrentAvatarId = "", string CurrentAvatarName = "", string CurrentAvatarImageUrl = "", string CurrentAvatarThumbnailImageUrl = "", string AllowAvatarCopying = "", string Pronouns = "", string AgeVerificationStatus = "", string LastPlatform = "", string RepresentedGroupId = "", string RepresentedGroupName = "", string RepresentedGroupShortCode = "", string RepresentedGroupMemberCount = "", string RepresentedGroupImageUrl = "", string BioLinks = "", bool IsFriend = false, bool IsBlocked = false, string FavoriteTags = "", string PresenceSource = "");
 internal sealed record VrChatFriendListResult(List<VrChatFriendSummary> Friends, bool HasMore);
 internal sealed record VrChatUserGroupSummary(string Id, string Name, string ShortCode, string MemberCount, string Description, string ImageUrl);

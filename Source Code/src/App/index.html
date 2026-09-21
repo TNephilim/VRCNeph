@@ -451,7 +451,6 @@
 
   <dialog id="saveAvatarGroupDialog"><form method="dialog" class="dialog-form">
     <header><h3>Save Avatar</h3><button type="button" class="icon-button" data-close="saveAvatarGroupDialog">x</button></header>
-    <p id="saveAvatarGroupName" class="dialog-note"></p>
     <div class="dialog-select-field"><span>Group</span>
       <div class="sort-control dialog-select-control">
         <button id="saveAvatarGroupMenuBtn" type="button">Group</button>
@@ -597,8 +596,13 @@
   </form></dialog>
   <dialog id="favoriteWorldDialog" class="confirm-dialog"><form method="dialog" class="dialog-form">
     <header><h3>Favorite World</h3><button type="button" class="icon-button" data-close="favoriteWorldDialog">x</button></header>
-    <p id="favoriteWorldText" class="dialog-note"></p>
-    <label>Favorite group<select id="favoriteWorldGroupInput"></select></label>
+    <div class="dialog-select-field"><span>Favorite group</span>
+      <div class="sort-control dialog-select-control favorite-world-group-control">
+        <button id="favoriteWorldGroupMenuBtn" type="button" aria-expanded="false">Choose group</button>
+        <div id="favoriteWorldGroupMenu" class="sort-menu" hidden></div>
+        <select id="favoriteWorldGroupInput" hidden></select>
+      </div>
+    </div>
     <menu><button id="cancelFavoriteWorldBtn" type="button">Cancel</button><button id="confirmFavoriteWorldBtn" type="button" class="primary">Favorite</button></menu>
   </form></dialog>
   <dialog id="worldGroupDialog" class="confirm-dialog favorite-group-dialog world-group-dialog"><form method="dialog" class="dialog-form">
