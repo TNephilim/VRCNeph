@@ -35,7 +35,10 @@
     <section id="groupDropdown" class="group-dropdown" hidden></section>
     <section id="overlayActions" class="overlay-actions" hidden>
       <div id="overlayDatabaseControls" class="overlay-database-controls" hidden></div>
-      <input id="overlaySearchInput" type="search" placeholder="Search">
+      <div id="overlaySearchField" class="overlay-search-field-wrap">
+        <input id="overlaySearchInput" type="search" placeholder="Search">
+        <button id="clearOverlaySearchBtn" class="overlay-search-clear" type="button" aria-label="Clear search" title="Clear search" disabled>Clear</button>
+      </div>
     </section>
     <section id="content" class="overlay-list" aria-live="polite"></section>
     <section id="detailPanels" class="detail-panels" aria-label="Overlay detail panels"></section>

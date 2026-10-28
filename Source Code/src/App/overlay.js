@@ -1336,9 +1336,10 @@ function render() {
   const panelControls = panelControlsHtml(state.panel);
   $("overlayActions").hidden = !searchable;
   $("overlayActions").classList.toggle("no-controls", !panelControls);
-  $("overlaySearchInput").hidden = !searchable;
+  $("overlaySearchField").hidden = !searchable;
   $("overlaySearchInput").value = state.filters[state.panel] || "";
   $("overlaySearchInput").placeholder = state.panel === "friends" ? "Search friends" : "Search avatars";
+  $("clearOverlaySearchBtn").disabled = !$("overlaySearchInput").value.trim();
   $("overlayDatabaseControls").hidden = !panelControls;
   $("overlayDatabaseControls").innerHTML = panelControls;
   applyMainPanelView();
@@ -1853,6 +1854,13 @@ $("overlaySearchInput").addEventListener("input", () => {
   if (!Object.prototype.hasOwnProperty.call(state.filters, state.panel)) return;
   state.filters[state.panel] = $("overlaySearchInput").value;
   render();
+});
+$("clearOverlaySearchBtn").addEventListener("pointerdown", (event) => event.preventDefault());
+$("clearOverlaySearchBtn").addEventListener("click", () => {
+  if (!Object.prototype.hasOwnProperty.call(state.filters, state.panel)) return;
+  state.filters[state.panel] = "";
+  render();
+  $("overlaySearchInput").focus();
 });
 $("overlaySearchInput").addEventListener("pointerdown", () => {
   send("overlayBeginTextInput");

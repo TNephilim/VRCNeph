@@ -46,6 +46,8 @@ const state = {
   groupFilter: "all",
   worldGroupFilter: "all",
   avatarPage: 0,
+  avatarGridInitialized: false,
+  initialViewReady: false,
   avatarFilteredCount: 0,
   pageJumpTarget: "database",
   editingGroupId: null,
@@ -64,11 +66,12 @@ const state = {
   avatarDatabaseCountKey: "",
   avatarDatabaseCounting: false,
   avatarDatabaseLoading: false,
+  avatarDatabasePageLoading: false,
+  avatarDatabasePageLoadingTarget: 0,
   avatarDatabaseSearched: false,
   avatarDatabaseMode: "search",
   avatarDatabaseRandomPages: [],
   avatarDatabaseSearchHistory: [],
-  avatarDatabaseScope: "avatar",
   avatarDatabaseHideOlderAvatars: false,
   avatarDatabaseOlderFilterCache: { key: "", results: [], nextSourcePage: 0, hasMore: true, exhausted: false, lastResult: null },
   pasUpdatePromptShown: false,
@@ -106,6 +109,7 @@ const state = {
   pendingAvatarSort: null,
   selectedAvatarIds: new Set(),
   selectionAnchorAvatarId: "",
+  cardKeyboardNavigation: null,
   pendingCopyGroupId: "",
   avatarDialogGroupId: null,
   avatarDialogSource: "",
@@ -369,7 +373,6 @@ function applyHydratedAppState() {
   loadWorldLocalGroups();
   loadFriendLocalGroups();
   recordPlayerNamesFromActivity(state.playerActivityLog.items, { persist: false });
-  render();
 }
 function toast(message) {
   const el = $("toast");
@@ -1009,11 +1012,20 @@ function applyLocalWorldLogEvent(event = {}) {
 }
 function handleLibraryChanged(data) {
   if (!data || !Array.isArray(data.groups) || !Array.isArray(data.avatars)) return;
+  const previousLibrary = state.library;
+  const previousActiveGroupId = state.activeGroupId;
+  const previousAvatarPage = state.avatarPage;
+  const previousAvatarGridKey = avatarGroupLibraryRenderKey(previousLibrary, previousActiveGroupId);
   state.library = data;
   if (state.activeGroupId && !state.library.groups.some((group) => group.id === state.activeGroupId)) {
     state.activeGroupId = state.library.groups[0]?.id ?? null;
   }
-  render();
+  ensureActiveGroupExists();
+  if (!state.initialViewReady) return;
+  const avatarGridChanged = previousActiveGroupId !== state.activeGroupId
+    || previousAvatarPage !== state.avatarPage
+    || previousAvatarGridKey !== avatarGroupLibraryRenderKey(state.library, state.activeGroupId);
+  render({ avatarGrid: avatarGridChanged, databaseGrid: false });
 }
 function invalidateBackgroundCache(groupId = "") {
   if (groupId) state.backgroundCache.delete(`group:${groupId}`);
@@ -1037,7 +1049,21 @@ function backgroundDialogPreviewEffect(value) {
 async function saveSettings() { try { state.settings = await api("settingsSave", state.settings); applySettings(); scheduleOverlaySettingsPreview(0); } catch (e) { toast(e.message); } }
 function queueSaveSettings() { clearTimeout(state.settingsSaveTimer); state.settingsSaveTimer = setTimeout(saveSettings, 220); }
 
-function render() { renderPageTabs(); renderGroups(); renderToolbar(); renderAvatars(); renderAvatarDatabaseResults(); renderAccount(); renderEquipProgress(); renderNotificationsPage(); renderMessagesPage(); renderInlineMessagePanel(); renderMessagePopup(); }
+function render({ avatarGrid = true, databaseGrid = true } = {}) {
+  renderPageTabs();
+  renderGroups();
+  renderToolbar();
+  if (avatarGrid) renderAvatars();
+  else updateAvatarFavoriteStarButtons();
+  if (databaseGrid) renderAvatarDatabaseResults();
+  else updateDatabaseFavoriteStarButtons();
+  renderAccount();
+  renderEquipProgress();
+  renderNotificationsPage();
+  renderMessagesPage();
+  renderInlineMessagePanel();
+  renderMessagePopup();
+}
 function renderFavoritesView() {
   renderPageTabs();
   renderGroups();
@@ -1197,13 +1223,26 @@ function currentAvatarFavoriteTargetStatus(groupId = state.activeGroupId, avatar
   if (isSyncedFavoriteGroup(groupId) && groupAvatars(groupId).length >= SYNCED_GROUP_AVATAR_LIMIT) return { ok: false, code: "full", group, reason: `Synced VRChat groups can only contain ${SYNCED_GROUP_AVATAR_LIMIT} avatars.` };
   return { ok: true, code: "", group, reason: "" };
 }
-function avatarFavoriteEntry(avatar = {}) {
+function avatarFavoriteEntry(avatar = {}, library = state.library) {
   const ids = avatarIdentityValues(avatar);
   if (!ids.size) return null;
-  return state.library.avatars.find((item) =>
+  return (library?.avatars || []).find((item) =>
     !isPinnedSystemGroup(item.groupId) &&
     [...avatarIdentityValues(item)].some((id) => ids.has(id))
   ) || null;
+}
+function avatarGroupLibraryRenderKey(library, groupId) {
+  const group = (library?.groups || []).find((item) => item.id === groupId) || null;
+  const avatars = (library?.avatars || [])
+    .filter((avatar) => avatar.groupId === groupId)
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")));
+  return JSON.stringify({
+    groupId: group?.id || "",
+    avatars: avatars.map((avatar) => {
+      const { updatedAt, ...cardData } = avatar;
+      return { ...cardData, isFavorite: Boolean(avatarFavoriteEntry(avatar, library)) };
+    })
+  });
 }
 function avatarFavoriteStarIconHtml() {
   return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9L12 3Z"></path></svg>`;
@@ -1212,6 +1251,34 @@ function avatarFavoriteStarButtonHtml(avatar = {}) {
   const active = Boolean(avatarFavoriteEntry(avatar));
   const title = active ? "Edit favorite" : "Favorite avatar";
   return `<button class="avatar-card-save avatar-favorite-star ${active ? "active" : ""}" type="button" title="${escapeAttr(title)}" aria-label="${escapeAttr(title)}">${avatarFavoriteStarIconHtml()}</button>`;
+}
+function syncAvatarFavoriteStarButton(button, avatar) {
+  if (!button || !avatar) return;
+  const active = Boolean(avatarFavoriteEntry(avatar));
+  const title = active ? "Edit favorite" : "Favorite avatar";
+  button.classList.toggle("active", active);
+  button.title = title;
+  button.setAttribute("aria-label", title);
+}
+function updateAvatarFavoriteStarButtons() {
+  const avatarsById = new Map((state.library?.avatars || []).map((avatar) => [
+    String(avatar.id || "").trim().toLowerCase(),
+    avatar
+  ]));
+  for (const button of document.querySelectorAll("#avatarGrid .avatar-card[data-avatar-id] .avatar-card-save")) {
+    const avatar = avatarsById.get(String(button.closest(".avatar-card")?.dataset.avatarId || "").trim().toLowerCase());
+    syncAvatarFavoriteStarButton(button, avatar);
+  }
+}
+function updateDatabaseFavoriteStarButtons() {
+  const avatarsById = new Map((state.avatarDatabaseResults || []).map((avatar) => [
+    String(avatar.avatarId || avatar.id || "").trim().toLowerCase(),
+    avatar
+  ]));
+  for (const button of document.querySelectorAll("#avatarDatabaseResults .database-avatar-card[data-avatar-id] .avatar-card-save")) {
+    const avatar = avatarsById.get(String(button.closest(".database-avatar-card")?.dataset.avatarId || "").trim().toLowerCase());
+    syncAvatarFavoriteStarButton(button, avatar);
+  }
 }
 function isGroupReorderLocked(group) {
   if (!group) return false;
@@ -1422,6 +1489,7 @@ function setUiHidden(hidden) {
 function showPage(page, { userInitiated = false, friendId = "" } = {}) {
   const pageChanged = page !== state.activePage;
   const previousPage = state.activePage;
+  if (pageChanged) clearCardNavigation();
   if (pageChanged) exitSyncedAvatarEditMode("Edit mode turned off.");
   if (page !== state.activePage && !$("avatarDetailsPanel").hidden) closeAvatarDetails();
   if (page !== state.activePage && page !== "notifications" && !$("notificationDetailsPanel").hidden) closeNotificationDetails();
@@ -1760,7 +1828,7 @@ function renderToolbar() {
   $("deleteGroupBtn").hidden = systemGroup || synced || managedReadOnlyGroup;
   $("addAvatarBtn").hidden = systemGroup || managedReadOnlyGroup || syncedReadOnlyGroup;
   $("equipRandomFavoriteBtn").hidden = isUnfavoriteGroup(group?.id) || isRecentGroup(group?.id) || isDeletedGroup(group?.id);
-  $("favRouletteBtn").hidden = isUnfavoriteGroup(group?.id) || isRecentGroup(group?.id) || isDeletedGroup(group?.id);
+  $("favRouletteControl").hidden = isUnfavoriteGroup(group?.id) || isRecentGroup(group?.id) || isDeletedGroup(group?.id);
   $("editGroupBtn").disabled = false;
   $("copyGroupBtn").disabled = false;
   $("deleteGroupBtn").disabled = synced || state.library.groups.length <= 1;
@@ -1835,6 +1903,42 @@ function visibleSortOptions(selectId = "sortSelect") {
   if (selectId !== "sortSelect" || activeGroupAllowsManualSort() || isSyncedAvatarEditActive(activeGroup()?.id)) return options;
   return options.filter((option) => option.value !== "manual");
 }
+function bindAvatarEquipButton(button, avatar) {
+  if (!button) return;
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void equipAvatar(avatar.avatarId || avatar.id, avatar);
+  });
+}
+function captureGridScrollAnchor(container, selector) {
+  if (!container) return null;
+  const bounds = container.getBoundingClientRect();
+  const cards = [...container.querySelectorAll(selector)];
+  if (!cards.length) return { scrollTop: container.scrollTop, id: "", offset: 0, index: 0 };
+  let index = cards.findIndex((card) => card.getBoundingClientRect().bottom > bounds.top + 1);
+  if (index < 0) index = cards.length - 1;
+  const card = cards[index];
+  return {
+    scrollTop: container.scrollTop,
+    id: card.dataset.avatarId || card.dataset.worldId || card.dataset.friendId || "",
+    offset: card.getBoundingClientRect().top - bounds.top,
+    index
+  };
+}
+function restoreGridScrollAnchor(container, selector, anchor) {
+  if (!container || !anchor) return;
+  const cards = [...container.querySelectorAll(selector)];
+  const card = (anchor.id
+    ? cards.find((item) => (item.dataset.avatarId || item.dataset.worldId || item.dataset.friendId || "") === anchor.id)
+    : null) || cards[Math.min(anchor.index || 0, Math.max(0, cards.length - 1))];
+  if (!card) {
+    container.scrollTop = anchor.scrollTop;
+    return;
+  }
+  const bounds = container.getBoundingClientRect();
+  const offset = card.getBoundingClientRect().top - bounds.top;
+  container.scrollTop += offset - anchor.offset;
+}
 function renderAvatars() {
   const active = activeGroup();
   const canReorderCurrentGroup = canReorderAvatarsInGroup(active?.id);
@@ -1865,7 +1969,9 @@ function renderAvatars() {
   $("emptyState").hidden = avatars.length !== 0;
   renderAvatarPagination(usePages);
   const grid = $("avatarGrid");
-  const previousScrollTop = grid.scrollTop;
+  const scrollAnchor = state.avatarGridInitialized
+    ? captureGridScrollAnchor(grid, ".avatar-card[data-avatar-id]")
+    : null;
   grid.innerHTML = "";
   for (const avatar of visibleAvatars) {
     const card = document.createElement("article");
@@ -1904,7 +2010,7 @@ function renderAvatars() {
     });
     if (canReorderCurrentGroup) card.querySelector(".avatar-position").addEventListener("click", () => openPositionDialog("avatar", avatar));
     card.querySelector(".avatar-card-save").addEventListener("click", (event) => { event.stopPropagation(); openAvatarFavoriteActionDialog(avatar); });
-    card.querySelector(".avatar-card-equip").addEventListener("click", (event) => { event.stopPropagation(); equipAvatar(avatar.avatarId || avatar.id, avatar); });
+    bindAvatarEquipButton(card.querySelector(".avatar-card-equip"), avatar);
     const startAvatarPointerSort = (event) => {
       if (event.target.closest(".avatar-card-save, .avatar-card-equip, .avatar-position")) {
         return;
@@ -1962,7 +2068,9 @@ function renderAvatars() {
     });
     grid.appendChild(card);
   }
-  grid.scrollTop = previousScrollTop;
+  restoreCardNavigationVisual(grid);
+  if (scrollAnchor) restoreGridScrollAnchor(grid, ".avatar-card[data-avatar-id]", scrollAnchor);
+  else grid.scrollTop = 0;
   restoreActivePointerDragVisuals();
 }
 function showAvatarContextMenu(event, avatar, canReorderCurrentGroup) {
@@ -2013,7 +2121,7 @@ async function replaceAvatarImage(avatar) {
     const result = await api("avatarImageReplace", { id: avatar.id }, 300000);
     if (result?.canceled) return;
     if (result?.library) state.library = result.library;
-    render();
+    render({ avatarGrid: focusTarget, databaseGrid: false });
   } catch (e) { toast(e.message); }
 }
 async function restoreAvatarImage(avatar) {
@@ -2990,39 +3098,28 @@ async function loadOlderFilteredDatabasePage(query, page, token) {
   };
 }
 
-function clearAvatarDatabaseSearch({ keepHistoryOpen = false } = {}) {
-  clearTimeout(state.avatarDatabaseSearchTimer);
-  const shouldBrowse = avatarDatabaseCanBrowse();
-  if (!shouldBrowse) cancelAvatarDatabaseRequests();
-  state.avatarDatabaseSearchToken++;
-  state.avatarDatabaseResults = [];
-  state.avatarDatabasePage = 0;
-  state.avatarDatabaseHasMore = false;
-  state.avatarDatabaseQuery = "";
-  state.avatarDatabaseAuthorId = "";
-  state.avatarDatabaseExactAuthorName = false;
-  state.avatarDatabaseTotal = null;
-  state.avatarDatabaseProgressTotal = 0;
-  state.avatarDatabaseCountKey = "";
-  state.avatarDatabaseCounting = false;
-  state.avatarDatabaseLoading = false;
-  state.avatarDatabaseSearched = false;
-  state.avatarDatabaseMode = "search";
-  state.avatarDatabaseRandomPages = [];
-  resetAvatarDatabaseOlderFilterCache();
-  $("avatarDatabaseSearchInput").value = "";
-  renderAvatarDatabaseResults();
-  updateAvatarDatabaseCopy();
-  if (shouldBrowse) {
+function updateSearchClearButton(buttonId, inputId) {
+  const button = $(buttonId);
+  const input = $(inputId);
+  if (button && input) button.disabled = !input.value.trim();
+}
+
+function updateDatabaseSearchClearButtons() {
+  updateSearchClearButton("clearAvatarDatabaseQueryBtn", "avatarDatabaseSearchInput");
+  updateSearchClearButton("clearAvatarDatabaseAuthorQueryBtn", "avatarDatabaseAuthorSearchInput");
+}
+
+function clearDatabaseSearchField(field) {
+  if (field === "avatar") {
+    $("avatarDatabaseSearchInput").value = "";
     hideDatabaseSearchHistory();
-    void runAvatarDatabaseSearch(0);
-    return;
-  }
-  if (keepHistoryOpen) {
-    showDatabaseSearchHistory();
   } else {
-    hideDatabaseSearchHistory();
+    $("avatarDatabaseAuthorSearchInput").value = "";
+    state.avatarDatabaseAuthorId = "";
+    state.avatarDatabaseExactAuthorName = false;
   }
+  updateDatabaseSearchClearButtons();
+  void runAvatarDatabaseSearch(0);
 }
 
 function saveAvatarDatabaseSearchHistory() {
@@ -3069,8 +3166,7 @@ function renderDatabaseSearchHistory() {
   menu.querySelectorAll("[data-history-query]").forEach((button) => button.addEventListener("click", () => {
     const query = button.dataset.historyQuery || "";
     $("avatarDatabaseSearchInput").value = query;
-    state.avatarDatabaseAuthorId = "";
-    state.avatarDatabaseExactAuthorName = false;
+    updateDatabaseSearchClearButtons();
     hideDatabaseSearchHistory();
     runAvatarDatabaseSearch(0);
   }));
@@ -3306,7 +3402,8 @@ function updateAvatarDatabaseCopy() {
   const provider = avatarDatabaseProvider();
   state.avatarDatabaseProvider = provider;
   if ($("avatarDatabaseProviderMenuBtn")) updateSortButton("avatarDatabaseProviderSelect", "avatarDatabaseProviderMenuBtn");
-  $("avatarDatabaseSearchInput").placeholder = provider === "all" ? "Search all databases" : provider === "avtrzip" ? "Search AVTR.zip avatars" : provider === "pas" ? "Browse or search Prismic PAS avatars" : "Search VRCX avatars";
+  $("avatarDatabaseSearchInput").placeholder = provider === "all" ? "Search avatars" : provider === "avtrzip" ? "Search AVTR.zip avatars" : provider === "pas" ? "Browse or search Prismic PAS avatars" : "Search VRCX avatars";
+  $("avatarDatabaseAuthorSearchInput").placeholder = provider === "all" ? "Search authors" : provider === "avtrzip" ? "Search AVTR.zip authors" : provider === "pas" ? "Search PAS authors" : "Search VRCX authors";
   $("avatarDatabaseStatus").textContent = avatarDatabaseProviderDescription(provider);
   $("avatarDatabaseEmptyState").querySelector("p").textContent = provider === "avtrzip"
       ? "Enter a search, then press Search or Enter to search AVTR.zip."
@@ -3320,17 +3417,37 @@ function updateAvatarDatabaseCopy() {
 function databaseIsBlankBrowse() {
   return state.avatarDatabaseMode !== "random"
     && !$("avatarDatabaseSearchInput").value.trim()
+    && !$("avatarDatabaseAuthorSearchInput").value.trim()
     && avatarDatabaseCanBrowse();
+}
+function databaseSourceErrorSummary(message) {
+  const text = String(message || "").replace(/\s+/g, " ").trim();
+  if (!text) return "Unavailable";
+  const statusPatterns = [
+    /\bHTTP(?:\s+status(?:\s+code)?)?\s*[:=]?\s*([1-5]\d{2})\b/i,
+    /\b(?:returned|failed)\s*\(?\s*([1-5]\d{2})\b/i,
+    /\bstatus(?:\s+code)?\s*[:=]?\s*([1-5]\d{2})\b/i,
+    /\bresponse\s+(?:status\s+)?(?:code\s*)?[:=]?\s*([1-5]\d{2})\b/i,
+    /\bstatus\s+code\s+does\s+not\s+indicate\s+success:\s*([1-5]\d{2})\b/i
+  ];
+  const statusCode = statusPatterns.map((pattern) => text.match(pattern)?.[1]).find(Boolean);
+  if (statusCode) return "HTTP " + statusCode;
+  const concise = text.replace(/https?:\/\/\S+/gi, "").replace(/\s+/g, " ").trim();
+  if (!concise) return "Unavailable";
+  return concise.length > 100 ? concise.slice(0, 99).trimEnd() + "…" : concise;
 }
 async function checkDatabaseSourceAvailability({ deferSummary = false } = {}) {
   try {
     const result = await api("avatarDatabaseSourceStatus", {}, 45000);
     const unavailable = (result?.sources || []).filter((source) => !source?.available);
     if (!unavailable.length) return;
-    const details = unavailable.map((source) => `${source.name || source.provider}: ${source.message || "Could not connect."}`).join("\n");
-    addStartupSummaryItem("Database Sources Unavailable", `VRCNeph could not connect to:\n${details}`);
+    const details = unavailable.map((source) => {
+      const name = String(source.name || source.provider || "").trim() || "Unknown database source";
+      return name + " — " + databaseSourceErrorSummary(source.message);
+    }).join("\n");
+    addStartupSummaryItem("Database Sources Unavailable", details);
   } catch (e) {
-    addStartupSummaryItem("Database Source Check Failed", e.message || "VRCNeph could not check the database sources.");
+    addStartupSummaryItem("Database Source Check Failed", databaseSourceErrorSummary(e?.message || e));
   } finally {
     if (!deferSummary) scheduleStartupSummary();
   }
@@ -3347,6 +3464,8 @@ function resetAvatarDatabaseResults() {
   state.avatarDatabaseCountKey = "";
   state.avatarDatabaseCounting = false;
   state.avatarDatabaseLoading = false;
+  state.avatarDatabasePageLoading = false;
+  state.avatarDatabasePageLoadingTarget = 0;
   state.avatarDatabaseSearched = false;
   state.avatarDatabaseMode = "search";
   state.avatarDatabaseRandomPages = [];
@@ -3400,18 +3519,23 @@ async function initializeDatabaseStartupStatus() {
 }
 
 function databaseSearchFieldPayload() {
+  const avatarQuery = $("avatarDatabaseSearchInput").value.trim();
+  const authorQuery = $("avatarDatabaseAuthorSearchInput").value.trim();
+  const query = avatarQuery.length >= 3 || !authorQuery ? avatarQuery : authorQuery;
   const platformFilters = [
     $("databasePlatformPcToggle").checked ? "pc" : "",
     $("databasePlatformAndroidToggle").checked ? "android" : "",
     $("databasePlatformIosToggle").checked ? "ios" : ""
   ].filter(Boolean).join(",");
-  const scope = state.avatarDatabaseScope || "avatar";
   const searchDescriptionTags = $("databaseSearchDescriptionTagsToggle").checked;
   return {
-    searchAvatar: scope !== "author",
-    searchAuthor: scope === "author",
-    searchDescription: scope !== "author" && searchDescriptionTags,
-    searchTags: scope !== "author" && searchDescriptionTags,
+    query,
+    avatarQuery,
+    authorQuery,
+    searchAvatar: Boolean(avatarQuery) || !authorQuery,
+    searchAuthor: Boolean(authorQuery || state.avatarDatabaseAuthorId),
+    searchDescription: Boolean(avatarQuery) && searchDescriptionTags,
+    searchTags: Boolean(avatarQuery) && searchDescriptionTags,
     searchMode: $("databaseSearchMethodSelect")?.value || "phrase",
     platformFilters
   };
@@ -3420,28 +3544,20 @@ function hasDatabaseSearchField(fields = databaseSearchFieldPayload()) {
   return fields.searchAvatar || fields.searchAuthor || fields.searchDescription || fields.searchTags || fields.platformFilters;
 }
 
-function setDatabaseSearchFields({ avatar = true, author = true, description = true, tags = true, platforms = [] }) {
-  state.avatarDatabaseScope = author && !avatar && !description && !tags ? "author" : "avatar";
-  $("databaseSearchDescriptionTagsToggle").checked = description || tags;
-  const platformSet = new Set(platforms);
-  $("databasePlatformPcToggle").checked = platformSet.has("pc");
-  $("databasePlatformAndroidToggle").checked = platformSet.has("android");
-  $("databasePlatformIosToggle").checked = platformSet.has("ios");
-  updateDatabaseScopeControls();
-}
-
 function databaseSearchPayload(query, page = 0) {
   const provider = avatarDatabaseProvider();
-  const browsing = !query.trim() && avatarDatabaseCanBrowse(provider);
+  const fields = databaseSearchFieldPayload();
+  const searchQuery = fields.query;
+  const browsing = !fields.avatarQuery && !fields.authorQuery && avatarDatabaseCanBrowse(provider);
   return {
     provider,
-    query,
+    query: searchQuery,
     limit: 50,
     page: page + 1,
     authorId: state.avatarDatabaseAuthorId,
     exactAuthorName: state.avatarDatabaseExactAuthorName,
     sort: browsing ? "createdDesc" : "relevance",
-    ...databaseSearchFieldPayload()
+    ...fields
   };
 }
 
@@ -3452,24 +3568,30 @@ function searchDatabaseByAuthor(authorName, authorId = "") {
   closeAvatarDetails();
   state.avatarDatabaseAuthorId = String(authorId || "").trim();
   state.avatarDatabaseExactAuthorName = true;
-  setDatabaseSearchFields({ avatar: false, author: true, description: false, tags: false });
   $("databaseSearchMethodSelect").value = "phrase";
   updateSortButton("databaseSearchMethodSelect", "databaseSearchMethodMenuBtn");
   updateDatabaseFieldMenuButton();
-  $("avatarDatabaseSearchInput").value = query;
+  $("avatarDatabaseAuthorSearchInput").value = query;
+  updateDatabaseSearchClearButtons();
   showPage("database");
   runAvatarDatabaseSearch(0);
 }
 
 async function runAvatarDatabaseSearch(page = 0) {
   const token = ++state.avatarDatabaseSearchToken;
+  state.avatarDatabasePageLoading = false;
+  state.avatarDatabasePageLoadingTarget = 0;
   state.avatarDatabaseProvider = avatarDatabaseProvider();
   const providerLabel = avatarDatabaseProviderLabel();
-  const query = $("avatarDatabaseSearchInput").value.trim();
   const fields = databaseSearchFieldPayload();
-  const directAuthorSearch = Boolean(state.avatarDatabaseAuthorId && fields.searchAuthor && !fields.searchAvatar && !fields.searchDescription && !fields.searchTags);
+  const query = fields.query;
+  const avatarQuery = fields.avatarQuery;
+  const authorQuery = fields.authorQuery;
+  const hasTextQuery = Boolean(avatarQuery || authorQuery);
+  const directAuthorSearch = Boolean(state.avatarDatabaseAuthorId && authorQuery && !avatarQuery);
   const hasOptionFilters = Boolean(fields.platformFilters);
-  if (query.length > 0 && query.length < 3 && !directAuthorSearch && !hasOptionFilters) {
+  const shortQueriesOnly = [avatarQuery, authorQuery].filter(Boolean).every((term) => term.length < 3);
+  if (hasTextQuery && shortQueriesOnly && !directAuthorSearch && !hasOptionFilters) {
     state.avatarDatabaseResults = [];
     state.avatarDatabasePage = 0;
     state.avatarDatabaseHasMore = false;
@@ -3487,7 +3609,7 @@ async function runAvatarDatabaseSearch(page = 0) {
     $("avatarDatabaseStatus").textContent = "Enter at least 3 characters.";
     return;
   }
-  if (!query && !hasOptionFilters && !directAuthorSearch && !avatarDatabaseCanBrowse()) {
+  if (!hasTextQuery && !hasOptionFilters && !directAuthorSearch && !avatarDatabaseCanBrowse()) {
     state.avatarDatabaseResults = [];
     state.avatarDatabasePage = 0;
     state.avatarDatabaseHasMore = false;
@@ -3529,8 +3651,10 @@ async function runAvatarDatabaseSearch(page = 0) {
     state.avatarDatabaseCountKey = "";
   }
   state.avatarDatabaseLoading = true;
+  state.avatarDatabasePageLoading = page > 0;
+  state.avatarDatabasePageLoadingTarget = page > 0 ? page + 1 : 0;
   if (page === 0) {
-    addAvatarDatabaseSearchHistory(query);
+    addAvatarDatabaseSearchHistory(avatarQuery);
     hideDatabaseSearchHistory();
   }
   renderAvatarDatabaseResults();
@@ -3560,16 +3684,27 @@ async function runAvatarDatabaseSearch(page = 0) {
       && state.avatarDatabaseProvider === "all"
       && (page === 0 || Boolean(state.avatarDatabaseCountKey));
     state.avatarDatabaseLoading = false;
+    state.avatarDatabasePageLoading = false;
+    state.avatarDatabasePageLoadingTarget = 0;
     state.avatarDatabaseSearched = true;
     renderAvatarDatabaseResults();
     updateAvatarDatabaseStatus();
     if (page === 0 && state.avatarDatabaseResults.length && state.avatarDatabaseTotal == null && avatarDatabaseProvider() !== "vrcx") countAvatarDatabaseTotal(query, token, databaseSearchPayload(query, 0));
   } catch (e) { handleAvatarDatabaseError(e, token); }
-  finally { }
+  finally {
+    if (token === state.avatarDatabaseSearchToken && state.avatarDatabaseLoading) {
+      state.avatarDatabaseLoading = false;
+      state.avatarDatabasePageLoading = false;
+      state.avatarDatabasePageLoadingTarget = 0;
+      renderAvatarDatabaseResults();
+    }
+  }
 }
 async function runRandomAvatarDatabasePage() {
   if (!avatarDatabaseRandomAvailable()) return;
   const token = ++state.avatarDatabaseSearchToken;
+  state.avatarDatabasePageLoading = false;
+  state.avatarDatabasePageLoadingTarget = 0;
   state.avatarDatabaseProvider = avatarDatabaseProvider();
   const providerLabel = avatarDatabaseRandomProviderLabel();
   $("databasePrevPageBtn").disabled = true;
@@ -3673,16 +3808,11 @@ async function handleRandomDatabaseHotkey() {
     state.randomDatabaseHotkeyRunning = false;
   }
 }
-function openAvatarRouletteDialog(mode = 'favorites') {
-  if (mode === 'database' && !avatarDatabaseRandomAvailable()) return;
-  state.avatarRoulettePendingMode = mode;
-  const label = mode === 'database' ? 'random database' : 'random favorite';
+function openAvatarRouletteDialog() {
   const runningLabel = state.avatarRouletteMode === 'database' ? 'Database roulette' : 'Favorite roulette';
   $("avatarRouletteStatus").textContent = state.avatarRouletteRunning
-    ? `${runningLabel} is running. Press Restart to switch to ${label} avatars.`
-    : `Equip a ${label} avatar on a timer.`;
-  $("stopAvatarRouletteBtn").disabled = !state.avatarRouletteRunning;
-  $("startAvatarRouletteBtn").textContent = state.avatarRouletteRunning ? "Restart" : "Start";
+    ? `${runningLabel} is running.`
+    : "Roulette is stopped.";
   $("avatarRouletteDialog").showModal();
 }
 function avatarRouletteIntervalMs() {
@@ -3703,19 +3833,36 @@ function stopAvatarRoulette() {
   $("rouletteCountdownDb").hidden = true;
   $("rouletteCountdownFav").hidden = true;
   if ($("avatarRouletteDialog").open) {
-    $("avatarRouletteStatus").textContent = "Avatar roulette stopped.";
-    $("stopAvatarRouletteBtn").disabled = true;
-    $("startAvatarRouletteBtn").textContent = "Start";
+    $("avatarRouletteStatus").textContent = "Roulette is stopped.";
   }
   updateRouletteButtons();
 }
 function updateRouletteButtons() {
   const databaseRunning = state.avatarRouletteRunning && state.avatarRouletteMode === 'database';
   const favoritesRunning = state.avatarRouletteRunning && state.avatarRouletteMode === 'favorites';
-  $("avatarRouletteBtn").classList.toggle("roulette-running", databaseRunning);
-  $("avatarRouletteBtn").setAttribute("aria-pressed", databaseRunning ? "true" : "false");
-  $("favRouletteBtn").classList.toggle("roulette-running", favoritesRunning);
-  $("favRouletteBtn").setAttribute("aria-pressed", favoritesRunning ? "true" : "false");
+  const databaseButton = $("avatarRouletteBtn");
+  databaseButton.classList.toggle("roulette-running", databaseRunning);
+  databaseButton.setAttribute("aria-label", databaseRunning ? "Stop database roulette" : "Start database roulette");
+  databaseButton.setAttribute("aria-pressed", databaseRunning ? "true" : "false");
+  if (!databaseButton.disabled) databaseButton.title = databaseRunning ? "Stop database roulette" : "Avatar roulette";
+  const favoriteButton = $("favRouletteBtn");
+  favoriteButton.classList.toggle("roulette-running", favoritesRunning);
+  favoriteButton.setAttribute("aria-label", favoritesRunning ? "Stop favorite roulette" : "Start favorite roulette");
+  favoriteButton.setAttribute("aria-pressed", favoritesRunning ? "true" : "false");
+  favoriteButton.title = favoritesRunning ? "Stop favorite roulette" : "Favorite avatar roulette";
+}
+function toggleAvatarRoulette(mode) {
+  if (mode === "database" && !avatarDatabaseRandomAvailable()) return;
+  if (state.avatarRouletteRunning && state.avatarRouletteMode === mode) {
+    stopAvatarRoulette();
+    return;
+  }
+  state.avatarRoulettePendingMode = mode;
+  startAvatarRoulette();
+}
+function saveAvatarRouletteSettings() {
+  avatarRouletteIntervalMs();
+  $("avatarRouletteDialog").close();
 }
 function avatarRandomId(avatar) { return String(avatar?.avatarId || avatar?.id || "").trim().toLowerCase(); }
 function databaseAvatarUnavailableStatus(avatar = {}) {
@@ -4107,8 +4254,6 @@ function startAvatarRoulette() {
   state.avatarRouletteRunning = true;
   state.avatarRouletteEquipping = false;
   $("avatarRouletteStatus").textContent = "Avatar roulette started. Equipping the first avatar before starting the timer.";
-  $("stopAvatarRouletteBtn").disabled = false;
-  $("startAvatarRouletteBtn").textContent = "Restart";
   $("avatarRouletteDialog").close();
   updateRouletteButtons();
   const label = state.avatarRouletteMode === 'database' ? 'Database roulette' : 'Roulette';
@@ -4128,6 +4273,7 @@ function updateAvatarDatabaseStatus() {
         ? `${rounded}+ unique avatars found. Still counting total...`
         : `${state.avatarDatabasePage * 50 + count} all databases avatars shown.`;
       refreshDatabaseJumpIfOpen();
+      updateDatabasePaginationStatus();
       return;
     }
     const estimate = state.avatarDatabaseHasMore ? `${Math.max((state.avatarDatabasePage + 2) * 50, count)}+` : String(state.avatarDatabasePage * 50 + count);
@@ -4135,6 +4281,38 @@ function updateAvatarDatabaseStatus() {
     return;
   }
   $("avatarDatabaseStatus").textContent = `${state.avatarDatabaseTotal} total ${providerLabel} avatars found.`;
+  updateDatabasePaginationStatus();
+}
+function databaseFoundPageCount() {
+  const progressPages = Math.ceil(Math.max(0, Number(state.avatarDatabaseProgressTotal) || 0) / 50);
+  const currentPageMinimum = state.avatarDatabasePage + (state.avatarDatabaseHasMore ? 2 : 1);
+  return Math.max(1, progressPages, currentPageMinimum);
+}
+function updateDatabasePaginationStatus() {
+  const label = $("databasePageLabel");
+  const loadingStatus = $("databasePageLoadingStatus");
+  const pageButton = $("databasePageStatus");
+  if (!label || !loadingStatus || !pageButton) return;
+
+  const hasResults = state.avatarDatabaseResults.length > 0;
+  let totalText = "";
+  if (state.avatarDatabaseTotal != null) {
+    totalText = ` of ${Math.max(1, Math.ceil(state.avatarDatabaseTotal / 50))}`;
+  } else if (state.avatarDatabaseMode === "search" && state.avatarDatabaseCounting) {
+    totalText = ` of ${databaseFoundPageCount()}+`;
+  } else if (state.avatarDatabaseMode === "search" && state.avatarDatabaseHasMore) {
+    totalText = ` of ${state.avatarDatabasePage + 2}+`;
+  }
+
+  const pageLabel = hasResults ? `Page ${state.avatarDatabasePage + 1}${totalText}` : "";
+  label.textContent = pageLabel;
+  const isLoading = state.avatarDatabasePageLoading;
+  label.hidden = isLoading;
+  loadingStatus.hidden = !isLoading;
+  loadingStatus.textContent = isLoading ? `Loading page ${state.avatarDatabasePageLoadingTarget}…` : "";
+  loadingStatus.classList.toggle("is-loading", isLoading);
+  pageButton.setAttribute("aria-busy", isLoading ? "true" : "false");
+  pageButton.setAttribute("aria-label", isLoading ? `Loading page ${state.avatarDatabasePageLoadingTarget}.` : pageLabel);
 }
 async function countAvatarDatabaseTotal(query, token, payload) {
   const countPayload = payload ?? databaseSearchPayload(query, 0);
@@ -4179,9 +4357,12 @@ async function countAvatarDatabaseTotal(query, token, payload) {
 function handleAvatarDatabaseError(error, token) {
   if (token !== state.avatarDatabaseSearchToken) return;
   state.avatarDatabaseLoading = false;
+  state.avatarDatabasePageLoading = false;
+  state.avatarDatabasePageLoadingTarget = 0;
   state.avatarDatabaseSearched = true;
   const message = error?.message || String(error || "Database search failed.");
   $("avatarDatabaseStatus").textContent = message;
+  renderAvatarDatabaseResults();
   toast(message);
 }
 function currentAvatarDatabasePageResults() {
@@ -4309,16 +4490,15 @@ function renderAvatarDatabaseResults() {
   const allResults = sortedAvatarDatabaseResults();
   const results = allResults;
   const grid = $("avatarDatabaseResults");
-  const previousScrollTop = grid.scrollTop;
+  const scrollAnchor = captureGridScrollAnchor(grid, ".database-avatar-card[data-avatar-id]");
   grid.innerHTML = "";
   $("avatarDatabaseEmptyState").hidden = state.avatarDatabaseLoading || !state.avatarDatabaseSearched || allResults.length !== 0;
   const databaseMax = databaseMaxPage("database");
   const hasMultipleDatabasePages = state.avatarDatabasePage > 0 || state.avatarDatabaseHasMore || databaseMax > 1;
   $("avatarDatabasePagination").hidden = !hasMultipleDatabasePages;
-  $("databasePrevPageBtn").disabled = state.avatarDatabasePage <= 0;
-  $("databaseNextPageBtn").disabled = state.avatarDatabaseMode === "random" ? state.avatarDatabasePage >= state.avatarDatabaseRandomPages.length - 1 : !state.avatarDatabaseHasMore;
-  const totalText = state.avatarDatabaseTotal == null ? "" : ` of ${Math.max(1, Math.ceil(state.avatarDatabaseTotal / 50))}`;
-  $("databasePageStatus").textContent = allResults.length ? `Page ${state.avatarDatabasePage + 1}${totalText}` : "";
+  $("databasePrevPageBtn").disabled = state.avatarDatabaseLoading || state.avatarDatabasePage <= 0;
+  $("databaseNextPageBtn").disabled = state.avatarDatabaseLoading || (state.avatarDatabaseMode === "random" ? state.avatarDatabasePage >= state.avatarDatabaseRandomPages.length - 1 : !state.avatarDatabaseHasMore);
+  updateDatabasePaginationStatus();
   for (const avatar of results) {
     const image = avatar.thumbnailImageUrl || avatar.imageUrl;
     const release = releaseStatusBadge(avatar.releaseStatus);
@@ -4335,7 +4515,7 @@ function renderAvatarDatabaseResults() {
     card.addEventListener("dragstart", (event) => event.preventDefault());
     card.querySelector("button").addEventListener("click", () => openAvatarDetailsFromCard({ ...avatar, groupId: state.activeGroupId }));
     card.querySelector(".avatar-card-save").addEventListener("click", (event) => { event.stopPropagation(); openAvatarFavoriteActionDialog(avatar); });
-    card.querySelector(".avatar-card-equip").addEventListener("click", (event) => { event.stopPropagation(); equipAvatar(avatar.avatarId || avatar.id, avatar); });
+    bindAvatarEquipButton(card.querySelector(".avatar-card-equip"), avatar);
     card.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       showContextMenu(event.clientX, event.clientY, [
@@ -4354,7 +4534,8 @@ function renderAvatarDatabaseResults() {
     });
     grid.appendChild(card);
   }
-  grid.scrollTop = previousScrollTop;
+  restoreCardNavigationVisual(grid);
+  restoreGridScrollAnchor(grid, ".database-avatar-card[data-avatar-id]", scrollAnchor);
 }
 function openAddDatabaseAvatarDialog(avatar) {
   state.pendingDatabaseAvatar = avatar;
@@ -4381,7 +4562,8 @@ async function saveDatabaseAvatarToGroup(avatar, groupId, { focusTarget = false,
       state.activeGroupId = groupId;
       state.avatarPage = 0;
     }
-    render();
+    const refreshAvatarGrid = focusTarget || (groupId === state.activeGroupId && isSyncedFavoriteGroup(groupId));
+    render({ avatarGrid: refreshAvatarGrid, databaseGrid: false });
   } catch (e) { handleAvatarAddError(e); }
 }
 function openDatabaseJumpDialog() {
@@ -4413,7 +4595,7 @@ function databaseMaxPage(target = state.pageJumpTarget) {
   if (state.avatarDatabaseMode === "random") return Math.max(1, state.avatarDatabaseRandomPages.length);
   if (state.avatarDatabaseTotal != null) return Math.max(1, Math.ceil(state.avatarDatabaseTotal / 50));
   const progressPages = state.avatarDatabaseProvider === "all"
-    ? Math.floor(Math.max(0, Number(state.avatarDatabaseProgressTotal) || 0) / 50)
+    ? Math.ceil(Math.max(0, Number(state.avatarDatabaseProgressTotal) || 0) / 50)
     : 0;
   return Math.max(1, progressPages, state.avatarDatabasePage + (state.avatarDatabaseHasMore ? 2 : 1));
 }
@@ -4593,27 +4775,10 @@ function closeOtherDropdownMenus(exceptMenuId = "") {
 }
 function updateDatabaseFieldMenuButton() {
   const platforms = ["databasePlatformPcToggle", "databasePlatformAndroidToggle", "databasePlatformIosToggle"].filter((id) => $(id).checked).length;
-  const authorOnly = (state.avatarDatabaseScope || "avatar") === "author";
-  const details = !authorOnly && !$("databaseSearchDescriptionTagsToggle").checked ? 1 : 0;
+  const details = !$("databaseSearchDescriptionTagsToggle").checked ? 1 : 0;
   const older = $("databaseHideOlderAvatarsToggle")?.checked ? 1 : 0;
   const checked = platforms + details + older;
   $("databaseFieldMenuBtn").textContent = checked ? `Filters (${checked})` : "Filters";
-}
-function updateDatabaseScopeControls() {
-  const scope = state.avatarDatabaseScope || "avatar";
-  document.querySelectorAll("[data-database-scope]").forEach((button) => {
-    const active = button.dataset.databaseScope === scope;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", active ? "true" : "false");
-  });
-  const detailsWrap = $("databaseDescriptionTagsWrap");
-  const detailsToggle = $("databaseSearchDescriptionTagsToggle");
-  if (detailsWrap) {
-    const authorOnly = scope === "author";
-    detailsWrap.classList.toggle("is-disabled", authorOnly);
-    detailsWrap.setAttribute("aria-disabled", authorOnly ? "true" : "false");
-    if (detailsToggle) detailsToggle.disabled = authorOnly;
-  }
 }
 function positionDatabaseFieldMenu() {
   const menu = $("databaseFieldMenu");
@@ -4693,14 +4858,23 @@ function restoreSortMenu(menu, button) {
   if (!menu || !control || menu.parentElement === control) return;
   control.insertBefore(menu, select || null);
 }
+function eventPathIncludes(event, element) {
+  if (!element) return false;
+  const path = event?.composedPath?.();
+  return path ? path.includes(element) : Boolean(element.contains?.(event?.target));
+}
+function eventPathMatches(event, selector) {
+  const path = event?.composedPath?.();
+  if (path) return path.some((node) => node?.matches?.(selector));
+  return Boolean(event?.target?.closest?.(selector));
+}
 function positionSortMenu(menu, button) {
   if (!menu || !button) return;
   const openDialog = button.closest("dialog[open]");
   if (openDialog) {
-    // Favorite-group pickers use the top layer so their backdrop filter can
-    // sample the page behind the dialog while remaining fully interactive.
-    if (["favoriteWorldGroupMenu", "saveAvatarGroupMenu"].includes(menu.id) && canUsePopover(menu)) {
-      if (menu.parentElement !== document.body) document.body.append(menu);
+    // Keep modal dropdowns in the dialog's DOM subtree so modal inertness does
+    // not block them, while using the top layer to escape dialog clipping.
+    if (canUsePopover(menu)) {
       menu.setAttribute("popover", "manual");
       menu.classList.add("sort-menu-portal");
       try {
@@ -4712,24 +4886,33 @@ function positionSortMenu(menu, button) {
         menu.classList.remove("sort-menu-portal");
       }
     }
-    if (!menu._sortMenuTopLayer) {
-      if (menu.parentElement !== openDialog) openDialog.append(menu);
-      const rect = button.getBoundingClientRect();
-      const dialogRect = openDialog.getBoundingClientRect();
-      const gap = 6;
-      const viewportPadding = 12;
-      const availableBelow = window.innerHeight - rect.bottom - viewportPadding - gap;
-      const maxHeight = Math.max(120, Math.min(320, availableBelow));
-      menu.style.position = "absolute";
-      menu.style.left = `${rect.left - dialogRect.left}px`;
-      menu.style.top = `${rect.bottom - dialogRect.top + gap}px`;
-      menu.style.bottom = "";
-      menu.style.width = `${rect.width}px`;
-      menu.style.maxHeight = `${maxHeight}px`;
-      menu.scrollTop = 0;
-      containSortMenuWheel(menu);
-      return;
-    }
+    const inTopLayer = Boolean(menu._sortMenuTopLayer);
+    const declaredMax = Number.parseFloat(getComputedStyle(menu).maxHeight);
+    if (!inTopLayer && menu.parentElement !== openDialog) openDialog.append(menu);
+    const rect = button.getBoundingClientRect();
+    const dialogRect = openDialog.getBoundingClientRect();
+    const gap = 6;
+    const viewportPadding = 12;
+    const availableBelow = Math.max(0, window.innerHeight - rect.bottom - viewportPadding - gap);
+    const availableAbove = Math.max(0, rect.top - viewportPadding - gap);
+    const preferredMax = Number.isFinite(declaredMax) ? declaredMax : 320;
+    const openAbove = availableBelow < Math.min(preferredMax, 160) && availableAbove > availableBelow;
+    const maxHeight = Math.max(80, Math.min(preferredMax, openAbove ? availableAbove : availableBelow));
+    menu.style.position = inTopLayer ? "fixed" : "absolute";
+    menu.style.left = inTopLayer
+      ? `${Math.max(viewportPadding, Math.min(rect.left, window.innerWidth - rect.width - viewportPadding))}px`
+      : `${rect.left - dialogRect.left}px`;
+    menu.style.top = inTopLayer
+      ? (openAbove ? `${Math.max(viewportPadding, rect.top - gap - maxHeight)}px` : `${rect.bottom + gap}px`)
+      : (openAbove ? "" : `${rect.bottom - dialogRect.top + gap}px`);
+    menu.style.bottom = openAbove
+      ? (inTopLayer ? "" : `${dialogRect.bottom - rect.top + gap}px`)
+      : "";
+    menu.style.width = `${rect.width}px`;
+    menu.style.maxHeight = `${maxHeight}px`;
+    menu.scrollTop = 0;
+    containSortMenuWheel(menu);
+    return;
   }
   if (menu.parentElement !== document.body) document.body.append(menu);
   const rect = button.getBoundingClientRect();
@@ -5083,8 +5266,8 @@ function createFloatingAvatarDragPreview(element, point) {
   clearFloatingDragPreview();
   const rect = element.getBoundingClientRect();
   const preview = element.cloneNode(true);
-  preview.classList.remove("dragging");
-  preview.querySelectorAll?.(".dragging").forEach((item) => item.classList.remove("dragging"));
+  preview.classList.remove("dragging", "keyboard-navigation-focus");
+  preview.querySelectorAll?.(".dragging, .keyboard-navigation-focus").forEach((item) => item.classList.remove("dragging", "keyboard-navigation-focus"));
   preview.classList.add("floating-drag-preview");
   preview.style.width = `${rect.width}px`;
   preview.style.height = `${rect.height}px`;
@@ -5680,6 +5863,7 @@ async function setSyncedAvatarEditMode(enabled) {
   if (isSyncedAvatarEditActive(group.id)) return;
   try {
     $("searchInput").value = "";
+    updateSearchClearButton("clearAvatarSearchBtn", "searchInput");
     state.avatarPage = 0;
     state.syncedAvatarEdit = {
       groupId: group.id,
@@ -5733,7 +5917,7 @@ async function applySyncedAvatarEdit() {
     setDefaultAvatarSortForActiveGroup();
     stopProgress();
     render();
-    toast(`Saved ${result.added || 0} avatars to ${group.name}. Backup: ${result.backupPath || "created"}`);
+    toast(`Saved the order for ${group.name}. Backup: ${result.backupPath || "created"}`);
   } catch (e) {
     stopProgress();
     state.syncedAvatarEdit.applying = false;
@@ -5950,31 +6134,39 @@ async function moveOrCopyAvatarsRelativeToTarget(sourceAvatars, targetAvatar, pl
   if (targetPosition <= 0) return;
   const placedIds = [];
   try {
-    for (const avatar of movable) {
-      if (copy) {
-        const beforeIds = new Set(state.library.avatars.map((item) => item.id));
-        state.library = await api("copyAvatar", { avatarId: avatar.id, groupId: targetGroupId });
-        const copied = state.library.avatars.find((item) => !beforeIds.has(item.id) && item.groupId === targetGroupId);
-        if (copied) placedIds.push(copied.id);
-      } else {
+    if (copy) {
+      const result = await api("copyAvatars", { avatarIds: movable.map((avatar) => avatar.id), groupId: targetGroupId });
+      state.library = result.library;
+      placedIds.push(...(result.copiedLocalIds || []));
+    } else {
+      for (const avatar of movable) {
         await pushSyncedAvatarMove(avatar.avatarId || avatar.id, avatar.groupId, targetGroupId);
         state.library = await api("moveAvatar", { avatarId: avatar.id, groupId: targetGroupId });
         placedIds.push(avatar.id);
       }
     }
-    const insertPosition = placement === "after" ? targetPosition + 1 : targetPosition;
-    for (let i = 0; i < placedIds.length; i++) {
-      state.library = await api("reorderAvatar", { id: placedIds[i], groupId: targetGroupId, position: insertPosition + i });
+    if (!placedIds.length) {
+      if (copy) toast("No avatars copied. They are already in the group or already syncing.");
+      return;
     }
+    const movingIds = new Set(placedIds);
+    const remaining = orderedGroupAvatars(targetGroupId).filter((avatar) => !movingIds.has(avatar.id)).map((avatar) => avatar.id);
+    const remainingTargetIndex = remaining.indexOf(targetAvatar.id);
+    if (remainingTargetIndex < 0) throw new Error("The target avatar is no longer in that group.");
+    const insertIndex = remainingTargetIndex + (placement === "after" ? 1 : 0);
+    remaining.splice(insertIndex, 0, ...placedIds);
+    state.library = await api("reorderAvatars", { groupId: targetGroupId, avatarIds: remaining });
     if (focusTarget) {
       state.activeGroupId = targetGroupId;
-      state.avatarPage = Math.floor((Math.max(1, insertPosition) - 1) / AVATAR_PAGE_SIZE);
+      state.avatarPage = Math.floor(Math.max(0, insertIndex) / AVATAR_PAGE_SIZE);
     }
     clearAvatarSelection();
     $("sortSelect").value = "manual";
     updateSortButton();
     render();
-    toast(copy ? `${placedIds.length} avatars copied.` : `${placedIds.length} avatars moved.`);
+    const skipped = Math.max(0, movable.length - placedIds.length);
+    if (copy && skipped) toast(`${placedIds.length} avatars copied; ${skipped} skipped because they were already in the group.`);
+    else toast(copy ? `${placedIds.length} avatars copied.` : `${placedIds.length} avatars moved.`);
   } catch (e) { handleAvatarAddError(e); }
 }
 async function placeAvatarInGroupEnd(id, groupId, copy = false, { focusTarget = false } = {}) {
@@ -6658,6 +6850,8 @@ async function syncVrChatFavoritesSilent() {
   state.vrchatSyncBusy = true;
   try {
     const previousActiveId = state.activeGroupId;
+    const previousAvatarPage = state.avatarPage;
+    const previousAvatarGridKey = avatarGroupLibraryRenderKey(state.library, previousActiveId);
     const result = await api("vrchatSyncFavorites");
     state.library = reconcileFavoriteLibrary(result.library);
     state.vrchatAvatarFavoriteGroupLimit = favoriteGroupLimit(result.favoriteGroupLimit, 1);
@@ -6680,7 +6874,10 @@ async function syncVrChatFavoritesSilent() {
     } else {
       state.activeGroupId = desiredActiveId;
     }
-    render();
+    const avatarGridChanged = previousActiveId !== state.activeGroupId
+      || previousAvatarPage !== state.avatarPage
+      || previousAvatarGridKey !== avatarGroupLibraryRenderKey(state.library, state.activeGroupId);
+    render({ avatarGrid: avatarGridChanged, databaseGrid: false });
     state.vrchatFavoriteSyncFailures = 0;
     state.vrchatFavoriteSyncBackoffUntil = 0;
     markLiveValidation("favoriteSync", "OK");
@@ -14263,25 +14460,32 @@ async function copySettingsLogs() {
   } catch (e) { handleAvatarAddError(e); }
 }
 async function copyAvatarsToGroup(ids, groupId, { focusTarget = false } = {}) {
-  const avatars = ids.map((id) => state.library.avatars.find((x) => x.id === id)).filter(Boolean);
-  const candidates = avatars.filter((avatar) => avatar.groupId !== groupId && !avatarAlreadyInGroup(avatar, groupId, avatar.id));
-  if (!syncedGroupHasCapacityForAvatars(groupId, candidates.map((avatar) => avatar.avatarId || avatar.id))) return;
-  let copied = 0;
-  for (const avatar of candidates) {
-    const avatarId = avatar.avatarId || avatar.id;
-    if (syncedFavoriteActionAlreadyPending(avatarId, groupId, "add")) continue;
-    try {
-      state.library = await api("copyAvatar", { avatarId: avatar.id, groupId });
-      const local = findLocalAvatarByFavorite(groupId, avatarId);
-      enqueueSyncedAvatarAdd(avatarId, groupId, { localId: local?.id || "", name: avatar.name || avatarId });
-      copied++;
-    } catch (e) { handleAvatarAddError(e); break; }
-  }
+  const uniqueIds = [...new Set(ids.filter(Boolean))];
+  const avatars = uniqueIds.map((id) => state.library.avatars.find((x) => x.id === id)).filter(Boolean);
+  const group = state.library.groups.find((x) => x.id === groupId);
+  if (!avatars.length || !group) return;
+  if (!canManuallyAddToGroup(groupId)) { toast(readOnlyFavoriteGroupMessage(groupId)); return; }
+  const candidates = avatars.filter((avatar) => !syncedFavoriteActionAlreadyPending(avatar.avatarId || avatar.id, groupId, "add"));
+  try {
+    const result = await api("copyAvatars", { avatarIds: candidates.map((avatar) => avatar.id), groupId });
+    state.library = result.library;
+    for (const localId of result.copiedLocalIds || []) {
+      const local = state.library.avatars.find((item) => item.id === localId);
+      const avatarId = local?.avatarId || "";
+      if (avatarId && isSyncedFavoriteGroup(groupId)) {
+        enqueueSyncedAvatarAdd(avatarId, groupId, { localId, name: local?.name || avatarId });
+      }
+    }
+    const copied = (result.copiedLocalIds || []).length;
+    const skipped = Math.max(0, uniqueIds.length - copied);
+    if (!copied) toast("No avatars copied. They are already in the group or already syncing.");
+    else if (skipped) toast(`${copied} avatars copied; ${skipped} skipped because they were already in the group or syncing.`);
+    else toast(`${copied} avatars copied.`);
+  } catch (e) { handleAvatarAddError(e); return; }
   if (focusTarget) state.activeGroupId = groupId;
   if (focusTarget) state.avatarPage = 0;
   clearAvatarSelection();
   render();
-  if (copied) toast(`${copied} avatars copied.`);
 }
 async function clearSettingsLogs() {
   if (!await confirmAction({ title: "Clear Logs", message: "Clear all app logs?", confirmLabel: "Clear", confirmClass: "danger" })) return;
@@ -15624,11 +15828,21 @@ $("notificationPopover").addEventListener("click", (event) => {
   }
 });
 $("hideUiBtn").addEventListener("click", () => setUiHidden(!$("hideUiBtn").matches('[aria-pressed="true"]')));
-$("searchInput").addEventListener("input", resetAvatarPageAndRender);
+$("searchInput").addEventListener("input", () => {
+  updateSearchClearButton("clearAvatarSearchBtn", "searchInput");
+  resetAvatarPageAndRender();
+});
+$("clearAvatarSearchBtn").addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  $("searchInput").value = "";
+  updateSearchClearButton("clearAvatarSearchBtn", "searchInput");
+  resetAvatarPageAndRender();
+});
 $("sortMenuBtn").addEventListener("click", toggleSortMenu);
 $("sortMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event), { passive: false });
-$("databaseSearchMethodMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "databaseSearchMethodSelect", "databaseSearchMethodMenu", "databaseSearchMethodMenuBtn", () => { state.avatarDatabaseAuthorId = ""; state.avatarDatabaseExactAuthorName = false; }));
-$("databaseSearchMethodMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "databaseSearchMethodSelect", "databaseSearchMethodMenuBtn", () => { state.avatarDatabaseAuthorId = ""; state.avatarDatabaseExactAuthorName = false; }), { passive: false });
+$("databaseSearchMethodMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "databaseSearchMethodSelect", "databaseSearchMethodMenu", "databaseSearchMethodMenuBtn", () => {}));
+$("databaseSearchMethodMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "databaseSearchMethodSelect", "databaseSearchMethodMenuBtn", () => {}), { passive: false });
 const updateWorldSearchControls = () => { $("worldSearchInput").value.trim() ? runWorldSearch() : renderVrchatSocial(); };
 $("worldSearchMethodMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "worldSearchMethodSelect", "worldSearchMethodMenu", "worldSearchMethodMenuBtn", updateWorldSearchControls));
 $("worldSearchMethodMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "worldSearchMethodSelect", "worldSearchMethodMenuBtn", updateWorldSearchControls), { passive: false });
@@ -15673,17 +15887,21 @@ window.addEventListener("resize", () => {
 });
 $("settingsLogFilterMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "settingsLogFilterSelect", "settingsLogFilterMenu", "settingsLogFilterMenuBtn", () => { state.settingsLogFilter = $("settingsLogFilterSelect").value; loadSettingsLogs(); }));
 $("settingsLogFilterMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "settingsLogFilterSelect", "settingsLogFilterMenuBtn", () => { state.settingsLogFilter = $("settingsLogFilterSelect").value; loadSettingsLogs(); }), { passive: false });
-document.addEventListener("click", hideContextMenu);
-document.addEventListener("click", hideNotificationPopover);
+document.addEventListener("click", (event) => {
+  if (eventPathMatches(event, ".sort-menu:not([hidden])")) return;
+  hideContextMenu();
+});
+document.addEventListener("click", (event) => {
+  if (eventPathMatches(event, ".sort-menu:not([hidden])")) return;
+  hideNotificationPopover();
+});
 // Dismiss open custom dropdowns on the first outside press, before any page
-// handler can consume the later click event. This also handles portalized
-// menus that are no longer descendants of their original sidebar row.
+// handler can consume the later click event.
 document.addEventListener("pointerdown", (event) => {
-  const target = event.target;
   document.querySelectorAll(".sort-menu:not([hidden])").forEach((menu) => {
     const buttonId = menu.id.replace(/Menu$/, "MenuBtn");
     const button = $(buttonId);
-    if (!button || target?.closest?.(`#${menu.id}, #${buttonId}`)) return;
+    if (!button || eventPathIncludes(event, menu) || eventPathIncludes(event, button)) return;
     hideSortMenu(menu.id, buttonId);
   });
 }, { capture: true });
@@ -15721,6 +15939,239 @@ document.addEventListener("wheel", containUserDetailPopupWheel, { passive: false
 document.addEventListener("wheel", containGroupDetailsPopupWheel, { passive: false, capture: true });
 document.addEventListener("wheel", wheelScrollDuringDrag, { passive: false, capture: true });
 document.addEventListener("wheel", trackZoomWheel, { passive: true, capture: true });
+function cardArrowNavigationTarget(card) {
+  if (!card) return null;
+  return card.matches(".avatar-card") ? card.querySelector(":scope > button") || card.querySelector("button") : card;
+}
+function cardNavigationTypeForElement(card) {
+  if (card?.matches(".avatar-card[data-avatar-id]")) return "avatar";
+  if (card?.matches(".friend-card[data-friend-id]")) return "friend";
+  if (card?.matches(".world-card[data-world-id]")) return "world";
+  return "";
+}
+function cardNavigationId(card, type = cardNavigationTypeForElement(card)) {
+  if (type === "avatar") return card?.dataset.avatarId || "";
+  if (type === "friend") return card?.dataset.friendId || "";
+  if (type === "world") return card?.dataset.worldId || "";
+  return "";
+}
+function rememberCardNavigation(card, { keyboardFocus } = {}) {
+  const type = cardNavigationTypeForElement(card);
+  const id = cardNavigationId(card, type);
+  if (!type || !id) return clearCardNavigation();
+  const previous = state.cardKeyboardNavigation;
+  const preserveKeyboardFocus = keyboardFocus ?? Boolean(previous?.type === type && previous.id === id && previous.keyboardFocus);
+  document.querySelectorAll(".keyboard-navigation-focus").forEach((item) => item.classList.remove("keyboard-navigation-focus"));
+  card.classList.add("keyboard-navigation-focus");
+  state.cardKeyboardNavigation = { element: card, type, id, keyboardFocus: preserveKeyboardFocus };
+}
+function clearCardNavigation() {
+  document.querySelectorAll(".keyboard-navigation-focus").forEach((item) => item.classList.remove("keyboard-navigation-focus"));
+  state.cardKeyboardNavigation = null;
+}
+function resolveCardNavigationCard() {
+  const saved = state.cardKeyboardNavigation;
+  const pageMatches = saved?.type === "avatar"
+    ? state.activePage === "favorites" || state.activePage === "database"
+    : saved?.type === "friend" ? state.activePage === "friends"
+      : saved?.type === "world" ? state.activePage === "worlds" : false;
+  if (saved && !pageMatches) return null;
+  const root = saved?.type === "avatar"
+    ? state.activePage === "database" ? $("avatarDatabaseResults") : $("avatarGrid")
+    : saved?.type === "friend" ? $("friendsList")
+      : saved?.type === "world" ? $("worldResults") : null;
+  if (saved?.element?.isConnected
+      && root?.contains(saved.element)
+      && cardNavigationTypeForElement(saved.element) === saved.type
+      && cardNavigationId(saved.element, saved.type) === saved.id) return saved.element;
+  if (!saved) {
+    const active = document.activeElement?.closest?.(".avatar-card[data-avatar-id], .friend-card[data-friend-id], .world-card[data-world-id]");
+    if (active && root?.contains(active)) {
+      rememberCardNavigation(active);
+      return active;
+    }
+    return null;
+  }
+  if (!pageMatches) return null;
+  if (!root) return null;
+  const selector = saved.type === "avatar" ? ".avatar-card[data-avatar-id]" : saved.type === "friend" ? ".friend-card[data-friend-id]" : ".world-card[data-world-id]";
+  const attribute = saved.type === "avatar" ? "avatarId" : saved.type === "friend" ? "friendId" : "worldId";
+  const card = [...root.querySelectorAll(selector)].find((item) => item.dataset[attribute] === saved.id) || null;
+  if (card) rememberCardNavigation(card, { keyboardFocus: saved.keyboardFocus });
+  return card;
+}
+function restoreCardNavigationVisual(container) {
+  const saved = state.cardKeyboardNavigation;
+  if (!container || !saved) return;
+  const expectedPage = saved.type === "avatar"
+    ? container.id === "avatarDatabaseResults" ? "database" : "favorites"
+    : saved.type === "friend" ? "friends" : "worlds";
+  if (state.activePage !== expectedPage) return;
+  const selector = saved.type === "avatar" ? ".avatar-card[data-avatar-id]" : saved.type === "friend" ? ".friend-card[data-friend-id]" : ".world-card[data-world-id]";
+  const attribute = saved.type === "avatar" ? "avatarId" : saved.type === "friend" ? "friendId" : "worldId";
+  const replacement = [...container.querySelectorAll(selector)].find((item) => item.dataset[attribute] === saved.id);
+  if (!replacement) return;
+  saved.element?.classList.remove("keyboard-navigation-focus");
+  saved.element = replacement;
+  replacement.classList.add("keyboard-navigation-focus");
+  if (saved.keyboardFocus) {
+    if (replacement.matches(".avatar-card") && replacement.tabIndex < 0) replacement.tabIndex = -1;
+    replacement.focus({ preventScroll: true });
+  }
+}
+document.addEventListener("pointerdown", (event) => {
+  const card = event.target.closest?.(".avatar-card[data-avatar-id], .friend-card[data-friend-id], .world-card[data-world-id]");
+  if (card) rememberCardNavigation(card);
+  else clearCardNavigation();
+}, { capture: true });
+document.addEventListener("focusin", (event) => {
+  const card = event.target.closest?.(".avatar-card[data-avatar-id], .friend-card[data-friend-id], .world-card[data-world-id]");
+  if (card) rememberCardNavigation(card);
+  else clearCardNavigation();
+}, { capture: true });
+function cardNavigationContext(card) {
+  const isAvatar = card.matches(".avatar-card[data-avatar-id]");
+  const isFriend = card.matches(".friend-card[data-friend-id]");
+  const isWorld = card.matches(".world-card[data-world-id]");
+  if (!isAvatar && !isFriend && !isWorld) return null;
+
+  const scrollRoot = isAvatar
+    ? card.closest("#avatarGrid, #avatarDatabaseResults")
+    : isFriend
+      ? card.closest("#friendsList")
+      : card.closest("#worldResults");
+  if (!scrollRoot) return null;
+
+  const itemsRoot = isAvatar
+    ? scrollRoot
+    : isFriend
+      ? scrollRoot
+      : card.closest(".world-section-row, .social-list-section") || scrollRoot;
+  const selector = isAvatar
+    ? ".avatar-card[data-avatar-id]"
+    : isFriend
+      ? ".friend-card[data-friend-id]"
+      : ".world-card[data-world-id]";
+  return { scrollRoot, itemsRoot, selector, isAvatar, isFriend, isWorld };
+}
+function cardNavigationEntries(context) {
+  if (!context) return [];
+  return [...context.itemsRoot.querySelectorAll(context.selector)].map((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      element,
+      rect,
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+      layoutTop: element.offsetTop
+    };
+  }).filter((entry) => entry.rect.width > 0 && entry.rect.height > 0);
+}
+function cardNavigationRows(entries) {
+  const rows = [];
+  for (const entry of [...entries].sort((a, b) => a.layoutTop - b.layoutTop || a.x - b.x)) {
+    let row = rows[rows.length - 1];
+    if (!row || row.layoutTop !== entry.layoutTop) {
+      row = { layoutTop: entry.layoutTop, items: [] };
+      rows.push(row);
+    }
+    row.items.push(entry);
+  }
+  return rows;
+}
+function ensureCardNavigationRowVisible(scrollRoot, row) {
+  if (!scrollRoot || !row?.length) return;
+  const rects = row.map((entry) => entry.element.getBoundingClientRect()).filter((rect) => rect.width > 0 && rect.height > 0);
+  if (!rects.length || scrollRoot.clientHeight <= 0) return;
+
+  const scrollRect = scrollRoot.getBoundingClientRect();
+  const edgeSpace = 10;
+  const visibleTop = scrollRect.top + scrollRoot.clientTop + edgeSpace;
+  const visibleBottom = scrollRect.top + scrollRoot.clientTop + scrollRoot.clientHeight - edgeSpace;
+  const rowTop = Math.min(...rects.map((rect) => rect.top));
+  const rowBottom = Math.max(...rects.map((rect) => rect.bottom));
+  let scrollDelta = 0;
+  if (rowTop < visibleTop) scrollDelta = rowTop - visibleTop;
+  else if (rowBottom > visibleBottom) scrollDelta = rowBottom - visibleBottom;
+  if (!scrollDelta) return;
+
+  const maxScrollTop = Math.max(0, scrollRoot.scrollHeight - scrollRoot.clientHeight);
+  scrollRoot.scrollTop = Math.max(0, Math.min(maxScrollTop, scrollRoot.scrollTop + scrollDelta));
+}
+function moveCardSelectionWithArrow(event) {
+  if (!event.key.startsWith("Arrow") || event.altKey || event.ctrlKey || event.metaKey || pointerSortSession || state.dragSort || document.querySelector("dialog[open]")) return false;
+  const active = document.activeElement;
+  if (!active || active.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) return false;
+  const card = resolveCardNavigationCard();
+  if (!card) return false;
+
+  const context = cardNavigationContext(card);
+  if (!context) return false;
+  const entries = cardNavigationEntries(context);
+  const currentIndex = entries.findIndex((entry) => entry.element === card);
+  if (currentIndex < 0 || entries.length < 2) return false;
+  const rows = cardNavigationRows(entries);
+  const singleColumn = new Set(entries.map((entry) => Math.round(entry.x))).size <= 1;
+  const verticalList = context.isFriend || singleColumn;
+  if (verticalList && event.key !== "ArrowUp" && event.key !== "ArrowDown") return false;
+
+  let target;
+  if (verticalList) {
+    const next = (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + entries.length) % entries.length;
+    target = entries[next].element;
+  } else {
+    const rowIndex = rows.findIndex((row) => row.items.some((item) => item.element === card));
+    if (rowIndex < 0) return false;
+    if ((event.key === "ArrowUp" || event.key === "ArrowDown") && rows.length < 2) return false;
+    const row = rows[rowIndex];
+    const itemIndex = row.items.findIndex((item) => item.element === card);
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      const direction = event.key === "ArrowRight" ? 1 : -1;
+      const sameRowIndex = itemIndex + direction;
+      if (sameRowIndex >= 0 && sameRowIndex < row.items.length) {
+        target = row.items[sameRowIndex].element;
+      } else {
+        const nextRowIndex = (rowIndex + direction + rows.length) % rows.length;
+        const nextRow = rows[nextRowIndex];
+        target = direction > 0 ? nextRow.items[0].element : nextRow.items[nextRow.items.length - 1].element;
+      }
+    } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const nextRowIndex = (rowIndex + direction + rows.length) % rows.length;
+      const currentX = entries[currentIndex].x;
+      target = rows[nextRowIndex].items.reduce((best, item) => Math.abs(item.x - currentX) < Math.abs(best.x - currentX) ? item : best).element;
+    }
+  }
+
+  if (target === card) return false;
+  const trigger = cardArrowNavigationTarget(target);
+  if (!trigger) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  if (target.matches(".avatar-card") && target.tabIndex < 0) target.tabIndex = -1;
+  target.focus({ preventScroll: true });
+  rememberCardNavigation(target, { keyboardFocus: true });
+  trigger.click();
+  const identity = context.isAvatar ? target.dataset.avatarId : context.isFriend ? target.dataset.friendId : target.dataset.worldId;
+  const dataAttribute = context.isAvatar ? "avatarId" : context.isFriend ? "friendId" : "worldId";
+  requestAnimationFrame(() => {
+    const replacement = [...context.scrollRoot.querySelectorAll(context.selector)]
+      .find((item) => item.dataset[dataAttribute] === identity);
+    if (!replacement) return;
+    if (replacement.matches(".avatar-card") && replacement.tabIndex < 0) replacement.tabIndex = -1;
+    replacement.focus({ preventScroll: true });
+    rememberCardNavigation(replacement, { keyboardFocus: true });
+    const refreshedContext = cardNavigationContext(replacement);
+    const refreshedEntries = cardNavigationEntries(refreshedContext);
+    const focusedEntry = refreshedEntries.find((entry) => entry.element === replacement);
+    if (!focusedEntry) return;
+    const focusedRows = cardNavigationRows(refreshedEntries);
+    const focusedRow = focusedRows.find((row) => row.items.includes(focusedEntry));
+    ensureCardNavigationRowVisible(refreshedContext.scrollRoot, focusedRow?.items || [focusedEntry]);
+  });
+  return true;
+}
+document.addEventListener("keydown", moveCardSelectionWithArrow, { capture: true });
 document.addEventListener("keydown", (event) => {
   if (keyScrollDuringDrag(event)) return;
   const active = document.activeElement;
@@ -16180,9 +16631,8 @@ $("copyGroupToExistingBtn").addEventListener("click", copyGroupToExisting);
 $("copyGroupTargetMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "copyGroupTargetInput", "copyGroupTargetMenu", "copyGroupTargetMenuBtn", () => {}));
 $("avatarDatabaseSearchInput").addEventListener("focus", showDatabaseSearchHistory);
 $("avatarDatabaseSearchInput").addEventListener("input", () => {
-  state.avatarDatabaseAuthorId = "";
-  state.avatarDatabaseExactAuthorName = false;
-  if (!$("avatarDatabaseSearchInput").value.trim() && avatarDatabaseCanBrowse()) {
+  updateDatabaseSearchClearButtons();
+  if (!$("avatarDatabaseSearchInput").value.trim() && !$("avatarDatabaseAuthorSearchInput").value.trim() && avatarDatabaseCanBrowse()) {
     hideDatabaseSearchHistory();
     void runAvatarDatabaseSearch(0);
     return;
@@ -16196,41 +16646,30 @@ $("avatarDatabaseSearchInput").addEventListener("keydown", (event) => {
   }
   if (event.key === "Enter") { event.preventDefault(); runAvatarDatabaseSearch(0); }
 });
+$("avatarDatabaseAuthorSearchInput").addEventListener("input", () => {
+  updateDatabaseSearchClearButtons();
+  state.avatarDatabaseAuthorId = "";
+  state.avatarDatabaseExactAuthorName = false;
+  if (!$("avatarDatabaseSearchInput").value.trim() && !$("avatarDatabaseAuthorSearchInput").value.trim() && avatarDatabaseCanBrowse()) {
+    void runAvatarDatabaseSearch(0);
+  }
+});
+$("avatarDatabaseAuthorSearchInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); runAvatarDatabaseSearch(0); }
+});
 $("databaseAvatarGroupMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "databaseAvatarGroupInput", "databaseAvatarGroupMenu", "databaseAvatarGroupMenuBtn", updateDatabaseAvatarGroupMenu));
 $("databaseAvatarGroupMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "databaseAvatarGroupInput", "databaseAvatarGroupMenuBtn", updateDatabaseAvatarGroupMenu), { passive: false });
 $("saveAvatarGroupMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "saveAvatarGroupInput", "saveAvatarGroupMenu", "saveAvatarGroupMenuBtn", updateSaveAvatarGroupMenu));
 $("saveAvatarGroupMenuBtn").addEventListener("wheel", (event) => cycleSortOption(event, "saveAvatarGroupInput", "saveAvatarGroupMenuBtn", updateSaveAvatarGroupMenu), { passive: false });
-$("addDatabaseAvatarDialog").addEventListener("click", (event) => {
-  if (event.target.closest(".dialog-select-control") || event.target.closest("#databaseAvatarGroupMenu")) return;
-  hideSortMenu("databaseAvatarGroupMenu", "databaseAvatarGroupMenuBtn");
-});
-$("saveAvatarGroupDialog").addEventListener("click", (event) => {
-  if (event.target.closest(".dialog-select-control") || event.target.closest("#saveAvatarGroupMenu")) return;
-  hideSortMenu("saveAvatarGroupMenu", "saveAvatarGroupMenuBtn");
-});
-document.addEventListener("click", (event) => {
-  if (event.target.closest("#addDatabaseAvatarDialog .dialog-select-control") || event.target.closest("#databaseAvatarGroupMenu")) return;
-  hideSortMenu("databaseAvatarGroupMenu", "databaseAvatarGroupMenuBtn");
-});
-document.addEventListener("click", (event) => {
-  if (event.target.closest("#saveAvatarGroupDialog .dialog-select-control") || event.target.closest("#saveAvatarGroupMenu")) return;
-  hideSortMenu("saveAvatarGroupMenu", "saveAvatarGroupMenuBtn");
-});
-document.addEventListener("click", (event) => {
-  if (event.target.closest("#copyGroupDialog .dialog-select-control")) return;
-  hideSortMenu("copyGroupTargetMenu", "copyGroupTargetMenuBtn");
-});
-document.addEventListener("click", (event) => {
-  if (event.target.closest(".profile-status-control")) return;
-  hideSortMenu("profileStatusMenu", "profileStatusMenuBtn");
-});
 $("databaseSearchHistoryMenu").addEventListener("mousedown", (event) => event.preventDefault());
 document.addEventListener("click", (event) => {
   if (event.target.closest(".database-search-history-wrap")) return;
   hideDatabaseSearchHistory();
 });
 $("worldSearchInput").addEventListener("focus", showWorldSearchHistory);
-$("worldSearchInput").addEventListener("input", showWorldSearchHistory);
+$("worldSearchInput").addEventListener("input", () => {
+  showWorldSearchHistory();
+});
 $("worldSearchInput").addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     hideWorldSearchHistory();
@@ -16246,11 +16685,15 @@ document.addEventListener("click", (event) => {
   if (event.target.closest(".world-search-history-wrap")) return;
   hideWorldSearchHistory();
 });
-$("searchAvatarDatabaseBtn").addEventListener("click", () => runAvatarDatabaseSearch(0));
-$("clearAvatarDatabaseBtn").addEventListener("click", (event) => {
+$("clearAvatarDatabaseQueryBtn").addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();
-  clearAvatarDatabaseSearch({ keepHistoryOpen: !$("databaseSearchHistoryMenu").hidden });
+  clearDatabaseSearchField("avatar");
+});
+$("clearAvatarDatabaseAuthorQueryBtn").addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  clearDatabaseSearchField("author");
 });
 $("avatarDatabaseProviderMenuBtn").addEventListener("click", (event) => toggleSortMenu(event, "avatarDatabaseProviderSelect", "avatarDatabaseProviderMenu", "avatarDatabaseProviderMenuBtn", () => {
   state.avatarDatabaseProvider = avatarDatabaseProvider();
@@ -16270,17 +16713,7 @@ $("avatarDatabaseProviderSelect").addEventListener("change", () => {
   if (avatarDatabaseCanBrowse()) void runAvatarDatabaseSearch(0);
   else cancelAvatarDatabaseRequests();
 });
-$("databaseSearchScopeControl").querySelectorAll("[data-database-scope]").forEach((button) => button.addEventListener("click", () => {
-  state.avatarDatabaseScope = button.dataset.databaseScope || "avatar";
-  state.avatarDatabaseAuthorId = "";
-  state.avatarDatabaseExactAuthorName = false;
-  if (state.avatarDatabaseScope === "avatar") $("databaseSearchDescriptionTagsToggle").checked = true;
-  updateDatabaseScopeControls();
-  updateDatabaseFieldMenuButton();
-}));
 ["databaseSearchDescriptionTagsToggle", "databasePlatformPcToggle", "databasePlatformAndroidToggle", "databasePlatformIosToggle"].forEach((id) => $(id).addEventListener("change", () => {
-  state.avatarDatabaseAuthorId = "";
-  state.avatarDatabaseExactAuthorName = false;
   updateDatabaseFieldMenuButton();
 }));
 $("databaseHideOlderAvatarsToggle").addEventListener("change", () => {
@@ -16288,7 +16721,7 @@ $("databaseHideOlderAvatarsToggle").addEventListener("change", () => {
   state.avatarDatabasePage = 0;
   resetAvatarDatabaseOlderFilterCache();
   updateDatabaseFieldMenuButton();
-  if ($("avatarDatabaseSearchInput").value.trim()) void runAvatarDatabaseSearch(0);
+  if ($("avatarDatabaseSearchInput").value.trim() || $("avatarDatabaseAuthorSearchInput").value.trim()) void runAvatarDatabaseSearch(0);
   else {
     renderAvatarDatabaseResults();
     updateAvatarDatabaseStatus();
@@ -16296,11 +16729,12 @@ $("databaseHideOlderAvatarsToggle").addEventListener("change", () => {
 });
 $("randomAvatarDatabaseBtn").addEventListener("click", runRandomAvatarDatabasePage);
 $("equipRandomAvatarBtn").addEventListener("click", () => equipRandomDatabaseAvatar().catch(() => {}));
-$("avatarRouletteBtn").addEventListener("click", () => openAvatarRouletteDialog('database'));
+$("avatarRouletteBtn").addEventListener("click", () => toggleAvatarRoulette('database'));
+$("avatarRouletteSettingsBtn").addEventListener("click", () => openAvatarRouletteDialog());
 $("equipRandomFavoriteBtn").addEventListener("click", () => equipRandomFavoriteAvatar().catch(() => {}));
-$("favRouletteBtn").addEventListener("click", () => openAvatarRouletteDialog('favorites'));
-$("startAvatarRouletteBtn").addEventListener("click", startAvatarRoulette);
-$("stopAvatarRouletteBtn").addEventListener("click", () => stopAvatarRoulette());
+$("favRouletteBtn").addEventListener("click", () => toggleAvatarRoulette('favorites'));
+$("favRouletteSettingsBtn").addEventListener("click", () => openAvatarRouletteDialog());
+$("saveAvatarRouletteSettingsBtn").addEventListener("click", saveAvatarRouletteSettings);
 $("databasePrevPageBtn").addEventListener("click", async () => {
   if (state.avatarDatabaseMode === "random") { state.avatarDatabasePage = Math.max(0, state.avatarDatabasePage - 1); renderAvatarDatabaseResults(); }
   else await runAvatarDatabaseSearch(Math.max(0, state.avatarDatabasePage - 1));
@@ -16678,7 +17112,6 @@ function dragHasJsonFile(event) {
 state.avatarDatabaseHideOlderAvatars = false;
 $("databaseHideOlderAvatarsToggle").checked = state.avatarDatabaseHideOlderAvatars;
 updateAvatarDatabaseCopy();
-updateDatabaseScopeControls();
 updateDatabaseFieldMenuButton();
 updateSortButton("databaseSearchMethodSelect", "databaseSearchMethodMenuBtn");
 updateSortButton("worldSearchMethodSelect", "worldSearchMethodMenuBtn");
@@ -16689,11 +17122,19 @@ Promise.all([loadLibrary(), loadSettings(), hydrateAppState()])
   .then(() => loadMessageHistory())
   .then(() => {
     state.activePage = "favorites";
+    $("avatarGrid").scrollTop = 0;
     renderFavoritesView();
+    state.initialViewReady = true;
     pushAppHistory();
-    requestAnimationFrame(applyGridSize);
+    requestAnimationFrame(() => {
+      applyGridSize();
+      requestAnimationFrame(() => {
+        $("avatarGrid").scrollTop = 0;
+        state.avatarGridInitialized = true;
+      });
+    });
     void loadBackground();
-    void loadSession();
+    void loadSession().catch((error) => toast(error.message));
     setTimeout(initializeDatabaseStartupStatus, 1200);
     setTimeout(checkStartupUpdateStatus, 2500);
   })

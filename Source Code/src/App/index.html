@@ -99,7 +99,10 @@
           <div class="toolbar-title"><h2 id="activeGroupName">Favorites</h2><div class="toolbar-status-row"><p id="activeGroupDescription"></p><span id="rouletteCountdownFav" class="roulette-countdown toolbar-countdown" hidden></span></div></div>
           <div class="toolbar-actions">
             <div class="toolbar-action-row">
-            <input id="searchInput" type="search" placeholder="Search avatars">
+            <div class="search-field-wrap toolbar-search-field-wrap">
+              <input id="searchInput" type="search" placeholder="Search avatars">
+              <button id="clearAvatarSearchBtn" class="search-field-clear" type="button" aria-label="Clear avatar search" title="Clear avatar search" disabled>Clear</button>
+            </div>
             <div class="sort-control">
               <button id="sortMenuBtn" type="button">Recently updated</button>
               <div id="sortMenu" class="sort-menu" hidden></div>
@@ -124,7 +127,10 @@
               <button id="applySyncedAvatarOrderBtn" class="primary" type="button" hidden>Save</button>
               <label id="syncedAvatarEditToggleWrap" class="edit-mode-toggle" hidden><input id="syncedAvatarEditToggle" type="checkbox"><span class="toggle-slider" aria-hidden="true"></span><span>Edit mode</span></label>
               <button id="equipRandomFavoriteBtn" type="button" class="primary" title="Equip a random favorite avatar">Equip Random</button>
-              <button id="favRouletteBtn" type="button" title="Favorite avatar roulette">Fav Roulette</button>
+              <span id="favRouletteControl" class="roulette-control">
+                <button id="favRouletteBtn" class="roulette-toggle" type="button" title="Favorite avatar roulette" aria-label="Start favorite roulette" aria-pressed="false">Fav Roulette</button>
+                <button id="favRouletteSettingsBtn" class="roulette-settings-button" type="button" aria-label="Favorite roulette timer settings" title="Roulette timer settings">⚙</button>
+              </span>
             </span>
             <label class="range-control">Columns<input id="gridSizeInput" type="range" min="3" max="10" value="10"><output id="gridSizeValue">10</output></label>
             </div>
@@ -139,15 +145,16 @@
           <div class="toolbar-title"><h2>Database Search</h2><div class="toolbar-status-row"><p id="avatarDatabaseStatus">Search AVTR.zip, Prismic PAS, and VRCX.</p><span id="rouletteCountdownDb" class="roulette-countdown toolbar-countdown" hidden></span></div></div>
           <div class="toolbar-actions database-toolbar-actions">
             <div class="toolbar-action-row">
-            <div class="database-search-history-wrap">
-              <input id="avatarDatabaseSearchInput" type="search" placeholder="Search all databases" autocomplete="off">
-              <div id="databaseSearchHistoryMenu" class="database-search-history-menu" hidden></div>
-            </div>
-            <button id="searchAvatarDatabaseBtn" type="button" class="primary">Search</button>
-            <button id="clearAvatarDatabaseBtn" type="button">Clear</button>
-            <div id="databaseSearchScopeControl" class="segmented-control database-search-scope" role="group" aria-label="Database search scope">
-              <button id="databaseScopeAvatarBtn" type="button" class="active" data-database-scope="avatar">Avatars</button>
-              <button id="databaseScopeAuthorBtn" type="button" data-database-scope="author">Authors</button>
+            <div class="database-search-inputs">
+              <div class="search-field-wrap database-search-field-wrap database-search-history-wrap">
+                <input id="avatarDatabaseSearchInput" type="search" placeholder="Search avatars" autocomplete="off">
+                <button id="clearAvatarDatabaseQueryBtn" class="search-field-clear" type="button" aria-label="Clear avatar search" title="Clear avatar search" disabled>Clear</button>
+                <div id="databaseSearchHistoryMenu" class="database-search-history-menu" hidden></div>
+              </div>
+              <div class="search-field-wrap database-search-field-wrap">
+                <input id="avatarDatabaseAuthorSearchInput" type="search" placeholder="Search authors" autocomplete="off">
+                <button id="clearAvatarDatabaseAuthorQueryBtn" class="search-field-clear" type="button" aria-label="Clear author search" title="Clear author search" disabled>Clear</button>
+              </div>
             </div>
             <div class="sort-control database-search-method-control">
               <button id="databaseSearchMethodMenuBtn" type="button">Match Phrase</button>
@@ -191,7 +198,10 @@
             <span class="toolbar-secondary-actions">
               <button id="randomAvatarDatabaseBtn" type="button" title="Random page" data-random-title="Random page">Random Page</button>
               <button id="equipRandomAvatarBtn" type="button" class="primary" title="Equip random avatar" data-random-title="Equip random avatar">Equip Random</button>
-              <button id="avatarRouletteBtn" type="button" title="Avatar roulette" data-random-title="Avatar roulette">Roulette</button>
+              <span class="roulette-control">
+                <button id="avatarRouletteBtn" class="roulette-toggle" type="button" title="Avatar roulette" data-random-title="Avatar roulette" aria-label="Start database roulette" aria-pressed="false">Roulette</button>
+                <button id="avatarRouletteSettingsBtn" class="roulette-settings-button" type="button" aria-label="Database roulette timer settings" title="Roulette timer settings">⚙</button>
+              </span>
             </span>
             <label class="range-control">Columns<input id="databaseGridSizeInput" type="range" min="3" max="10" value="10"><output id="databaseGridSizeValue">10</output></label>
             </div>
@@ -199,7 +209,7 @@
         </header>
         <section id="avatarDatabaseResults" class="avatar-grid"></section>
         <section id="avatarDatabaseEmptyState" class="empty-state" hidden><h3>No database results</h3><p>Search at least three characters to show matches.</p></section>
-        <footer id="avatarDatabasePagination" class="database-pagination" hidden><button id="databasePrevPageBtn" type="button">Previous</button><button id="databasePageStatus" class="page-jump-button" type="button"></button><button id="databaseNextPageBtn" type="button">Next</button></footer>
+        <footer id="avatarDatabasePagination" class="database-pagination" hidden><button id="databasePrevPageBtn" type="button">Previous</button><button id="databasePageStatus" class="page-jump-button" type="button" aria-live="polite"><span id="databasePageLabel"></span><span id="databasePageLoadingStatus" class="database-page-loading-status" aria-live="polite"></span></button><button id="databaseNextPageBtn" type="button">Next</button></footer>
       </section>
       <section id="friendsPage" class="workspace-page social-page" hidden>
         <header class="toolbar">
@@ -221,12 +231,12 @@
           <div class="toolbar-title"><h2>Worlds</h2><div class="toolbar-status-row"><p id="worldSocialStatus">Search and inspect VRChat worlds.</p></div></div>
           <div class="toolbar-actions world-toolbar-actions">
             <div class="toolbar-action-row">
-            <div class="world-search-history-wrap">
+            <div class="search-field-wrap world-search-field-wrap world-search-history-wrap">
               <input id="worldSearchInput" type="search" placeholder="Search worlds" autocomplete="off">
+              <button id="clearWorldSearchBtn" class="search-field-clear" type="button" aria-label="Clear world search" title="Clear world search">Clear</button>
               <div id="worldSearchHistoryMenu" class="database-search-history-menu" hidden></div>
             </div>
             <button id="worldSearchBtn" type="button" class="primary">Search Worlds</button>
-            <button id="clearWorldSearchBtn" type="button">Clear</button>
             <div class="sort-control world-search-method-control">
               <button id="worldSearchMethodMenuBtn" type="button">Match Phrase</button>
               <div id="worldSearchMethodMenu" class="sort-menu" hidden></div>
@@ -476,13 +486,13 @@
     <menu><button type="button" data-close="positionDialog">Cancel</button><button id="confirmPositionBtn" class="primary">Move</button></menu>
   </form></dialog>
   <dialog id="avatarRouletteDialog"><form method="dialog" class="dialog-form">
-    <header><h3>Avatar Roulette</h3><button type="button" class="icon-button" data-close="avatarRouletteDialog">x</button></header>
-    <p id="avatarRouletteStatus" class="dialog-note">Equip a random favorite avatar on a timer.</p>
+    <header><h3>Roulette Timer</h3><button type="button" class="icon-button" data-close="avatarRouletteDialog">x</button></header>
+    <p id="avatarRouletteStatus" class="dialog-note">Roulette is stopped.</p>
     <div class="form-grid">
       <label>Minutes<input id="avatarRouletteMinutesInput" type="number" min="0" step="1" value="1"></label>
       <label>Seconds<input id="avatarRouletteSecondsInput" type="number" min="0" max="59" step="1" value="0"></label>
     </div>
-    <menu><button id="stopAvatarRouletteBtn" type="button" class="danger">Stop</button><button type="button" data-close="avatarRouletteDialog">Cancel</button><button id="startAvatarRouletteBtn" type="button" class="primary">Start</button></menu>
+    <menu><button type="button" data-close="avatarRouletteDialog">Cancel</button><button id="saveAvatarRouletteSettingsBtn" type="button" class="primary">Save</button></menu>
   </form></dialog>
 
   <dialog id="customizationDialog" class="settings-dialog"><form method="dialog" class="dialog-form">
